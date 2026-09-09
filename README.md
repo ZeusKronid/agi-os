@@ -1,98 +1,106 @@
 # AGI OS
 
-Arch Linux live с XFCE, Firefox и Codex. После загрузки автоматически открываются
-рабочий стол, браузер и терминал агента. Пользователь подключается к сети, входит
-в Codex **в браузере этой же live-системы** и описывает, что хочет установить.
+An Arch Linux live system with XFCE, Firefox, and Codex. The desktop, browser,
+and agent terminal open automatically after boot. Connect to the network, sign
+in to Codex **using the browser inside the live system**, and describe what you
+want to install.
 
-Агент сам определяет оборудование, выбирает вместе с пользователем окружение,
-файловую систему, загрузчик и программы, затем устанавливает их обычными командами
-Linux. XFCE нужен для live-сеанса: он не задаёт окружение устанавливаемой системы.
-Собственного движка установки, формата планов или репозитория пакетов нет.
-Все пакеты образа берутся из официальных Arch Core/Extra.
+The agent inspects the hardware, works with you to choose the desktop,
+filesystem, bootloader, and applications, then installs them using standard
+Linux commands. XFCE provides the live environment; it does not determine the
+desktop of the installed system. There is no custom installation engine,
+installation plan format, or package repository. All packages in the image come
+from the official Arch Core and Extra repositories.
 
-## Посмотреть в виртуальной машине
+## Try it in a virtual machine
 
-На хосте нужны `qemu-system-x86`, `qemu-ui-gtk` и `qemu-img`:
+The host needs `qemu-system-x86`, `qemu-ui-gtk`, and `qemu-img`:
 
 ```sh
 ./scripts/run-vm.sh
-# Или указать другой ISO:
-./scripts/run-vm.sh /путь/к/agi-os.iso
+# Or specify another ISO:
+./scripts/run-vm.sh /path/to/agi-os.iso
 ```
 
-Скрипт открывает окно QEMU: 4 ГБ RAM, 4 CPU, интернет через NAT и отдельный
-виртуальный диск `vm/agi-os-desktop.qcow2` ёмкостью 64 ГБ, растущий по мере записи.
-Повторный запуск сохраняет диск. Диски хоста в VM не подключаются.
-Освободить мышь и клавиатуру: **Ctrl+Alt+G**.
-После перезагрузки внутри VM загрузка переключается на виртуальный диск;
-новый запуск скрипта снова загружает ISO.
+The script opens a QEMU window with 4 GB of RAM, 4 CPUs, NAT networking, and a
+separate 64 GB virtual disk at `vm/agi-os-desktop.qcow2`. The disk image grows as
+data is written and persists between runs. Host disks are not attached to the VM.
+Release the mouse and keyboard with **Ctrl+Alt+G**.
+Rebooting inside the VM switches booting to the virtual disk; starting the script
+again boots the ISO.
 
-## Вход и установка
+## Sign in and install
 
-1. Дождаться автоматического входа в XFCE под пользователем `agi`.
-2. Подключиться через значок сети на панели. Ethernet использует DHCP.
-3. В открывшемся терминале Codex выбрать **Sign in with ChatGPT**.
-4. Пройти вход в Firefox внутри live-системы и вернуться в терминал.
-5. Описать желаемую систему. Агент выполнит установку.
+1. Wait for automatic login to XFCE as the `agi` user.
+2. Connect using the network icon on the panel. Ethernet uses DHCP.
+3. Select **Sign in with ChatGPT** in the Codex terminal.
+4. Sign in using Firefox inside the live system, then return to the terminal.
+5. Describe the system you want. The agent performs the installation.
 
-Повторный запуск: меню приложений → System → Codex или команда `codex`.
-Для явного запуска авторизации можно выполнить `codex login`.
-Браузер и Codex работают от одного пользователя, в одной машине; обратный запрос
-авторизации на localhost возвращается в тот же Codex.
+To reopen the agent, use Applications → System → Codex or run `codex`.
+Run `codex login` to start authentication explicitly.
+The browser and Codex run as the same user on the same machine, so the localhost
+callback returns to the same Codex instance.
 
-В live-сеансе `agi` может выполнять `sudo` без пароля для установки системы.
-Учётных данных в ISO нет. Сессия живёт во временной файловой системе;
-перезагрузка live-среды сбрасывает вход и несохранённые изменения.
-Эти настройки live-сеанса не являются шаблоном безопасности установленной системы.
+In the live session, `agi` can run `sudo` without a password to install the system.
+The ISO contains no credentials. The session uses a temporary filesystem;
+rebooting the live environment clears authentication and unsaved changes.
+These live session settings are not a security template for the installed system.
 
-## Сборка
+## Build
 
-На актуальной Arch Linux или совместимой x86-64 системе:
+On an up-to-date Arch Linux or compatible x86-64 system:
 
 ```sh
 sudo pacman -S --needed archiso
 sudo mkarchiso -v -w "$PWD/work/desktop" -o "$PWD/out" "$PWD/archiso"
 ```
 
-Нужны интернет, root для сборочных mount/chroot и место для пакетов, рабочего
-дерева и ISO. Результат: `out/agi-os-desktop-<дата>-x86_64.iso`.
-Для новой сборки после правок используйте новый пустой рабочий каталог через `-w`:
-Archiso сохраняет маркеры выполненных этапов.
+Building requires internet access, root privileges for mount/chroot operations,
+and space for packages, the working directory, and the ISO.
+Output: `out/agi-os-desktop-<date>-x86_64.iso`.
+When rebuilding after changes, use a new, empty working directory with `-w`:
+Archiso keeps markers for completed build stages.
 
-`archiso/pacman.conf` подключает только `core` и `extra`; список репозиториев хоста
-не наследуется. `openai-codex` устанавливается из Extra без npm и AUR.
-Версии пакетов зависят от состояния зеркал Arch на момент сборки.
+`archiso/pacman.conf` enables only `core` and `extra`; the host's repository
+configuration is not inherited. `openai-codex` is installed from Extra without
+npm or the AUR. Package versions depend on the state of the Arch mirrors at
+build time.
 
-## Проверки
+## Validation
 
-Предыдущий терминальный прототип проверен в QEMU/KVM: BIOS/UEFI, DHCP, HTTPS,
-запуск Codex 0.153.4. В UEFI наблюдалась ошибка `systemd-loop@…sr0.service`:
-`systemd-dissect` сообщал `No suitable partitions found` для виртуального CD-ROM;
-она не помешала загрузке.
-Графический ISO от 2026-09-09 собран и проверен в QEMU/KVM BIOS: автоматический
-вход в XFCE, автозапуск Firefox и Codex, открытие страницы входа OpenAI в Firefox
-по выбору «Sign in with ChatGPT» в Codex. Размер образа — около 1,8 ГБ.
-Авторизация в пользовательском аккаунте и полная диалоговая установка на диск
-проверяются пользователем. Secure Boot, PXE и автоматическое восстановление
-после неудачной установки пока не заявлены.
+The earlier terminal prototype was tested in QEMU/KVM for BIOS/UEFI boot, DHCP,
+HTTPS, and Codex 0.153.4 startup. UEFI showed a `systemd-loop@…sr0.service` error:
+`systemd-dissect` reported `No suitable partitions found` for the virtual CD-ROM.
+This did not prevent booting.
 
-## Дальше
+The graphical ISO built on 2026-09-09 was tested in QEMU/KVM with BIOS boot:
+automatic XFCE login, Firefox and Codex startup, and opening the OpenAI login
+page in Firefox after selecting **Sign in with ChatGPT** in Codex. The image
+is approximately 1.8 GB.
 
-- Пройти установку через диалог и проверить загрузку полученной системы.
-- Добавить другие агентные CLI по результатам испытаний.
-- Развивать AGI Assistant для работы с агентом после установки.
+Authentication with a user account and a full installation through conversation
+remain to be tested by the user. Secure Boot, PXE, and automatic recovery from
+failed installations are not currently claimed as supported.
 
-## Основа
+## Next steps
 
-Профиль основан на `releng` из Archiso 90-1. Используются штатные механизмы Archiso
-для загрузки и ключей pacman; графический вход — LightDM, сеть — NetworkManager.
+- Complete an installation through conversation and verify that the installed system boots.
+- Add other agent CLIs based on testing results.
+- Develop AGI Assistant for working with an agent after installation.
+
+## Upstream projects
+
+The profile is based on `releng` from Archiso 90-1. It uses standard Archiso
+boot and pacman keyring mechanisms, LightDM for graphical login, and
+NetworkManager for networking.
 
 - [Archiso](https://github.com/archlinux/archiso).
 - [EndeavourOS ISO](https://github.com/endeavouros-team/EndeavourOS-ISO).
 - [CachyOS Live ISO](https://github.com/CachyOS/CachyOS-Live-ISO).
-- [Codex в Arch Extra](https://archlinux.org/packages/extra/x86_64/openai-codex/).
-- [Авторизация Codex](https://learn.chatgpt.com/docs/auth).
+- [Codex in Arch Extra](https://archlinux.org/packages/extra/x86_64/openai-codex/).
+- [Codex authentication](https://learn.chatgpt.com/docs/auth).
 
-Лицензия проекта — Apache-2.0, см. `LICENSE`. Профиль в `archiso/`, основанный
-на Archiso, сохраняет GPL-3.0-or-later; см. `archiso/LICENSE`.
-Пакеты внутри ISO сохраняют собственные лицензии.
+The project license is Apache-2.0; see `LICENSE`. The Archiso-derived profile
+in `archiso/` retains GPL-3.0-or-later; see `archiso/LICENSE`.
+Packages inside the ISO retain their own licenses.
