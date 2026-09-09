@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=AGI OS Welcome
+Exec=firefox file:///usr/local/share/agi-os/welcome.html
+Terminal=false
