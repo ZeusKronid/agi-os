@@ -1,0 +1,2 @@
+# The live installer agent manages the target system through normal sudo commands.
+agi ALL=(ALL:ALL) NOPASSWD: ALL

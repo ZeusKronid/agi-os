@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Codex
+Comment=Describe the system you want to install
+Exec=xfce4-terminal --title=Codex --working-directory=/home/agi --hold --command=codex
+Icon=utilities-terminal
+Terminal=false
+Categories=System;
