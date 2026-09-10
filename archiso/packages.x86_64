@@ -2,6 +2,7 @@ amd-ucode
 arch-install-scripts
 base
 btrfs-progs
+bubblewrap
 cryptsetup
 curl
 diffutils
@@ -16,6 +17,7 @@ firefox
 git
 gptfdisk
 grml-zsh-config
+gtk3
 intel-ucode
 iw
 iwd
@@ -42,6 +44,7 @@ openssh
 parted
 pciutils
 python
+python-gobject
 ripgrep
 rsync
 smartmontools

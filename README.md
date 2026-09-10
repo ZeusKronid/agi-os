@@ -1,106 +1,168 @@
 # AGI OS
 
-An Arch Linux live system with XFCE, Firefox, and Codex. The desktop, browser,
-and agent terminal open automatically after boot. Connect to the network, sign
-in to Codex **using the browser inside the live system**, and describe what you
-want to install.
+An Arch Linux live system that opens **AGI OS Installer**, our own application,
+after boot. Choose an LLM provider, connect your account or API, and describe the
+system you want. The application preserves the eight installation stages while
+using a conversation for preferences and decisions.
 
-The agent inspects the hardware, works with you to choose the desktop,
-filesystem, bootloader, and applications, then installs them using standard
-Linux commands. XFCE provides the live environment; it does not determine the
-desktop of the installed system. There is no custom installation engine,
-installation plan format, or package repository. All packages in the image come
-from the official Arch Core and Extra repositories.
+## Installation flow
 
-## Try it in a virtual machine
+1. Boot the live environment and connect a provider.
+2. Describe your requirements; choose suggestions or propose your own options.
+3. Agree on the destination disk and storage layout.
+4. Review the complete configuration and explicitly authorize disk changes.
+5. Install the base system and selected packages.
+6. Configure boot, accounts, networking, and the requested environment.
+7. Shut down, disconnect the ISO, and boot from the installed disk.
+8. Verify first use, the agreed requirements, and persistence across another boot.
 
-The host needs `qemu-system-x86`, `qemu-ui-gtk`, and `qemu-img`:
+The [flow specification](archiso/airootfs/usr/local/share/agi-os/installation-flow.md)
+and [acceptance tests](docs/installation-testing.md) describe each stage.
+
+Desktop and window-manager choices are open: there is no KDE/GNOME/XFCE enum or
+fixed installation profile. The assistant searches the official Core and Extra
+package catalog and proposes packages, services, sessions, and configuration files.
+It can help with Hyprland, Sway, i3, Cinnamon, MATE, LXQt, other available
+environments, or a system without graphics. Package availability is checked;
+compatibility and a working final configuration still require acceptance testing.
+XFCE is only the live desktop.
+
+## Connect a provider
+
+- **ChatGPT account:** sign in through the browser inside the live system. The
+  application uses the [official Codex app-server](https://learn.chatgpt.com/docs/app-server)
+  as an isolated conversation backend. It does not open the Codex terminal UI.
+- **OpenAI API:** API key and selectable model, using the
+  [Responses API with structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+- **Anthropic / Claude API:** API key and selectable model, using
+  [Messages and tool responses](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview).
+- **Google Gemini API:** API key through its
+  [OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai).
+- **Ollama:** local model with
+  [structured outputs](https://docs.ollama.com/capabilities/structured-outputs).
+- **Other OpenAI-compatible APIs:** custom endpoint, optional API key, and model.
+  The service must support chat completions with JSON-schema structured outputs.
+
+The application loads available models and also accepts a model identifier typed
+by the user. Account/model availability depends on the provider. Claude and Gemini
+connections currently use API keys; their consumer subscription login is not
+implemented. API usage can be billed separately from chat subscriptions.
+
+API keys stay in application memory and are not added to model messages or reports.
+The ChatGPT backend runs in bubblewrap with an ephemeral home and private /dev;
+it cannot access host disks or import an existing Codex home. Closing it discards
+its local login state. Passwords for the installed user are entered in a private
+confirmation dialog and passed to the local worker over stdin, never to the LLM.
+No provider credentials are copied to the installed system.
+
+## What executes an installation
+
+The LLM proposes structured choices. The native Python/GTK application validates
+those choices, checks packages, shows the actual disk identity and complete review,
+and starts a separate privileged worker only after confirmation. A new proposal
+invalidates the old review. The model has no disk-writing or arbitrary shell tool.
+
+The worker rechecks disk identity and rejects busy/read-only disks. It runs only
+inside a booted Archiso live environment, uses ordinary Linux installation tools,
+and reports failures and cancellation without claiming success. The live `agi`
+user currently has passwordless sudo; that live policy is not installed on the
+new system. The target gets a normal user with password-protected sudo and a locked
+root password.
+
+Current storage handlers implement **whole-disk GPT installation**, an unencrypted
+root filesystem (ext4, Btrfs, XFS, or F2FS), a separate boot partition, and GRUB
+(BIOS/UEFI) or systemd-boot (UEFI). There is currently no encryption, swap,
+partition-preservation, or dual-boot handler. Such requests must be explained and
+renegotiated before a supported proposal is offered; the app must not silently
+omit requirements. These implementation boundaries are separate from the open
+choice of environments and applications.
+
+After installation, `agi-os-verify --gui` or `agi-os-verify` checks the installed
+root, account, packages, settings, services, and persistence. The GUI is registered
+with XDG autostart and the applications menu; compositors without XDG autostart
+need manual launch. The user confirms their actual application workflows; a
+second boot is required before full acceptance. There is no automatic LLM
+continuation after reboot.
+
+## Try the interface locally
+
+On Arch-compatible hosts, the interface needs `python-gobject` and `gtk3`:
 
 ```sh
-./scripts/run-vm.sh
-# Or specify another ISO:
-./scripts/run-vm.sh /path/to/agi-os.iso
+./scripts/run-installer.sh --demo
 ```
 
-The script opens a QEMU window with 4 GB of RAM, 4 CPUs, NAT networking, and a
-separate 64 GB virtual disk at `vm/agi-os-desktop.qcow2`. The disk image grows as
-data is written and persists between runs. Host disks are not attached to the VM.
-Release the mouse and keyboard with **Ctrl+Alt+G**.
-Rebooting inside the VM switches booting to the virtual disk; starting the script
-again boots the ISO.
+Demo mode uses fake responses and a fake disk and never connects to an LLM or
+writes disks. Its screens and simulated installation are explicitly labelled.
+Without `--demo`, provider conversations work, but the disk worker refuses to run
+outside the live environment.
 
-## Sign in and install
+## Build the ISO
 
-1. Wait for automatic login to XFCE as the `agi` user.
-2. Connect using the network icon on the panel. Ethernet uses DHCP.
-3. Select **Sign in with ChatGPT** in the Codex terminal.
-4. Sign in using Firefox inside the live system, then return to the terminal.
-5. Describe the system you want. The agent performs the installation.
-
-To reopen the agent, use Applications → System → Codex or run `codex`.
-Run `codex login` to start authentication explicitly.
-The browser and Codex run as the same user on the same machine, so the localhost
-callback returns to the same Codex instance.
-
-In the live session, `agi` can run `sudo` without a password to install the system.
-The ISO contains no credentials. The session uses a temporary filesystem;
-rebooting the live environment clears authentication and unsaved changes.
-These live session settings are not a security template for the installed system.
-
-## Build
-
-On an up-to-date Arch Linux or compatible x86-64 system:
+On an up-to-date Arch-compatible x86-64 system:
 
 ```sh
 sudo pacman -S --needed archiso
-sudo mkarchiso -v -w "$PWD/work/desktop" -o "$PWD/out" "$PWD/archiso"
+sudo mkarchiso -v -w "$PWD/work/installer-build" -o "$PWD/out" "$PWD/archiso"
 ```
 
-Building requires internet access, root privileges for mount/chroot operations,
-and space for packages, the working directory, and the ISO.
-Output: `out/agi-os-desktop-<date>-x86_64.iso`.
-When rebuilding after changes, use a new, empty working directory with `-w`:
-Archiso keeps markers for completed build stages.
+Use a new, empty work directory for each build. Archiso keeps completed-stage
+markers. Building needs internet, root for mount/chroot operations, and disk space.
+The profile enables only official `core` and `extra` repositories. Output:
+`out/agi-os-desktop-<date>-x86_64.iso`. Existing images from 2026-09-09 predate this
+application and cannot test it.
 
-`archiso/pacman.conf` enables only `core` and `extra`; the host's repository
-configuration is not inherited. `openai-codex` is installed from Extra without
-npm or the AUR. Package versions depend on the state of the Arch mirrors at
-build time.
+## Test in QEMU/KVM
 
-## Validation
+The host needs `qemu-system-x86`, `qemu-ui-gtk`, `qemu-img`, and `edk2-ovmf`.
+For `--gl`, also install `qemu-hw-display-virtio-vga-gl`. Ordinary boot checks use
+standard VGA so the base QEMU packages are sufficient.
 
-The earlier terminal prototype was tested in QEMU/KVM for BIOS/UEFI boot, DHCP,
-HTTPS, and Codex 0.153.4 startup. UEFI showed a `systemd-loop@…sr0.service` error:
-`systemd-dissect` reported `No suitable partitions found` for the virtual CD-ROM.
-This did not prevent booting.
+```sh
+# New scenario: UEFI, 4 CPUs, 6 GiB RAM, 64 GiB virtual disk, NAT.
+./scripts/run-vm.sh --name first-install
+# Once installation has shut down, boot the same disk without any ISO:
+./scripts/run-vm.sh --name first-install --mode disk
+# Independent BIOS scenario:
+./scripts/run-vm.sh --name bios-install --firmware bios
+# Optional accelerated VirtIO graphics for compositors that need it:
+./scripts/run-vm.sh --name compositor-install --gl
+```
 
-The graphical ISO built on 2026-09-09 was tested in QEMU/KVM with BIOS boot:
-automatic XFCE login, Firefox and Codex startup, and opening the OpenAI login
-page in Firefox after selecting **Sign in with ChatGPT** in Codex. The image
-is approximately 1.8 GB.
+Use `--iso /path/to/image.iso` for an exact artifact. Otherwise install mode selects
+the newest desktop ISO by filename. Each scenario has its own disk and persistent
+UEFI variables under `vm/<name>/`. Existing disks are never overwritten; use a new
+name for a fresh scenario. Host disks/directories are not attached. `--headless`
+is available for automated boot checks; a local QMP socket is placed in the scenario
+directory. Release captured input with **Ctrl+Alt+G**.
 
-Authentication with a user account and a full installation through conversation
-remain to be tested by the user. Secure Boot, PXE, and automatic recovery from
-failed installations are not currently claimed as supported.
+For Ollama on the QEMU host, use `http://10.0.2.2:11434` and configure the host's
+Ollama listener to accept that connection. Inside the VM, `localhost` means the VM.
 
-## Next steps
+## Development checks and validation status
 
-- Complete an installation through conversation and verify that the installed system boots.
-- Add other agent CLIs based on testing results.
-- Develop AGI Assistant for working with an agent after installation.
+```sh
+python -B -m unittest discover -s tests -v
+GDK_BACKEND=x11 python -B tests/gui_smoke.py
+```
 
-## Upstream projects
+Unit checks exercise open environment choices, input validation, consent
+invalidation, provider response adapters, host-write refusal, installation ordering,
+and failure handling with a fake executor. The GTK smoke test uses the demo
+backend. These checks do not establish a successful real installation or paid
+provider conversation. See the acceptance guide for recording real results.
 
-The profile is based on `releng` from Archiso 90-1. It uses standard Archiso
-boot and pacman keyring mechanisms, LightDM for graphical login, and
-NetworkManager for networking.
+The new native application was boot-tested in QEMU/KVM with UEFI, and the
+ChatGPT login page was reached inside the VM. The unit and GTK checks pass.
+See the [validation record](docs/test-results/2026-09-10-installer-smoke.md).
+Full provider-login and installation acceptance remain pending. Secure Boot, physical GPU/Wi-Fi support, and unattended recovery are not
+claimed as tested.
 
-- [Archiso](https://github.com/archlinux/archiso).
-- [EndeavourOS ISO](https://github.com/endeavouros-team/EndeavourOS-ISO).
-- [CachyOS Live ISO](https://github.com/CachyOS/CachyOS-Live-ISO).
-- [Codex in Arch Extra](https://archlinux.org/packages/extra/x86_64/openai-codex/).
-- [Codex authentication](https://learn.chatgpt.com/docs/auth).
+## Upstream and license
 
-The project license is Apache-2.0; see `LICENSE`. The Archiso-derived profile
-in `archiso/` retains GPL-3.0-or-later; see `archiso/LICENSE`.
-Packages inside the ISO retain their own licenses.
+The live profile derives from [Archiso](https://github.com/archlinux/archiso)
+releng 90-1. It uses LightDM, XFCE and NetworkManager. `openai-codex` comes from
+Arch Extra and is retained for the ChatGPT backend and optional diagnostics.
+
+The project is Apache-2.0 (`LICENSE`). The Archiso-derived profile in `archiso/`
+retains GPL-3.0-or-later (`archiso/LICENSE`). Packages in the ISO retain their licenses.

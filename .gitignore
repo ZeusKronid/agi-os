@@ -2,3 +2,5 @@
 /out/
 /vm/
 *.iso
+__pycache__/
+*.py[cod]
