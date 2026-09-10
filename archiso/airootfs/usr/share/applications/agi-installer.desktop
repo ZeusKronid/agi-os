@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AGI OS Installer
+Comment=Choose your LLM and install the system you describe
+Exec=agi-installer
+Icon=system-software-install
+Terminal=false
+Categories=System;

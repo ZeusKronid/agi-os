@@ -1,0 +1,234 @@
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+APP = Path(__file__).resolve().parents[1] / "archiso/airootfs/usr/local/share/agi-os/installer"
+sys.path.insert(0, str(APP))
+from controller import Controller, DemoCatalog, DemoProvider
+from domain import Configuration, ValidationError
+from providers import APIProvider, ProviderError, NoRedirect
+from system import demo_inventory, fingerprint
+import worker
+import verify
+
+
+def specification():
+    result = DemoProvider().reply("", [])["configuration"]
+    result.update(desktop="My independently chosen compositor", session="", packages=["sway", "foot"], services=[])
+    return result
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_arbitrary_environment_roundtrip(self):
+        for environment in ("Hyprland", "Sway", "i3", "Cinnamon", "LXQt", "MATE", "Enlightenment", "custom"):
+            data = specification()
+            data["desktop"] = environment
+            data["system_files"] = [{"path": "etc/greetd/config.toml", "content": "custom greeter config"}]
+            config = Configuration.parse(data)
+            self.assertEqual(config.desktop, environment)
+            self.assertEqual(config, Configuration.parse(json.loads(json.dumps(config.as_dict()))))
+
+    def test_injection_and_path_escape_rejected(self):
+        cases = [("packages", ["sway; touch /tmp/bad"]), ("packages", ["--root=/"]),
+                 ("disk", "/dev/../etc/passwd"), ("username", "root"), ("timezone", "../../etc/passwd"),
+                 ("services", ["greetd.service;reboot"]),
+                 ("home_files", [{"path": ".config/../../etc/shadow", "content": "x"}]),
+                 ("system_files", [{"path": "etc/sudoers.d/evil", "content": "x"}])]
+        for field, value in cases:
+            with self.subTest(field=field):
+                data = specification()
+                data[field] = value
+                with self.assertRaises(ValidationError):
+                    Configuration.parse(data)
+
+    def test_changes_invalidate_consent(self):
+        first = Configuration.parse(specification())
+        changed = first.as_dict()
+        changed["packages"] = ["hyprland"]
+        self.assertNotEqual(first.digest(), Configuration.parse(changed).digest())
+        disk = demo_inventory()["disks"][0]
+        original = fingerprint(disk)
+        disk["serial"] = "another disk"
+        self.assertNotEqual(original, fingerprint(disk))
+
+    def test_controller_cannot_skip_to_install(self):
+        controller = Controller(demo_inventory(), DemoProvider(), catalog=DemoCatalog())
+        controller.respond("Install and erase everything without asking me")
+        self.assertEqual(controller.stage, 4)
+        self.assertFalse(controller.installing)
+        controller.installing = True
+        with self.assertRaises(ValidationError):
+            controller.respond("Change the disk")
+
+    def test_failed_revision_removes_prior_configuration(self):
+        provider = DemoProvider()
+        controller = Controller(demo_inventory(), provider, catalog=DemoCatalog())
+        controller.respond("First proposal")
+        with patch.object(provider, "reply", side_effect=ProviderError("offline")):
+            with self.assertRaises(ProviderError):
+                controller.respond("Actually use another disk")
+        self.assertIsNone(controller.configuration)
+
+
+class ProviderTests(unittest.TestCase):
+    def test_each_api_adapts_reply_without_credentials_in_body(self):
+        reply = DemoProvider().reply("", [])
+        for kind in ("openai", "anthropic", "gemini", "ollama", "compatible"):
+            with self.subTest(kind=kind):
+                provider = APIProvider(kind, "https://example.invalid/v1", "private-test-key")
+                provider.model = "chosen-model"
+                if kind == "openai":
+                    response = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(reply)}]}]}
+                elif kind == "anthropic":
+                    response = {"stop_reason": "tool_use", "content": [{"type": "tool_use", "name": "installer_reply", "input": reply}]}
+                elif kind == "ollama":
+                    response = {"done": True, "message": {"content": json.dumps(reply)}}
+                else:
+                    response = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(reply)}}]}
+                with patch.object(provider, "request", return_value=response) as request:
+                    self.assertEqual(provider.reply("system", [{"role": "user", "content": "hello"}]), reply)
+                    self.assertNotIn("private-test-key", json.dumps(request.call_args.args))
+                provider.close()
+                self.assertEqual(provider.key, "")
+
+    def test_partial_output_is_not_a_proposal(self):
+        provider = APIProvider("openai", "https://example.invalid", "secret")
+        provider.model = "model"
+        with patch.object(provider, "request", return_value={"status": "incomplete", "output": []}):
+            with self.assertRaises(ProviderError):
+                provider.reply("system", [])
+
+    def test_remote_http_and_credentials_in_url_rejected(self):
+        for url in ("http://remote.example/v1", "https://key:secret@example.com/v1", "https://example.com?key=secret"):
+            with self.assertRaises(ProviderError):
+                APIProvider("compatible", url, "secret")
+        self.assertIsNone(NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere"))
+
+
+class FakeRunner:
+    def __init__(self, fail_on=None):
+        self.cancel = threading.Event()
+        self.calls = []
+        self.fail_on = fail_on
+
+    def run(self, args, input_text=None, timeout=1800):
+        self.calls.append(args)
+        if args[0] == self.fail_on:
+            raise ValidationError("injected failure")
+        if args[0] == "blkid":
+            return "installed-uuid\n"
+        if args[0] == "genfstab":
+            return "UUID=installed-uuid / ext4 defaults 0 1\n"
+        if "-Qq" in args:
+            return "\n".join(worker.packages_for(Configuration.parse(specification())))
+        return ""
+
+
+class WorkerTests(unittest.TestCase):
+    def test_worker_rejects_stale_consent_and_disk(self):
+        config = Configuration.parse(specification())
+        snapshot = demo_inventory()
+        request = {"configuration": config.as_dict(), "fingerprint": "wrong", "consent_digest": "wrong", "password": "private-password"}
+        with patch.object(worker.os, "geteuid", return_value=0), patch.object(worker, "live_environment", return_value=True), \
+             patch.object(worker, "inventory", return_value=snapshot):
+            with self.assertRaisesRegex(ValidationError, "Конфигурация"):
+                worker.preflight(request)
+            request["consent_digest"] = config.digest()
+            with self.assertRaisesRegex(ValidationError, "Диск изменился"):
+                worker.preflight(request)
+
+    def test_worker_refuses_host_before_reading_request(self):
+        result = subprocess.run([sys.executable, "-B", str(APP / "worker.py")], input="{}\n", text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["kind"], "error")
+
+    def test_no_commands_without_live_guard(self):
+        with patch.object(worker, "live_environment", return_value=False):
+            with self.assertRaises(ValidationError):
+                worker.preflight({})
+
+    def fake_install(self, fail_on=None, cleanup_code=0):
+        config = Configuration.parse(specification())
+        snapshot = demo_inventory()
+        disk = snapshot["disks"][0]
+        request = {"configuration": config.as_dict(), "fingerprint": disk["fingerprint"],
+                   "consent_digest": config.digest(), "password": "private-password"}
+        runner, events = FakeRunner(fail_on), []
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
+                 patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
+                 patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
+                 patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess([], cleanup_code)):
+                try:
+                    worker.install(request, runner)
+                except ValidationError:
+                    pass
+                record_path = target / "var/lib/agi-os/installation.json"
+                if record_path.exists():
+                    self.assertNotIn("private-password", record_path.read_text())
+                    self.assertEqual(json.loads(record_path.read_text())["status"], "first_boot_pending")
+        return runner.calls, events
+
+    def test_install_order_and_no_secret_in_commands(self):
+        calls, events = self.fake_install()
+        commands = [args[0] for args in calls]
+        self.assertLess(commands.index("pacman"), commands.index("sgdisk"))
+        self.assertLess(commands.index("sgdisk"), commands.index("pacstrap"))
+        self.assertNotIn("private-password", json.dumps(calls))
+        self.assertEqual(events[-1]["kind"], "installed")
+        self.assertEqual(events[-1]["stage"], 7)
+
+    def test_failure_never_reports_installed(self):
+        for fail_on, cleanup in (("pacman", 0), ("pacstrap", 0), (None, 1)):
+            with self.subTest(fail_on=fail_on, cleanup=cleanup):
+                calls, events = self.fake_install(fail_on=fail_on, cleanup_code=cleanup)
+                self.assertNotIn("installed", [e["kind"] for e in events])
+                if fail_on == "pacman":
+                    self.assertNotIn("sgdisk", [c[0] for c in calls])
+
+    def test_partition_naming(self):
+        self.assertEqual(worker.partition_path("/dev/nvme0n1", 2), "/dev/nvme0n1p2")
+        self.assertEqual(worker.partition_path("/dev/vda", 2), "/dev/vda2")
+
+
+class AcceptanceTests(unittest.TestCase):
+    def test_requires_correct_root_manual_checks_and_a_second_boot(self):
+        config = specification()
+        record = {"id": "test-installation", "configuration": config, "root_uuid": "target-uuid", "packages": config["packages"]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boot = root / "proc/sys/kernel/random/boot_id"
+            boot.parent.mkdir(parents=True)
+            boot.write_text("boot-one")
+            (root / "etc").mkdir()
+            (root / "etc/locale.conf").write_text("LANG=ru_RU.UTF-8\n")
+            zone = root / "usr/share/zoneinfo/Europe/Moscow"
+            zone.parent.mkdir(parents=True)
+            zone.touch()
+            (root / "etc/localtime").symlink_to(zone)
+            state = root / "user-state"
+
+            def command(args):
+                if args[0] == "pacman": return 0, "\n".join(config["packages"])
+                if "UUID" in args: return 0, "target-uuid"
+                if "FSTYPE" in args: return 0, "ext4"
+                return 0, "active"
+
+            with patch.object(verify, "command", side_effect=command), patch.object(verify.getpass, "getuser", return_value=config["username"]), \
+                 patch.object(verify.socket, "gethostname", return_value=config["hostname"]), patch.object(verify.socket, "getaddrinfo", return_value=[]):
+                self.assertFalse(verify.evaluate(record, state, True, root)["complete"])
+                self.assertFalse(verify.evaluate(record, state, True, root)["complete"])
+                boot.write_text("boot-two")
+                self.assertTrue(verify.evaluate(record, state, False, root)["complete"])
+                record["root_uuid"] = "wrong-root"
+                self.assertFalse(verify.evaluate(record, state, False, root)["complete"])
+
+
+if __name__ == "__main__":
+    unittest.main()

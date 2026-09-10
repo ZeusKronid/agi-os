@@ -4,7 +4,7 @@
 iso_name="agi-os-desktop"
 iso_label="AGIOS_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="AGI OS"
-iso_application="AGI OS graphical live with Firefox and Codex"
+iso_application="AGI OS conversational installer"
 iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
 install_dir="arch"
 buildmodes=('iso')
@@ -20,4 +20,5 @@ file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
+  ["/usr/local/bin/agi-installer"]="0:0:755"
 )

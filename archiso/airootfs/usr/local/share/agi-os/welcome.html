@@ -1,19 +1,24 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AGI OS</title>
-<style>
-body { background:#111827; color:#e5e7eb; font:20px/1.6 sans-serif; max-width:760px; margin:8vh auto; padding:24px }
-h1 { color:#a7f3d0; font-size:48px } li { margin:20px 0 } code { color:#a7f3d0 }
-</style>
-<h1>AGI OS</h1>
-<p>Tell the agent what kind of system you want.</p>
+<style>body{background:#101722;color:#e3eaf3;font:20px/1.6 sans-serif;max-width:800px;margin:6vh auto;padding:24px}h1{color:#8ce0c4}li{margin:14px 0}</style>
+<h1>AGI OS Installer</h1>
+<p>Open <strong>AGI OS Installer</strong> from the applications menu, or run <code>agi-installer</code>.
+Choose your LLM provider, connect, and describe the system you want.</p>
+<p>Choose from suggestions, ask for a recommendation, or propose your own desktop,
+window manager, applications and settings.</p>
 <ol>
-<li>Connect to the internet using the network icon on the panel. Ethernet connects automatically.</li>
-<li>Select <strong>Sign in with ChatGPT</strong> in the open Codex terminal.
-The login page will open here in Firefox. Sign in to your account.</li>
-<li>Return to the terminal and describe the system you want. The agent will perform the installation.</li>
+<li>Start the live system, connect to the network and your provider.</li>
+<li>Describe the system you want.</li>
+<li>Choose the destination disk and discuss the storage layout.</li>
+<li>Review the complete configuration and confirm the exact disk changes.</li>
+<li>The installer writes the system and selected packages.</li>
+<li>The installer configures boot, access and your environment.</li>
+<li>Shut down, disconnect the ISO and boot from the installed disk.</li>
+<li>Run <code>agi-os-verify --gui</code> or <code>agi-os-verify</code>, test your applications,
+and reboot again to verify that your data and settings persist.</li>
 </ol>
-<p>To reopen the agent, use Applications → System → Codex, or run <code>codex</code> in a terminal.</p>
+<p>Enter provider keys and account passwords only in the application's private fields.
+Provider credentials are not copied to the new system.</p>
 </html>
