@@ -174,3 +174,8 @@ Arch Extra and is retained for the ChatGPT backend and optional diagnostics.
 
 The project is Apache-2.0 (`LICENSE`). The Archiso-derived profile in `archiso/`
 retains GPL-3.0-or-later (`archiso/LICENSE`). Packages in the ISO retain their licenses.
+
+Для разработки без повторного входа в каждой VM используйте
+`./scripts/run-vm.sh --name bridge-minimal --dev-bridge` с актуальным ISO.
+Установщик подключится к модели через сохранённый вход Codex на хосте.
+[Устройство моста и ограничения](docs/development-bridge.md).
