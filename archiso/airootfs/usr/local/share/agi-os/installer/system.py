@@ -61,7 +61,16 @@ class Catalog:
 
     def load(self):
         if self.entries is None:
+            # Archiso removes sync databases when preparing the image. Prepare
+            # the catalogue before conversation lookup, not only in the worker.
+            sync = Path("/var/lib/pacman/sync")
+            if live_environment() and any(not (sync / (repo + ".db")).is_file()
+                                          for repo in ("core", "extra")):
+                read_command(["sudo", "-n", "pacman", "-Sy", "--noconfirm"], timeout=180)
             output = read_command(["pacman", "-Sl", "core", "extra"], timeout=60)
+            if not output.strip():
+                raise ValidationError("Каталог пакетов пуст. Проверьте сеть и повторите запрос: "
+                                      "доступность пакетов пока не подтверждена.")
             self.entries = {}
             for line in output.splitlines():
                 fields = line.split()

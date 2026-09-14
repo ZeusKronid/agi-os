@@ -124,6 +124,21 @@ def preflight(request):
     return config, snapshot, disk
 
 
+def release_target():
+    # pacstrap -K can leave gpg-agent holding the target keyring open. Only stop
+    # daemons belonging to that keyring; never use a global pkill or lazy umount.
+    keyring = TARGET / "etc/pacman.d/gnupg"
+    if keyring.is_dir():
+        try:
+            subprocess.run(["gpgconf", "--homedir", str(keyring), "--kill", "all"],
+                           capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # The real unmount below remains the authoritative check.
+    result = subprocess.run(["umount", "--recursive", str(TARGET)], capture_output=True, timeout=60)
+    if result.returncode:
+        raise ValidationError("Не удалось отключить разделы установки. Не выключайте VM до проверки mount.")
+
+
 def install(request, runner):
     config, snapshot, disk = preflight(request)
     packages = packages_for(config)
@@ -237,9 +252,13 @@ def install(request, runner):
         request.pop("password", None)
         if mounted:
             # Cleanup is scoped to our mount tree, including cancellation/failure.
-            result = subprocess.run(["umount", "--recursive", str(TARGET)], capture_output=True, timeout=60)
-            if result.returncode:
-                raise ValidationError("Не удалось отключить разделы установки. Не выключайте VM до проверки mount.")
+            original = sys.exc_info()[1]
+            try:
+                release_target()
+            except ValidationError as cleanup_error:
+                if isinstance(original, (ValidationError, Cancelled)):
+                    raise ValidationError(str(original) + "\n" + str(cleanup_error)) from original
+                raise
     emit("installed", stage=7, text="Запись и настройка завершены. Загрузка без ISO ещё не проверена.", record=record)
 
 

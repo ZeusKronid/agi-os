@@ -7,9 +7,12 @@ from a user's natural-language request to a usable installed system. The live
 agent must perform the installation through conversation. Record any unexpected
 manual repair, skipped stage, or mismatch with the agreed requirements.
 
-Status: the native application and installation worker are implemented. Unit and
-GTK demo checks are separate from real installation acceptance. No full provider
-login → dialogue → disk installation → first-use pass is recorded yet.
+Status: the minimal console flow passed on 2026-09-14 using a real model through
+the private host bridge: dialogue → disk installation → boot without ISO → first
+use → second boot with persisted data. See the [HTML evidence report](test-results/2026-09-14-minimal-e2e/index.html).
+Two earlier attempts failed; their fixes were followed by a clean R3 installation.
+Browser provider login, desktop installations and negative scenarios remain unverified.
+Unit and GTK demo checks are separate from real installation acceptance.
 
 ## Test environment
 
@@ -28,7 +31,8 @@ keeps separate disks and UEFI variables per scenario and never attaches host dis
 ```
 
 Use a new name for a fresh test. Retain firmware mode and the scenario directory
-between installation and subsequent boots. Graphical compatibility with actual
+between installation and subsequent boots. Install mode prioritizes the ISO on every
+boot; shut down and use `--mode disk` for acceptance. Graphical compatibility with actual
 GPUs/Wi-Fi hardware still needs hardware testing.
 
 Record the source revision and uncommitted changes, ISO SHA256, QEMU version,
@@ -103,8 +107,8 @@ consent. In N1, pre-existing disposable data can strengthen the preservation
 check; never use real user data. Hash logical disk contents, not QCOW2 container
 bytes, because container metadata changes need not mean guest data changed.
 
-Run U1 first. Expand to U2/U3/U4, B1, and failure scenarios after fixing issues found
-in the first complete flow. UEFI/BIOS, dialogue variants, and failure cases receive
+A fully specified minimal-console variant of U2 has passed. Run U1 next, then
+U3/U4, B1 and failure scenarios. The clarification-heavy U2 variant still needs its own run. UEFI/BIOS, dialogue variants, and failure cases receive
 separate results. Encryption and preservation/dual boot need dedicated future
 scenarios before being claimed as tested.
 
