@@ -136,6 +136,14 @@ name for a fresh scenario. Host disks/directories are not attached. `--headless`
 is available for automated boot checks; a local QMP socket is placed in the scenario
 directory. Release captured input with **Ctrl+Alt+G**.
 
+Graphical VM runs share the text clipboard using QEMU's `qemu-vdagent` channel,
+`gtk,clipboard=on`, and `spice-vdagent` in the live desktop. Copy with **Ctrl+C** on the host and paste
+with **Ctrl+V** in the installer/browser; a graphical terminal normally uses
+**Ctrl+Shift+V**. Use `--no-clipboard` to disable sharing. This does not add clipboard
+support to a plain Linux text console after a minimal installation. Old ISOs
+without `spice-vdagent` need rebuilding; starting an old VM command without the
+channel also requires restarting QEMU with the updated launcher.
+
 For Ollama on the QEMU host, use `http://10.0.2.2:11434` and configure the host's
 Ollama listener to accept that connection. Inside the VM, `localhost` means the VM.
 

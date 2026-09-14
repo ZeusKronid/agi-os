@@ -36,17 +36,42 @@ class ChatGPTProvider:
                  "-c", "features.apps=false", "-c", 'web_search="disabled"',
                  "app-server", "--listen", "stdio://"]
         env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
-        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+        self.closed = threading.Event()
+        self.close_lock = threading.Lock()
+        started = queue.Queue(maxsize=1)
+
+        def own_backend():
+            # Linux ties PDEATHSIG (--die-with-parent) to the spawning THREAD.
+            # A short-lived GTK connection worker must not own this process:
+            # returning from login would kill it before the first conversation.
+            try:
+                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+            except OSError:
+                started.put(None)
+                return
+            started.put(proc)
+            proc.wait()
+
+        self.owner = threading.Thread(target=own_backend, name="chatgpt-backend-owner", daemon=True)
+        self.owner.start()
+        self.proc = started.get()
+        if self.proc is None:
+            raise ProviderError("Не удалось запустить службу ChatGPT")
         self.events = queue.Queue()
         self.responses = {}
         self.ids = 0
         self.model = ""
         self.login_id = None
         self.thread_id = None
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.rpc("initialize", {"clientInfo": {"name": "agi_os_installer", "title": "AGI OS Installer", "version": "0.2.0"}})
-        self.send({"method": "initialized", "params": {}})
+        self.reader = threading.Thread(target=self._reader, daemon=True)
+        self.reader.start()
+        try:
+            self.rpc("initialize", {"clientInfo": {"name": "agi_os_installer", "title": "AGI OS Installer", "version": "0.2.0"}})
+            self.send({"method": "initialized", "params": {}})
+        except Exception:
+            self.close()
+            raise
 
     def _reader(self):
         try:
@@ -59,11 +84,13 @@ class ChatGPTProvider:
             self.events.put({"closed": True})
 
     def send(self, payload):
+        if self.closed.is_set() or self.proc.poll() is not None:
+            raise ProviderError("Соединение ChatGPT закрыто. Подключитесь снова через «Сменить провайдера».")
         try:
             self.proc.stdin.write(json.dumps(payload) + "\n")
             self.proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            raise ProviderError("Соединение ChatGPT закрыто") from None
+        except (OSError, ValueError):
+            raise ProviderError("Соединение ChatGPT закрыто. Подключитесь снова через «Сменить провайдера».") from None
 
     def next_event(self, timeout=120):
         try:
@@ -147,13 +174,24 @@ class ChatGPTProvider:
         raise ProviderError("Ответ ChatGPT занял слишком много времени")
 
     def close(self):
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
-        for pipe in (self.proc.stdin, self.proc.stdout):
-            if pipe:
-                pipe.close()
+        with self.close_lock:
+            if self.closed.is_set():
+                return
+            self.closed.set()
+            if self.proc.poll() is None:
+                try:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait()
+                except ProcessLookupError:
+                    pass
+            self.owner.join(timeout=5)
+            self.reader.join(timeout=5)
+            for pipe in (self.proc.stdin, self.proc.stdout):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError):
+                        pass

@@ -9,6 +9,7 @@ memory=6144
 iso=
 headless=false
 gl=false
+clipboard=true
 while (($#)); do
     case "$1" in
         --name|--mode|--firmware|--memory|--iso)
@@ -20,15 +21,19 @@ while (($#)); do
             shift 2;;
         --headless) headless=true; shift;;
         --gl) gl=true; shift;;
+        --no-clipboard) clipboard=false; shift;;
         -h|--help)
             cat <<'HELP'
 Usage: scripts/run-vm.sh [ISO] [--name SCENARIO] [--mode install|disk]
                          [--firmware uefi|bios] [--memory MiB] [--headless] [--gl]
+                         [--no-clipboard]
 Defaults: UEFI, 4 CPUs, 6 GiB RAM, a persistent 64 GiB QCOW2 per scenario.
 Install mode selects the newest desktop ISO when no path is supplied.
 Disk mode starts the same machine WITHOUT an installation ISO.
 Use a new scenario name for a fresh disk. Existing disks are never overwritten.
 --gl enables VirtIO OpenGL for compositors needing accelerated graphics.
+Graphical runs share the text clipboard through the guest's spice-vdagent.
+--no-clipboard disables clipboard sharing; headless runs always disable it.
 HELP
             exit 0;;
         -*) echo "Unknown option: $1" >&2; exit 2;;
@@ -41,6 +46,12 @@ done
 [[ "$firmware" == uefi || "$firmware" == bios ]] || { echo "Invalid firmware" >&2; exit 2; }
 [[ "$memory" =~ ^[0-9]+$ ]] && ((memory >= 2048 && memory <= 65536)) || { echo "Invalid RAM size" >&2; exit 2; }
 if $headless && $gl; then echo "--gl requires the graphical display" >&2; exit 2; fi
+if ! $headless && $clipboard; then
+    backends=$(qemu-system-x86_64 -chardev help)
+    if [[ "$backends" != *qemu-vdagent* ]]; then
+        echo "This QEMU lacks qemu-vdagent; install a build with clipboard support or use --no-clipboard" >&2; exit 1
+    fi
+fi
 if $gl; then
     devices=$(qemu-system-x86_64 -device help)
     if [[ "$devices" != *'name "virtio-vga-gl"'* ]]; then
@@ -76,9 +87,16 @@ printf '%s\n' "$firmware" > "$vm_dir/firmware"
 args=(-name "AGI OS — $name" -machine q35 -accel kvm -cpu host -m "$memory" -smp 4
       -device qemu-xhci -device usb-tablet -drive "file=$disk,format=qcow2,if=virtio"
       -nic user,model=virtio-net-pci -qmp "unix:$vm_dir/qmp.sock,server=on,wait=off")
+display_options=gtk,show-cursor=on
+if $clipboard; then display_options+=,clipboard=on; fi
 if $headless; then args+=(-display none -vga std)
-elif $gl; then args+=(-display gtk,gl=on -device virtio-vga-gl)
-else args+=(-display gtk,show-cursor=on -vga std); fi
+elif $gl; then args+=(-display "$display_options,gl=on" -device virtio-vga-gl)
+else args+=(-display "$display_options" -vga std); fi
+if ! $headless && $clipboard; then
+    args+=(-device virtio-serial-pci,id=agi-serial
+           -chardev qemu-vdagent,id=agi-vdagent,clipboard=on,mouse=off
+           -device virtserialport,bus=agi-serial.0,chardev=agi-vdagent,name=com.redhat.spice.0)
+fi
 if [[ "$firmware" == uefi ]]; then
     if [[ ! -e "$vm_dir/OVMF_VARS.fd" ]]; then cp "$vars" "$vm_dir/OVMF_VARS.fd"; fi
     args+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
