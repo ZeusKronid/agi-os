@@ -10,15 +10,18 @@ iso=
 headless=false
 gl=false
 clipboard=true
+dev_bridge=false
+bridge_model=
 while (($#)); do
     case "$1" in
-        --name|--mode|--firmware|--memory|--iso)
+        --name|--mode|--firmware|--memory|--iso|--bridge-model)
             if (($# < 2)); then echo "Missing value: $1" >&2; exit 2; fi
             case "$1" in
                 --name) name=$2;; --mode) mode=$2;; --firmware) firmware=$2;;
-                --memory) memory=$2;; --iso) iso=$2;;
+                --memory) memory=$2;; --iso) iso=$2;; --bridge-model) bridge_model=$2;;
             esac
             shift 2;;
+        --dev-bridge) dev_bridge=true; shift;;
         --headless) headless=true; shift;;
         --gl) gl=true; shift;;
         --no-clipboard) clipboard=false; shift;;
@@ -26,7 +29,7 @@ while (($#)); do
             cat <<'HELP'
 Usage: scripts/run-vm.sh [ISO] [--name SCENARIO] [--mode install|disk]
                          [--firmware uefi|bios] [--memory MiB] [--headless] [--gl]
-                         [--no-clipboard]
+                         [--no-clipboard] [--dev-bridge] [--bridge-model ID]
 Defaults: UEFI, 4 CPUs, 6 GiB RAM, a persistent 64 GiB QCOW2 per scenario.
 Install mode selects the newest desktop ISO when no path is supplied.
 Disk mode starts the same machine WITHOUT an installation ISO.
@@ -34,6 +37,8 @@ Use a new scenario name for a fresh disk. Existing disks are never overwritten.
 --gl enables VirtIO OpenGL for compositors needing accelerated graphics.
 Graphical runs share the text clipboard through the guest's spice-vdagent.
 --no-clipboard disables clipboard sharing; headless runs always disable it.
+--dev-bridge connects the installer to host Codex through a private QEMU channel.
+--bridge-model overrides the model in the host Codex config. No tokens enter VM.
 HELP
             exit 0;;
         -*) echo "Unknown option: $1" >&2; exit 2;;
@@ -45,6 +50,8 @@ done
 [[ "$mode" == install || "$mode" == disk ]] || { echo "Invalid mode" >&2; exit 2; }
 [[ "$firmware" == uefi || "$firmware" == bios ]] || { echo "Invalid firmware" >&2; exit 2; }
 [[ "$memory" =~ ^[0-9]+$ ]] && ((memory >= 2048 && memory <= 65536)) || { echo "Invalid RAM size" >&2; exit 2; }
+if $dev_bridge && [[ "$mode" != install ]]; then echo "Bridge is only for live installer tests" >&2; exit 2; fi
+if [[ -n "$bridge_model" ]] && ! $dev_bridge; then echo "--bridge-model requires --dev-bridge" >&2; exit 2; fi
 if $headless && $gl; then echo "--gl requires the graphical display" >&2; exit 2; fi
 if ! $headless && $clipboard; then
     backends=$(qemu-system-x86_64 -chardev help)
@@ -104,4 +111,35 @@ if [[ "$firmware" == uefi ]]; then
 fi
 if [[ "$mode" == install ]]; then args+=(-cdrom "$iso" -boot menu=on,once=d)
 else args+=(-boot menu=on,order=c); fi
-exec qemu-system-x86_64 "${args[@]}"
+if $dev_bridge; then
+    bridge_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/agi-bridge.XXXXXXXX")
+    bridge_args=(--socket "$bridge_dir/llm.sock")
+    if [[ -n "$bridge_model" ]]; then bridge_args+=(--model "$bridge_model"); fi
+    python -B "$repo_dir/scripts/dev-bridge.py" "${bridge_args[@]}" > "$vm_dir/bridge.log" 2>&1 &
+    bridge_pid=$!
+    qemu_pid=
+    cleanup_bridge() {
+        if [[ -n "$qemu_pid" ]]; then kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; fi
+        kill "$bridge_pid" 2>/dev/null || true
+        wait "$bridge_pid" 2>/dev/null || true
+        rm -f "$bridge_dir/llm.sock"
+        rmdir "$bridge_dir"
+    }
+    trap cleanup_bridge EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for ((attempt=0; attempt<100; attempt++)); do
+        [[ -S "$bridge_dir/llm.sock" ]] && break
+        if ! kill -0 "$bridge_pid" 2>/dev/null; then echo "Bridge failed; see $vm_dir/bridge.log" >&2; exit 1; fi
+        sleep .1
+    done
+    [[ -S "$bridge_dir/llm.sock" ]] || { echo "Bridge startup timed out" >&2; exit 1; }
+    args+=(-device virtio-serial-pci,id=agi-llm-serial
+           -chardev "socket,id=agi-llm,path=$bridge_dir/llm.sock"
+           -device virtserialport,bus=agi-llm-serial.0,chardev=agi-llm,name=org.agi-os.llm)
+    qemu-system-x86_64 "${args[@]}" &
+    qemu_pid=$!
+    wait "$qemu_pid"
+else
+    exec qemu-system-x86_64 "${args[@]}"
+fi

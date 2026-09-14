@@ -18,9 +18,10 @@ from providers import ProviderError, parse_json_reply
 
 
 class ChatGPTProvider:
-    def __init__(self):
+    def __init__(self, token_source=None):
         if not shutil.which("bwrap") or not shutil.which("codex"):
             raise ProviderError("Для входа через ChatGPT нужны пакеты bubblewrap и openai-codex")
+        self.token_source = token_source
         home = str(Path.home())
         args = ["bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
                 "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
@@ -67,7 +68,8 @@ class ChatGPTProvider:
         self.reader = threading.Thread(target=self._reader, daemon=True)
         self.reader.start()
         try:
-            self.rpc("initialize", {"clientInfo": {"name": "agi_os_installer", "title": "AGI OS Installer", "version": "0.2.0"}})
+            self.rpc("initialize", {"clientInfo": {"name": "agi_os_installer", "title": "AGI OS Installer", "version": "0.2.0"},
+                "capabilities": {"experimentalApi": token_source is not None}})
             self.send({"method": "initialized", "params": {}})
         except Exception:
             self.close()
@@ -99,6 +101,18 @@ class ChatGPTProvider:
             raise ProviderError("Истекло время ожидания ChatGPT") from None
         if event.get("closed"):
             raise ProviderError("Служба ChatGPT завершилась. Проверьте поддержку bubblewrap и версию Codex.")
+        if (self.token_source and event.get("method") == "account/chatgptAuthTokens/refresh"
+                and "id" in event):
+            try:
+                tokens = self.token_source()
+                previous = event.get("params", {}).get("previousAccountId")
+                if previous and previous != tokens["chatgptAccountId"]:
+                    raise ProviderError("Аккаунт на хосте изменился; перезапустите мост")
+                self.send({"id": event["id"], "result": tokens})
+            except Exception:
+                self.send({"id": event["id"], "error": {"code": -32000,
+                    "message": "Host authentication unavailable; reconnect Codex on host"}})
+            return {}
         if "id" in event and "method" in event:
             self.send({"id": event["id"], "error": {"code": -32601,
                 "message": "Installer provider does not execute tools or approval requests"}})

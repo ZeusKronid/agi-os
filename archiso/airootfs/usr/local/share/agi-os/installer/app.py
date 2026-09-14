@@ -18,6 +18,7 @@ from gi.repository import Gdk, GLib, Gtk
 from controller import Controller, DemoCatalog, DemoProvider
 from domain import STAGES, ValidationError
 from providers import APIProvider, PROVIDERS, ProviderError
+from bridge import BridgeProvider, PORT as BRIDGE_PORT
 from system import demo_inventory, inventory, selected_disk
 
 
@@ -135,6 +136,9 @@ class InstallerWindow(Gtk.Window):
         self.snapshot = snapshot
         self.connect_button.set_sensitive(True)
         self.status.set_text("Среда готова к подключению LLM")
+        if BRIDGE_PORT.exists() and not self.demo:
+            self.provider_combo.set_active_id("bridge")
+            self.connect_provider()
         if not snapshot["live"] and not self.demo:
             self.banner.set_text("Запуск вне live-системы: диалог доступен, запись дисков отключена.")
             self.banner.get_style_context().add_class("warning")
@@ -163,6 +167,8 @@ class InstallerWindow(Gtk.Window):
         self.provider_combo = Gtk.ComboBoxText()
         for key, (name, _, _) in PROVIDERS.items():
             self.provider_combo.append(key, name)
+        if BRIDGE_PORT.exists():
+            self.provider_combo.append("bridge", "Тестовый мост — модель на хосте")
         self.provider_combo.set_active_id("chatgpt")
         self.provider_combo.connect("changed", lambda *_: self.provider_changed())
         box.pack_start(self.provider_combo, False, False, 0)
@@ -195,15 +201,18 @@ class InstallerWindow(Gtk.Window):
             return
         self.reset_provider()
         kind = self.provider_combo.get_active_id()
-        self.endpoint.set_text(PROVIDERS[kind][1])
+        info = PROVIDERS.get(kind, ("Тестовый мост", "", ""))
+        self.endpoint.set_text(info[1])
         self.endpoint.set_visible(kind in ("compatible", "ollama"))
         self.key.set_text("")
-        self.key.set_visible(kind not in ("chatgpt", "ollama"))
-        self.key_link.set_visible(bool(PROVIDERS[kind][2]))
+        self.key.set_visible(kind not in ("chatgpt", "ollama", "bridge"))
+        self.key_link.set_visible(bool(info[2]))
         self.models.remove_all()
+        self.models.set_sensitive(kind != "bridge")
         self.begin_button.set_sensitive(False)
         self.connect_button.set_sensitive(hasattr(self, "snapshot"))
-        self.note.set_text("Вход откроется в браузере этой live-системы." if kind == "chatgpt" else
+        self.note.set_text("Тестовый режим: используется вход Codex на хосте." if kind == "bridge" else
+                           "Вход откроется в браузере этой live-системы." if kind == "chatgpt" else
                            "Для Ollama на хосте QEMU используйте http://10.0.2.2:11434." if kind == "ollama" else
                            "API-ключ хранится только в памяти до отключения или закрытия приложения.")
         self.connect_button.set_label("Открыть вход в ChatGPT" if kind == "chatgpt" else "Подключить")
@@ -218,7 +227,7 @@ class InstallerWindow(Gtk.Window):
         return generation
 
     def open_provider(self, *_):
-        url = PROVIDERS[self.provider_combo.get_active_id()][2]
+        url = PROVIDERS.get(self.provider_combo.get_active_id(), ("", "", ""))[2]
         if url:
             webbrowser.open(url)
 
@@ -250,7 +259,7 @@ class InstallerWindow(Gtk.Window):
                 except Exception:
                     provider.close()
                     raise
-            provider = APIProvider(kind, endpoint, key)
+            provider = BridgeProvider() if kind == "bridge" else APIProvider(kind, endpoint, key)
             try:
                 return provider, provider.models()
             except Exception:
@@ -266,11 +275,14 @@ class InstallerWindow(Gtk.Window):
             self.models.remove_all()
             for model in models:
                 self.models.append_text(model)
-            if models and self.demo:
+            if models and (self.demo or kind == "bridge"):
                 self.models.set_active(0)
             self.begin_button.set_sensitive(True)
             self.connect_button.set_sensitive(True)
             self.status.set_text("Подключено. Выберите модель для диалога.")
+            if models and kind == "bridge":
+                self.banner.set_text("Тестовый режим: LLM на хосте, авторизация через Codex.")
+                self.begin_chat()
 
         def failed(text):
             if generation == self.connection_generation:
