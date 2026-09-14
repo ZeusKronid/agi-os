@@ -91,8 +91,12 @@ umask 077
 mkdir -p "$vm_dir"
 if [[ ! -e "$disk" ]]; then qemu-img create -f qcow2 "$disk" 64G; fi
 printf '%s\n' "$firmware" > "$vm_dir/firmware"
+disk_bootindex=1
+if [[ "$mode" == install ]]; then disk_bootindex=2; fi
 args=(-name "AGI OS — $name" -machine q35 -accel kvm -cpu host -m "$memory" -smp 4
-      -device qemu-xhci -device usb-tablet -drive "file=$disk,format=qcow2,if=virtio"
+      -device qemu-xhci -device usb-tablet
+      -drive "file=$disk,format=qcow2,if=none,id=agi-disk"
+      -device "virtio-blk-pci,drive=agi-disk,bootindex=$disk_bootindex"
       -nic user,model=virtio-net-pci -qmp "unix:$vm_dir/qmp.sock,server=on,wait=off")
 display_options=gtk,show-cursor=on
 if $clipboard; then display_options+=,clipboard=on; fi
@@ -109,8 +113,13 @@ if [[ "$firmware" == uefi ]]; then
     args+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
            -drive "if=pflash,format=raw,unit=1,file=$vm_dir/OVMF_VARS.fd")
 fi
-if [[ "$mode" == install ]]; then args+=(-cdrom "$iso" -boot menu=on,once=d)
-else args+=(-boot menu=on,order=c); fi
+# Explicit device priorities also override stale OVMF boot entries after ISO
+# removal. Do not mix bootindex with legacy -boot order/once.
+args+=(-boot menu=on)
+if [[ "$mode" == install ]]; then
+    args+=(-drive "file=$iso,media=cdrom,readonly=on,if=none,id=agi-iso"
+           -device ide-cd,drive=agi-iso,bootindex=1)
+fi
 if $dev_bridge; then
     bridge_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/agi-bridge.XXXXXXXX")
     bridge_args=(--socket "$bridge_dir/llm.sock")

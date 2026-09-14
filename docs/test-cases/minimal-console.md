@@ -1,13 +1,16 @@
 # Minimal console installation
 
-Status: prepared for a manual run; installation and independent boot are not yet verified.
+Status: **PASS on 2026-09-14**, using a real model through the private host bridge.
+[HTML report with screenshots and comments](../test-results/2026-09-14-minimal-e2e/index.html).
+Clean R3 passed installation, independent boot and a second boot with persisted data;
+browser OAuth is a separate, untested path in this run.
 
 ## Environment
 
-- Scenario: `minimal-20260914-01`.
-- ISO: `out/agi-os-desktop-2026.09.14-x86_64.iso` (includes the connection and clipboard fixes).
+- Scenario: `e2e-minimal-20260914-r3`.
+- ISO: `out/agi-os-desktop-2026.09.14.3-x86_64.iso` (includes the E2E fixes).
 - QEMU/KVM, UEFI, 4 CPUs, 6 GiB RAM, separate blank 64 GiB QCOW2, standard VGA, NAT.
-- Connect a real provider in the installer. Enter account credentials/API keys and
+- This run used `gpt-6-astra` through `--dev-bridge`. For a separate authentication test, connect a real provider in the installer. Enter account credentials/API keys and
   the new system's password only in their private controls, not in the conversation.
 
 ## Request to paste into the installer
@@ -40,7 +43,7 @@ tester, запускать Python и сохранять мои файлы пос
 
    ```sh
    cd /home/miniboss/Work/agi-os
-   ./scripts/run-vm.sh --name minimal-20260914-01 --mode disk
+   ./scripts/run-vm.sh --name e2e-minimal-20260914-r3 --mode disk
    ```
 
 7. Expect a console login. Log in as `tester` using the password entered during
