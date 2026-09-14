@@ -49,6 +49,7 @@ ripgrep
 rsync
 smartmontools
 sof-firmware
+spice-vdagent
 sudo
 syslinux
 systemd-resolvconf
