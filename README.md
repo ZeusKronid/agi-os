@@ -39,7 +39,6 @@ Live не запускается. Внешняя тестовая VM выдел�
 localhost **внутри Live**, поэтому открывать его в браузере хоста не нужно.
 `run-installer.sh` и `run-web.sh` запускают ту же внешнюю тестовую VM.
 
-[Результаты проверки Hyprland](docs/test-results/2026-09-17-hyprland/README.md).
 HTML-отчёт со встроенными снимками выдаётся отдельно и не хранится в Git.
 Для локальной генерации: `python scripts/web/visual-report.py`.
 

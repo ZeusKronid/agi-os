@@ -1,7 +1,7 @@
 # Minimal console installation
 
 Status: **PASS on 2026-09-14**, using a real model through the private host bridge.
-[HTML report with screenshots and comments](../test-results/2026-09-14-minimal-e2e/index.html).
+The HTML report and screenshots are delivered separately and are not committed.
 Clean R3 passed installation, independent boot and a second boot with persisted data;
 browser OAuth is a separate, untested path in this run.
 
@@ -88,4 +88,4 @@ The second disk boot retains the test file and settings. No unexpected manual re
 or silent requirement change is needed. A successful package install alone is not a pass.
 
 Record the provider/model, final proposal, any errors, and actual boot/check outcomes
-in `docs/test-results/`; exclude credentials and private authentication details.
+locally in ignored `docs/test-results/`; never commit reports, screenshots, credentials or private authentication details.

@@ -9,7 +9,7 @@ manual repair, skipped stage, or mismatch with the agreed requirements.
 
 Status: the minimal console flow passed on 2026-09-14 using a real model through
 the private host bridge: dialogue → disk installation → boot without ISO → first
-use → second boot with persisted data. See the [HTML evidence report](test-results/2026-09-14-minimal-e2e/index.html).
+use → second boot with persisted data. QA reports and screenshots are kept locally and delivered separately; they are not committed.
 Two earlier attempts failed; their fixes were followed by a clean R3 installation.
 Browser provider login, desktop installations and negative scenarios remain unverified.
 Unit and GTK demo checks are separate from real installation acceptance.
