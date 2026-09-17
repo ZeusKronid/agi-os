@@ -1,59 +1,72 @@
-# Installer architecture
+# Архитектура AGIOS
 
-AGI OS now launches a native Python/GTK application. Codex is retained as one
-provider backend for ChatGPT account sign-in; it is no longer the installer UI.
+Основной интерфейс — сайт на localhost внутри загруженного AGIOS Live.
+Для тестирования весь Live запускается во внешней VM; при загрузке с USB
+этого внешнего уровня нет.
 
 ```mermaid
 flowchart TD
-    User[User preferences and custom choices] --> UI[GTK conversation and eight stages]
-    UI --> Provider[Selected LLM provider]
-    Provider --> Proposal[Structured proposal and repository queries]
-    Proposal --> Catalog[Official package catalog and local validation]
-    Catalog --> UI
-    UI --> Review[Complete configuration and explicit disk confirmation]
-    Review --> Worker[Privileged installation worker]
-    Worker --> Target[Configured system on the selected disk]
-    Target --> Boot[Shutdown and boot without ISO]
-    Boot --> Verify[Offline checks and user acceptance]
+    subgraph LIVE[AGIOS Live — физический компьютер или внешняя тестовая VM]
+        Browser[Firefox: localhost:8787] --> Web[web/server.py: чат и подтверждение]
+        Web --> Controller[controller.py: предложения и проверка конфигурации]
+        Controller --> Provider[Модель через provider.py]
+        Web --> Runtime[web/runtime.py: QEMU и новый qcow2]
+        Browser <--> Tunnel[WebSocket /tunnel]
+        Tunnel <--> Guacd[Локальный Apache Guacamole guacd]
+        subgraph INNER[Внутренняя VM]
+            Guest[Установочный Live: web/guest.py] --> Worker[worker.py]
+            Worker --> Disk[Установленная система на /dev/vda]
+        end
+        Runtime --> Guest
+        Guacd <--> INNER
+        Web --> Review[Проверка конечного диска и подтверждение]
+        Review --> Deploy[web/deploy_worker.py]
+        Disk --> Deploy
+        Deploy --> Final[Конечный диск компьютера]
+    end
 ```
 
-`app.py` owns the interface and local credential fields. `controller.py` keeps the
-conversation and validates proposals before review. `providers.py` adapts OpenAI,
-Anthropic, Gemini, Ollama and compatible APIs. `chatgpt.py` speaks the official
-Codex app-server protocol in an isolated, ephemeral bubblewrap environment.
+`agi-web.service` запускает сайт и контроллер от пользователя `agi`;
+`agi-guacd.service` запускает локальный шлюз экрана. Firefox открывается
+через `agi-installer` после загрузки рабочего стола. QEMU запускается тем же
+непривилегированным пользователем с доступом к KVM.
 
-`domain.py` defines structured choices and their validation. The desktop field is
-free text; packages, services and environment settings are selected through the
-conversation and catalog. There is no application-maintained list of approved
-desktops or window managers. The model has no shell tool in the installation
-process. Its output cannot authorize a disk write or mark an installation complete.
+Модель предлагает конфигурацию и запросы каталога пакетов. `domain.py` и
+`controller.py` проверяют предложение. Подтверждение пользователя привязано
+к хешу конфигурации; изменённую конфигурацию нужно подтвердить заново.
+Модель не запускает команды установки напрямую.
 
-`system.py` inventories firmware/disks and searches Core/Extra packages. Mounted,
-read-only and undersized disks are excluded. `worker.py` rechecks eligibility and
-the identity/consent fingerprint before running explicit installation commands.
-The worker accepts typed data on stdin, not an executable script. Environment
-files are validated relative paths inside the target; credentials and core account,
-storage and permission configuration are handled separately.
+После подтверждения `runtime.py` создаёт новый qcow2 и загружает внутреннюю
+VM со встроенного установочного ISO. `guest.py` передаёт реальную инвентаризацию
+диска через отдельный virtio-serial канал. Контроллер отправляет конфигурацию,
+отпечаток диска и пароль; worker повторно проверяет диск и выполняет установку.
+Worker работает с root-правами **внутри внутреннего установочного Live**.
+Физические диски внешнего компьютера к VM не подключаются.
 
-Only the worker runs privileged, inside the booted live system. The GTK application
-and provider connections run as the live user. The present live image still grants
-that user passwordless sudo; application validation is not a host security sandbox
-against a malicious local user.
+События worker отображаются на сайте. После успешной установки VM выключается;
+контроллер запускает тот же диск без ISO. Успешный запуск установки или QEMU
+сам по себе не считается завершённой установкой. При ошибке отображается
+неуспех, при остановке диск сохраняется. Успешно установленную VM можно
+запустить снова, в том числе после перезапуска сайта при сохранённом хранилище.
 
-API keys remain in memory. ChatGPT authentication uses a temporary home inside
-bubblewrap and shares only the VM network for its browser callback. Host Codex
-configuration, credentials, home files and block devices are not exposed to that
-provider process. The installed user's password goes to the worker and `chpasswd`
-over stdin and is absent from the model conversation, commands and installed record.
+Браузер передаёт ввод через WebSocket в guacd; guacd подключается к VNC
+локального QEMU. Оба сервиса слушают только loopback в Live. Сайт проверяет
+Host, Origin и заголовок запросов изменения состояния. API скриншотов нет.
 
-`verify.py` is copied to the target with a non-secret installation record. It checks
-the actual root, user, packages and settings, requires a persistence marker across
-two boot IDs, and records the user's checks of their requested workflows. XDG
-autostart is provided where supported; custom compositors can launch the checker
-manually. This supplies the first-use stage without transferring LLM credentials.
+Пароль системы не отправляется модели и не записывается в session.json.
+API-ключи находятся в памяти адаптера. Подключение ChatGPT использует прежний
+адаптер app-server; в тестовом режиме virtio-мост предоставляет только модель
+из существующего входа разработчика. Код сайта и управление VM остаются в Live.
 
-Storage handlers currently cover whole-disk GPT, ext4/Btrfs/XFS/F2FS and BIOS/UEFI
-with GRUB or UEFI with systemd-boot. Other storage layouts need their own handlers;
-this does not restrict environment/package choices. Failure recovery currently
-reports partial state and cleans up mounts rather than attempting an automatic
-fresh wipe. Full real-provider installation acceptance remains a separate test.
+Ограничения хранения и сборки текущего прототипа описаны в
+[Live workflow](local-web.md). Сохранившийся `app.py` — старый GTK-клиент
+общего движка и не является интерфейсом нового Live-сеанса.
+
+После проверки превью пользователь выключает гостевую систему. `deployment.py`
+привязывает подтверждение к образу, конфигурации и отпечатку конечного диска.
+`deploy_worker.py` запускается с root-правами внутри внешнего Live, проверяет
+образ и ext4, переносит qcow2 на выбранный диск и побайтно сравнивает данные.
+Затем он расширяет ext4, пересобирает initramfs, обновляет загрузчик и создаёт
+новый идентификатор проверки первой загрузки. В тестовом Live разрешён только
+отдельный виртуальный диск с serial `AGIOS_TARGET`. API блокирует параллельный
+перенос, запуск превью и изменение конфигурации во время записи.

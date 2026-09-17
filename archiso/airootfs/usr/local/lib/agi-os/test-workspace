@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Test harness only. It never formats a device and rejects unmarked disks.
+set -euo pipefail
+[[ $(cat /sys/firmware/qemu_fw_cfg/by_name/opt/org.agi-os.test/raw) == 1 ]]
+for attempt in {1..30}; do
+    [[ -e /dev/disk/by-id/virtio-AGIOS_TESTDATA ]] && break
+    sleep 1
+done
+device=/dev/disk/by-id/virtio-AGIOS_TESTDATA
+[[ $(blkid -s LABEL -o value "$device") == AGIOS_TESTDATA ]]
+mkdir -p /var/lib/agi-os
+mount -o nodev,nosuid "$device" /var/lib/agi-os
+chown agi:agi /var/lib/agi-os
+
+# Optional optical package cache is read-only at both QEMU levels.
+cache=/dev/disk/by-label/AGIOS_CACHE
+if [[ -e "$cache" ]]; then
+    chgrp agi "$cache"
+    chmod g+r "$cache"
+fi

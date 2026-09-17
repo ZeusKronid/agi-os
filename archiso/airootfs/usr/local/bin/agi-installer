@@ -1,2 +1,9 @@
 #!/bin/sh
-exec /usr/bin/python /usr/local/share/agi-os/installer/app.py "$@"
+# The user interface lives in this booted Live environment.
+for attempt in $(seq 1 60); do
+    if curl -fsS http://127.0.0.1:8787/api/state >/dev/null 2>&1; then
+        exec firefox --new-window http://localhost:8787
+    fi
+    sleep 1
+done
+exec firefox --new-window http://localhost:8787

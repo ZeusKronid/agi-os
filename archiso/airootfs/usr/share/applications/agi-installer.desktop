@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=AGI OS Installer
-Comment=Choose your LLM and install the system you describe
+Name=AGIOS — Live website
+Comment=Describe and preview your Linux system in the local browser
 Exec=agi-installer
 Icon=system-software-install
 Terminal=false

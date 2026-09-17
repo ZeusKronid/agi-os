@@ -1,0 +1,14 @@
+[Unit]
+Description=AGIOS Apache Guacamole display gateway
+After=network.target
+[Service]
+Type=simple
+User=agi
+Group=agi
+RootDirectory=/opt/agi-guacd
+WorkingDirectory=/tmp
+ExecStart=/opt/guacamole/sbin/guacd -b 127.0.0.1 -l 14822 -f
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

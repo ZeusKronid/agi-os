@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — ваша система</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><a class="brand" href="/">AGI<span>OS</span><small>LIVE WORKSPACE</small></a><div class="local"><i></i> Live-среда AGIOS</div><button id="settingsButton" class="quiet">Подключение модели</button></header>
+<main>
+<section class="conversation"><div class="section-head"><div><span class="eyebrow">01 / ОБСУЖДЕНИЕ</span><h1>Какой будет ваша система?</h1></div></div>
+<div id="messages" aria-live="polite"><div class="welcome"><div class="spark">✳</div><h2>Начнём с вашей идеи</h2><p>Расскажите, для чего нужен компьютер. Вместе выберем окружение, приложения и настройки — и запустим вашу систему здесь.</p><button class="suggestion" data-prompt="Хочу лёгкую систему с XFCE, браузером Firefox и терминалом. Русский и английский языки, часовой пояс Europe/Moscow. Имя пользователя tester, имя компьютера agios.">Рабочий стол для повседневных задач ↗</button><button class="suggestion" data-prompt="Хочу собрать Linux для разработки. Помоги выбрать окружение и инструменты.">Среда для разработки ↗</button></div></div>
+<div id="error" role="alert" hidden></div><form id="chatForm"><textarea id="prompt" placeholder="Например: лёгкий Linux для разработки на Python…" rows="3" maxlength="16000" required></textarea><div class="composer-bottom"><span id="model">Подключение…</span><button id="send" type="submit">Отправить ↑</button></div></form><p class="hint">Сначала проверяем систему в VM. Установка на диск компьютера — после отдельного подтверждения.</p>
+</section>
+<section class="workspace"><div class="section-head"><div><span class="eyebrow">02 / ВАША СИСТЕМА</span><h2>Живое превью</h2></div><span class="badge" id="phase">Ожидает сборки</span></div>
+<div class="preview" id="preview"><div id="emptyPreview"><div class="monitor">▱</div><h2>От идеи — к рабочему столу</h2><p>После согласования конфигурации здесь появится ваша виртуальная машина.<br>С ней можно работать прямо в браузере.</p><div class="steps"><span>Обсудить</span><b>→</b><span>Собрать</span><b>→</b><span>Попробовать</span></div></div><div id="screen" tabindex="0" aria-label="Экран виртуальной машины" hidden></div></div>
+<div class="preview-bar"><span id="previewStatus">Локальная VM · Apache Guacamole</span><div><button id="reconnect" class="quiet" hidden>Подключить экран</button><button id="fullscreen" class="quiet" hidden>На весь экран</button><button id="stop" class="quiet" hidden>Остановить VM</button><button id="resume" hidden>Запустить снова</button></div></div>
+<div class="status-line"><i></i><span id="status">Загрузка…</span></div>
+<section id="review" hidden><div class="review-head"><h3>Согласованная конфигурация</h3><span>32 ГиБ · виртуальный диск</span></div><details><summary>Посмотреть все настройки</summary><pre id="summary"></pre></details><form id="buildForm"><div class="fields"><label>Память<select id="memory"><option value="4096">4 ГиБ</option><option value="6144">6 ГиБ</option><option value="8192">8 ГиБ</option><option value="2048">2 ГиБ</option></select></label><label>Процессоры<select id="cpus"><option value="4">4 CPU</option><option value="2">2 CPU</option><option value="8">8 CPU</option></select></label><label class="password">Пароль пользователя в новой системе<input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Не менее 8 символов" required></label></div><button id="build" type="submit">Подтвердить и собрать систему →</button><p class="hint">Пароль передаётся установщику, агент его не получает.</p></form></section>
+<section id="finalStage" hidden>
+<span class="eyebrow">03 / УСТАНОВКА НА КОМПЬЮТЕР</span><h2>Превью подходит? Установим систему.</h2>
+<p class="hint">На конечный диск переносится именно проверенная система: ваши файлы, настройки и пароль сохранятся. Перед переносом завершите работу внутри превью через меню выключения.</p>
+<div id="finalChoice"><button id="loadTargets" type="button">Выбрать конечный диск</button>
+<form id="targetForm" hidden><label>Конечный диск<select id="targetDisk" required></select></label><button type="submit">Проверить выбранный диск</button></form></div>
+<div id="finalError" role="alert" hidden></div>
+<form id="finalInstallForm" hidden><h3>Проверьте, куда устанавливается система</h3><pre id="finalSummary"></pre>
+<p class="destructive">Все разделы и данные этого диска будут удалены.</p>
+<label class="check"><input type="checkbox" id="previewAccepted" required>Я проверил систему в превью и хочу установить её на выбранный диск</label>
+<label>Для подтверждения введите путь диска<input id="targetConfirm" autocomplete="off" required placeholder="Например, /dev/nvme0n1"></label>
+<button type="submit" id="installFinal">Установить проверенную систему на диск</button></form>
+<div id="finalProgress" hidden><h3 id="finalPhase"></h3><pre id="finalEvents"></pre></div>
+<div id="finalDone" hidden><h3>Система установлена на конечный диск</h3><p>Теперь выключите Live, извлеките установочный носитель и загрузите компьютер с выбранного диска. Проверка первого запуска откроется в установленной системе.</p><button id="poweroffLive">Завершить Live и выключить компьютер</button></div>
+</section>
+<details id="logs" hidden><summary>Ход установки</summary><pre id="events"></pre></details>
+</section></main>
+<dialog id="settings"><form id="providerForm"><h2>Подключение модели</h2><p>Войдите в аккаунт ChatGPT или подключите API-провайдера.</p><label>Провайдер<select id="provider"><option value="chatgpt">ChatGPT — вход в аккаунт</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="gemini">Gemini API</option><option value="ollama">Ollama</option><option value="compatible">Совместимый API</option></select></label><label>Модель<input id="providerModel" placeholder="Модель или автоматический выбор после входа"></label><label>Адрес API<input id="endpoint" placeholder="Необязательно для стандартного провайдера"></label><label>API-ключ<input id="key" type="password" autocomplete="off"></label><p id="providerError" role="alert"></p><div class="dialog-actions"><button type="button" id="closeSettings" class="quiet">Закрыть</button><button type="submit">Подключить</button></div></form></dialog>
+<script src="/guacamole.js"></script><script src="/static/app.js"></script></body></html>

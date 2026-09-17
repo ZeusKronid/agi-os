@@ -71,3 +71,20 @@ xfwm4
 xorg-server
 xorg-xrandr
 zsh
+
+# Local website and preview VM inside the Live environment
+python-aiohttp
+qemu-system-x86
+qemu-img
+edk2-ovmf
+
+# Accelerated Wayland preview in the Live environment
+qemu-ui-egl-headless
+qemu-ui-opengl
+qemu-hw-display-virtio-vga-gl
+qemu-hw-display-virtio-gpu-gl
+virglrenderer
+qemu-hw-display-virtio-gpu
+qemu-hw-display-virtio-gpu-pci
+qemu-hw-display-virtio-gpu-pci-gl
+qemu-hw-display-virtio-vga

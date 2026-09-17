@@ -1,0 +1,10 @@
+{
+  "policies": {
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DontCheckDefaultBrowser": true,
+    "Preferences": {
+      "browser.translations.automaticallyPopup": {"Value": false, "Status": "default"}
+    }
+  }
+}
