@@ -4,3 +4,10 @@
 *.iso
 __pycache__/
 *.py[cod]
+
+/.local/
+
+/web/vendor/
+
+# Generated visual reports are delivered separately, not committed.
+/docs/test-results/**/*.html

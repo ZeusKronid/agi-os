@@ -1,0 +1,12 @@
+[Unit]
+Description=Mount the explicitly marked AGIOS test VM workspace
+Before=agi-web.service
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+ConditionPathExists=/sys/firmware/qemu_fw_cfg/by_name/opt/org.agi-os.test/raw
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/agi-os/test-workspace
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
