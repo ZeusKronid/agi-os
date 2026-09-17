@@ -11,3 +11,7 @@ __pycache__/
 
 # Generated visual reports are delivered separately, not committed.
 /docs/test-results/**/*.html
+
+# Local QA artifacts must not be published to this public repository.
+/docs/test-results/
+/docs/screenshots/
