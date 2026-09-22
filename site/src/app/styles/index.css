@@ -99,8 +99,11 @@
   }
   /* Сияние: `scale`, а не `transform`, чтобы складываться с ростом луча; оба ведёт композитор. */
   @keyframes sun-shimmer {
+    from {
+      scale: var(--shimmer-low) 1;
+    }
     to {
-      scale: var(--shimmer) 1;
+      scale: var(--shimmer-high) 1;
     }
   }
   /* Окно дуги и дуга внутри стартуют без поворота; конечный поворот (±180°) стоит на элементах. */

@@ -7,8 +7,11 @@ const LENS_SIGMA = 0.3
 const IDLE_STRENGTH = 0.45
 const IDLE_SWING = 0.55
 const IDLE_PERIOD_MS = 2600
-/** Насколько голос удлиняет луч и сколько энергии волны за кадр считается «громко». */
-const VOICE_REACH = 0.7
+/**
+ * Насколько голос демо удлиняет луч сверх постоянного сияния (CSS `sun-shimmer` уже даёт до +70%)
+ * и сколько энергии волны за кадр считается «громко». Небольшая добавка: слова чуть раскачивают поле.
+ */
+const VOICE_REACH = 0.25
 const VOICE_FULL = 0.22
 /** Шаги демо (Listen · Preview · Build · Install) — внутренние точки дуги: 205°, 243°, 297°, 335°. */
 const STEP_DOTS = [1, 2, 3, 4] as const
