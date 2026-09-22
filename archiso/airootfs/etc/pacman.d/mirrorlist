@@ -1,0 +1,4 @@
+# AGIOS Live: globally routed official mirrors. pacstrap copies this list to the installed system.
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch

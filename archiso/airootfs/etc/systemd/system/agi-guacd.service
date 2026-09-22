@@ -1,11 +1,14 @@
 [Unit]
 Description=AGIOS Apache Guacamole display gateway
 After=network.target
+ConditionKernelCommandLine=!agios.guest
 [Service]
 Type=simple
 User=agi
 Group=agi
-RootDirectory=/opt/agi-guacd
+RootImage=/usr/local/share/agi-os/guacd.sqfs
+MountAPIVFS=yes
+TemporaryFileSystem=/tmp
 WorkingDirectory=/tmp
 ExecStart=/opt/guacamole/sbin/guacd -b 127.0.0.1 -l 14822 -f
 Restart=on-failure
