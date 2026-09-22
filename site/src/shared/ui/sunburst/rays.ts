@@ -21,6 +21,8 @@ export interface SunburstSpec {
    * чтобы его можно было вытянуть анимацией, не пересчитывая координаты.
    */
   reach?: number
+  /** Запас viewBox над картинкой (в единицах viewBox) под лучи, которые вытягивает живой восход. */
+  headroom?: number
 }
 
 export interface Ray {

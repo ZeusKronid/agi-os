@@ -1,6 +1,14 @@
 @import 'tailwindcss';
 @import 'lenis/dist/lenis.css';
 
+/*
+ * Системная настройка reduced motion на сайте намеренно не учитывается: лендинг всегда анимирован.
+ * `motion-safe:` применяется всегда, `motion-reduce:` — никогда. Чтобы вернуть уважение к настройке,
+ * удалите эти две строки и поставьте `RESPECT_REDUCED_MOTION = true` в `shared/lib/motion/media.ts`.
+ */
+@custom-variant motion-safe (@media all);
+@custom-variant motion-reduce (@media not all);
+
 /* Логотипный шрифт: используется ТОЛЬКО в wordmark AGIOS (футер). Больше нигде. */
 @font-face {
   font-family: 'Dalek Pinpoint';
@@ -59,6 +67,10 @@
   --animate-ripple: ripple 2.6s linear infinite;
   --animate-ping-ring: ping-ring 1.6s var(--ease-out-strong) infinite;
   --animate-wave: wave 0.8s ease-in-out infinite;
+  /* Живой восход hero: солнце встаёт из-за заголовка, дуга дорисовывается, зенит и точки проявляются последними. */
+  --animate-sun-rise: sun-rise 1.8s var(--ease-out-strong) 0.25s both;
+  --animate-sun-arc: sun-arc 1.6s var(--ease-in-out-strong) 0.3s both;
+  --animate-sun-late: sun-late 0.7s var(--ease-out-strong) 1.2s both;
   /* Дорисовка штриха с `pathLength=1` и `stroke-dasharray: 1` (кольцо «Ready to boot»). */
   --animate-draw: draw 1s var(--ease-in-out-strong) both;
 
@@ -66,6 +78,22 @@
     from {
       opacity: 0;
       transform: translateY(1.25rem);
+    }
+  }
+  /* Сдвиг в единицах viewBox восхода (0.55 радиуса): старт за линией горизонта. */
+  @keyframes sun-rise {
+    from {
+      transform: translateY(85px);
+    }
+  }
+  @keyframes sun-arc {
+    from {
+      stroke-dashoffset: 1;
+    }
+  }
+  @keyframes sun-late {
+    from {
+      opacity: 0;
     }
   }
   @keyframes marquee {
@@ -130,8 +158,9 @@
   }
 }
 
-/* Reduced motion: меньше и мягче, а не ноль — убираем перемещения, оставляем проявление. */
-@media (prefers-reduced-motion: reduce) {
+/* Reduced motion: меньше и мягче, а не ноль — убираем перемещения, оставляем проявление.
+   Сейчас выключено вместе с вариантом `motion-reduce` (см. начало файла). */
+@variant motion-reduce {
   @keyframes tile {
     from {
       opacity: 0;
