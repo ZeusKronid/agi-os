@@ -4,17 +4,20 @@ import { AgentIcon, agents } from '@/entities/agent'
 // сдвиг на -50% тогда бесшовен на любой ширине, без измерений в JavaScript.
 const REPEATS = 6
 
+/** В ленте только продукты и модели: варианты вида «… API» не показываем, они остаются в сцене «Сигнал» и FAQ. */
+const marqueeAgents = agents.filter((agent) => !/\bAPI\b/i.test(agent.label))
+
 function Half() {
   return (
-    <ul className="flex shrink-0 gap-16 pr-16 max-sm:gap-11 max-sm:pr-11">
+    <ul className="flex shrink-0 gap-24 pr-24 max-sm:gap-11 max-sm:pr-11">
       {Array.from({ length: REPEATS }, (_, repeat) =>
-        agents.map((agent) => (
+        marqueeAgents.map((agent) => (
           <li
             key={`${repeat}-${agent.id}`}
-            className="grid justify-items-center gap-2.5 whitespace-nowrap opacity-60 transition-opacity duration-200 hover:opacity-100"
+            className="grid justify-items-center gap-3 whitespace-nowrap opacity-60 transition-opacity duration-200 hover:opacity-100"
           >
-            <AgentIcon mark={agent.mark} className="size-[30px]" />
-            <span className="text-[12.5px] text-ink-muted">{agent.label}</span>
+            <AgentIcon mark={agent.mark} className="size-9 max-sm:size-[30px]" />
+            <span className="text-[13px] text-ink-muted">{agent.label}</span>
           </li>
         )),
       )}
@@ -29,8 +32,8 @@ function Half() {
  */
 export function AgentsMarquee() {
   return (
-    <section aria-label="Agents you can connect" className="pt-11 pb-24 max-sm:pt-7 max-sm:pb-16">
-      <p className="sr-only">Works with {agents.map((agent) => agent.label).join(', ')}.</p>
+    <section aria-label="Agents you can connect" className="pt-16 pb-28 max-sm:pt-7 max-sm:pb-16">
+      <p className="sr-only">Works with {marqueeAgents.map((agent) => agent.label).join(', ')}.</p>
       <div aria-hidden="true" className="mask-fade-x overflow-hidden">
         <div className="flex w-max animate-marquee will-change-transform hover:[animation-play-state:paused]">
           <Half />
