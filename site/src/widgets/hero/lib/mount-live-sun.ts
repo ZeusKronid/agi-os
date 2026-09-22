@@ -10,8 +10,6 @@ const IDLE_PERIOD_MS = 2600
 /** Насколько голос удлиняет луч и сколько энергии волны за кадр считается «громко». */
 const VOICE_REACH = 0.7
 const VOICE_FULL = 0.22
-/** Вход солнца (CSS с первой отрисовки) заканчивается примерно к этой отметке от начала загрузки; потом — дыхание. */
-const ENTRANCE_END_MS = 2000
 /** Шаги демо (Listen · Preview · Build · Install) — внутренние точки дуги: 205°, 243°, 297°, 335°. */
 const STEP_DOTS = [1, 2, 3, 4] as const
 
@@ -37,8 +35,8 @@ const noise = (index: number) => {
 /**
  * Callback ref (React 19) на секцию hero: оживляет `Sunburst variant="live"`.
  * - Подъём из-за заголовка, рост лучей и дорисовка дуги — композиторный CSS с первой отрисовки
- *   (`Sunburst variant="live"`); здесь только длина лучей-полосок и точки. Пока линза и голос в нуле,
- *   лучи не трогаются, чтобы не пересобирать слои посреди входа.
+ *   (`Sunburst variant="live"`); здесь только длина лучей-полосок и точки. Дыхание включается сразу,
+ *   поверх роста лучей; если линза и голос в нуле (reduced motion), лучи не трогаются.
  * - Лучи тянутся к курсору (линза), в покое линза медленно качается. Ниже горизонта курсор отражается вверх,
  *   так что линза идёт за ним по горизонтали. Тап работает так же.
  * - Солнце слушает демо: пока микрофон включён, энергия волны (сумма изменений столбиков за кадр)
@@ -74,7 +72,8 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   const motionSafe = window.matchMedia(MOTION_SAFE_QUERY)
   const lens = { angle: 1.5 * Math.PI, strength: 0 }
   const target = { angle: 1.5 * Math.PI, strength: 0 }
-  const start = Math.max(performance.now(), ENTRANCE_END_MS)
+  // Дыхание начинается сразу, поверх роста лучей, как в прототипе: без паузы после входа.
+  const start = performance.now()
   let raysAtRest = true
   let pointer = false
   let voice = 0
@@ -133,8 +132,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     frame = 0
     const smooth = motionSafe.matches
     if (!pointer) {
-      // Дыхание начинается после входа, чтобы не спорить с ростом лучей.
-      const breathing = smooth && now > start
+      const breathing = smooth
       target.angle = 1.5 * Math.PI + (breathing ? IDLE_SWING * Math.sin((now - start) / IDLE_PERIOD_MS) : 0)
       target.strength = breathing ? IDLE_STRENGTH : 0
     }
