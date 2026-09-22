@@ -1,132 +1,91 @@
-# AGIOS Live website and preview VM
+# AGIOS Live website, reversible preview and installation
 
-AGIOS is a bootable Live ISO. **Inside the Live environment**, Firefox opens
-`http://localhost:8787`. The conversation controller, provider adapter, Guacamole
-and QEMU all run in that Live environment. After configuration review, the site
-creates a new virtual disk and starts a preview VM. The existing installer runs
-inside that VM, installs the agreed system and restarts it without its ISO.
-Guacamole displays the resulting system on the same localhost page.
+AGIOS is one bootable Live ISO. Inside the Live environment Firefox opens
+`http://localhost:8787`. The conversation controller, provider adapter,
+Guacamole and QEMU all run there. Nothing is written to the computer's disks
+until the user explicitly confirms a specific, described change.
 
-For development only, the Live ISO is itself booted in an external QEMU machine.
-That outer VM substitutes for the physical computer. Thus the test uses nested
-virtualization; a real boot from USB needs only ordinary hardware virtualization.
-The host does not run the AGIOS website or its Guacamole gateway.
+## Flow
 
-## Build and test locally
+1. **Conversation.** The agent proposes a configuration; the app validates it
+   against the package catalog and the real disk inventory.
+2. **Size and place.** The app computes the exact installed size from package
+   metadata (`pacman -Sp`/`-Si`, including dependencies) and lists where the
+   preview can live, each option with its undo:
+   - *memory*: a zstd zram device holding the preview image — disks untouched;
+   - *file* on any other medium with a filesystem (USB stick, second disk, SD
+     card; exFAT/NTFS/ext4/…) — undo deletes one file;
+   - *partition* in unpartitioned space of any GPT disk — undo deletes one
+     partition entry; on the target disk this later becomes the system without
+     copying;
+   - *shrink* an NTFS/ext4 partition of the target disk (dry run first, separate
+     typed confirmation) — undo restores the boundary and grows the filesystem;
+   - *erase* the target disk now — explicit, typed, not reversible.
+   Non-destructive options that fit are recommended first; memory needs
+   `MemAvailable − VM RAM − 3 GiB ≥ size / 1.3` and is monitored during the
+   installation so it stops cleanly instead of failing mid-way.
+3. **Preview.** The inner VM boots the same Live medium headless
+   (`agios.guest` on the kernel command line, `agi-guest.service`) and installs
+   into the preview storage in batches, dropping the package cache between
+   batches (`fstrim` + `discard=unmap` keep an in-memory image small). Then it
+   restarts from the installed image; Guacamole shows it in the browser.
+   LUKS2 root encryption and zram swap are configured here when chosen.
+4. **Decision.** *Not right* → "return everything as it was" undoes the storage.
+   *Install* → the user chooses *alongside existing systems* or *erase the
+   disk*, types the disk path and confirms:
+   - preview partition on the target disk → *promote*: its nested partitions
+     become real GPT entries at the same sectors (no data moves);
+   - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
+     comparison pass; UUIDs in fstab/boot entries are regenerated.
+   Finally the initramfs is rebuilt for the real hardware, the boot loader is
+   registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new
+   acceptance ID is written for `agi-os-verify`.
+
+## Build
 
 ```sh
-./scripts/prepare-web.sh
-./scripts/run-live-web-vm.sh
+sudo ./scripts/build-iso.sh        # or --prepare-only, then run mkarchiso as root
 ```
 
-`run-installer.sh` and `run-web.sh` are aliases for the external Live-ISO test
-launcher. They do not launch the website on the host. `run-native-installer.sh`
-retains the previous native interface for engine debugging only.
+Everything comes from the official `core`/`extra` repositories through
+`archiso/pacman.conf` (signatures required). The script adds the website, the
+Guacamole 1.6.0 browser client built from the official source release, and the
+guacd runtime as a squashfs made from the pinned `guacamole/guacd:1.6.0` image
+(`agi-guacd.service` runs it with `RootImage=`). No host package cache, no CPU
+specific packages and no second installer ISO are involved.
 
-The local prototype build uses the existing desktop ISO and cached QEMU/runtime
-packages, avoiding another privileged complete Archiso build. It records the
-actual runtime package archives in `.local/live-payload/runtime-packages.json`.
-On this CachyOS development machine the cache can include CPU-optimized library
-builds; this particular prototype is tested on this computer's CPU, not claimed
-as a portable release for older hardware. A clean release build should install
-all runtime dependencies from the official repositories during Archiso assembly.
+## Test locally
 
-Requirements: the original desktop ISO, QEMU packages in the local cache,
-`qemu-img`, KVM, `edk2-ovmf`, `uv`, Docker access for retrieving the pinned guacd
-runtime, `xorriso`, `bsdtar` and squashfs tools. The browser client and guacd are
-Apache Guacamole 1.6.0. Docker is used only while preparing the runtime bundle;
-there is no Docker daemon inside the Live environment. Guacd runs as a systemd
-service using its bundled userspace. Python's optional aiohttp native extensions
-are omitted from the vendored runtime so it matches the Live Python interpreter.
+```sh
+AGIOS_TEST_MIRROR=https://geo.mirror.pkgbuild.com ./scripts/run-live-web-vm.sh [--firmware bios] [--memory 16384]
+./scripts/run-live-web-vm.sh --mode disk        # boot the installed target disk without the ISO
+```
 
-Outputs:
-
-- `out/agi-os-live-web.iso`: user-facing Live ISO with the localhost website.
-- `out/agi-os-web.iso`: headless installation image, embedded on the Live ISO
-  as `/agi-os/installer.iso`, used only to install the inner preview VM.
-
-The test launcher allocates 10 GiB RAM to the outer machine and passes the host
-CPU's virtualization features through. A separately created, clearly labelled
-48 GiB test workspace image is mounted inside the outer Live environment.
-The mount helper runs only with an explicit test firmware marker and accepts only
-that labelled, serial-numbered virtual device. It never formats a device.
-No physical host block devices are attached to either machine.
+The outer VM is the "computer": it boots the ISO from an optical drive with a
+blank 20 GiB target disk (serial `AGIOS_TARGET`) and, when
+`.local/live-test-media.img` exists, an exFAT USB stick. Only that serial is an
+eligible target in the marked test VM. The VNC console is `127.0.0.1:5997`;
+`scripts/web/qa-driver.py` drives the site API, QMP screenshots and input.
+The LLM comes from the private host bridge; production boots ask the user to
+connect a provider.
 
 ## Live runtime
 
-- `agi-web.service`: website/controller at `127.0.0.1:8787`, running as `agi`.
-- `agi-guacd.service`: local Guacamole gateway at `127.0.0.1:14822`.
-- `agi-installer`: opens the website in the Live desktop's Firefox.
-- `web/runtime.py`: starts the inner QEMU VM, owns its disk and installation link.
-- `web/guest.py`: installation service in the inner VM's temporary boot image.
+- `agi-web.service`: website/controller at `127.0.0.1:8787` (user `agi`, groups
+  `kvm disk optical`). Root helpers via `sudo -n`: `storage_worker.py`
+  (probe/prepare/revert), `finalize_worker.py`.
+- `agi-guacd.service`: Guacamole gateway at `127.0.0.1:14822`.
+- `agi-guest.service`: the installer inside the inner VM only.
+- `agi-qa.service`: test instrumentation, active only with the fw_cfg marker.
 
-Virtual disks and dialogue state are under `/var/lib/agi-os`. During an ordinary
-Live boot this is temporary Live storage: rebooting the Live environment loses
-that session unless storage is explicitly persisted. During our test it lives on
-the separate test workspace image. The final-install stage lists eligible disks and requires a separate review,
-preview acceptance and typed disk path before writing. A VM disk is 32 GiB virtual capacity; actual space grows with use.
+Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
+preview is gone (nothing was on disk); file/partition previews are kept.
 
-The default real Live session asks the user to connect a provider in the site's
-settings. ChatGPT login opens a browser tab **inside the Live environment**;
-API providers and Ollama use the existing adapters. Provider credentials and the
-new system's password are not included in the conversation or session file.
+## Limits
 
-The external test launcher may connect the pre-existing development LLM bridge
-through a private virtio port, using the host's existing Codex login only as a
-model-provider connection. The website, dialogue controller, configuration
-validation, installation orchestration, Guacamole and inner VM still run inside
-Live. Host credentials are not copied into either VM.
-
-There is no screenshot feature in the product. Screenshots are captured externally
-by test tooling and collected in the standalone HTML visual report.
-
-The flow is Live → agent proposal → preview VM → clean guest shutdown → final
-disk review → transfer → boot from the final disk. Transfer currently supports
-UEFI and ext4. It copies the exact preview image, verifies its bytes, expands the
-root filesystem to the destination disk, regenerates initramfs and installs the
-bootloader. User files and passwords survive. The final machine receives a new
-first-boot acceptance ID, so preview success cannot count as final-boot success.
-Source changes or a replacement destination invalidate the confirmation.
-
-In-place modification, snapshots and image export remain outside this version. Stopping a VM is immediate; shut down inside
-the guest first when a clean shutdown is needed.
-
-## Verification
-
-```sh
-python -B -m unittest discover -s tests -v
-.local/venv/bin/python -B -m unittest discover -s web/tests -v
-node --check web/static/app.js
-```
-
-Test instrumentation (`org.agi-os.qa`) is a separate serial channel, activated
-only in the explicitly marked outer test VM. It is not a model tool or website
-API. The host-side QA transport and forwarded WebDriver port control only the
-test machine; they do not host the user-facing application.
-
-For repeatable QA when the external network is slow, the test launcher optionally
-accepts `AGIOS_TEST_CACHE_ISO=/absolute/path/to/package-cache.iso`. The optical
-image must have label `AGIOS_CACHE`, with `core.db`, `extra.db` and their matching
-signed package archives at its root. It is attached read-only through both VM
-levels. Only the explicitly marked test environment forwards it to the inner
-installer; that installer uses it as a temporary file mirror in its live
-`pacman.conf`. Package signature verification stays enabled. The installed
-system retains its normal `pacman.conf` and official network mirrorlist. The
-cache is not bundled into the user-facing Live ISO and is not needed for normal
-networked installation.
-
-## Final-disk development test
-
-The outer test VM owns a separate 40 GiB `.local/live-test-final.qcow2`, serial
-`AGIOS_TARGET`. In a marked test VM, only this serial is eligible for deployment;
-the mounted workspace is not a target. After successful deployment, shut down
-Live and run `scripts/run-live-web-vm.sh --mode disk`. This boots the final disk
-without the Live ISO, workspace or package cache.
-
-The tested Hyprland path uses virtio-vga with Mesa software rendering. Accelerated
-nested 3D did not pass the display test and is opt-in: `AGIOS_TEST_GL=1` for the
-outer launcher, `AGIOS_PREVIEW_GL=1` in the Live service for the inner VM. These
-experimental modes use EGL headless, virtio-vga-gl and a render node. The host
-launcher accepts `AGIOS_RENDER_NODE`; otherwise it prefers a non-NVIDIA node.
-QEMU needs matching virtio GPU, OpenGL, EGL and virglrenderer modules. Software
-rendering is sufficient for this prototype test, not a performance claim.
+- Disks with MBR partition tables: only the explicit whole-disk erase.
+- Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
+  hibernation) is refused by `ntfsresize` — shut Windows down fully first.
+- Swap is zram; hibernation is not configured.
+- Physical hardware runs are still pending; QEMU/KVM (nested for the inner VM)
+  is the verified environment.

@@ -7,12 +7,14 @@ from a user's natural-language request to a usable installed system. The live
 agent must perform the installation through conversation. Record any unexpected
 manual repair, skipped stage, or mismatch with the agreed requirements.
 
-Status: the minimal console flow passed on 2026-09-14 using a real model through
-the private host bridge: dialogue → disk installation → boot without ISO → first
-use → second boot with persisted data. QA reports and screenshots are kept locally and delivered separately; they are not committed.
-Two earlier attempts failed; their fixes were followed by a clean R3 installation.
-Browser provider login, desktop installations and negative scenarios remain unverified.
-Unit and GTK demo checks are separate from real installation acceptance.
+Status: on 2026-09-21 the reversible-preview flow passed in QEMU with the clean
+mkarchiso ISO: (A) UEFI, minimal console, preview in memory (zram), file-level
+copy to the target disk, two boots with `agi-os-verify` complete; (B) BIOS, XFCE
+with LUKS2, preview in a temporary partition of the target disk, promotion
+without copying, two boots. The dialogue in that run used the scripted test
+provider (ChatGPT quota exhausted); the real-model dialogue was verified on
+2026-09-14 and 2026-09-17. Reports and screenshots are delivered separately.
+Physical hardware, browser provider login and negative scenarios remain pending.
 
 ## Test environment
 

@@ -4,14 +4,18 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
+import subprocess
 import sys
+import tempfile
 import tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] /
     'archiso/airootfs/usr/local/share/agi-os/installer'))
 from chatgpt import ChatGPTProvider
+from domain import REPLY_SCHEMA, validate_reply
 from providers import ProviderError
 
 LIMIT = 250_000
@@ -39,10 +43,44 @@ def host_model():
         raise ProviderError('Укажите --model или настройте модель Codex на хосте') from None
 
 
-class Bridge:
+class ClaudeCodeBackend:
+    """Host Claude Code in headless mode: the same mechanism the product uses for a
+    "sign in with Claude" provider inside Live. No tools, no settings, no session files;
+    only the installer's system prompt and the bounded dialogue reach the model."""
+
     def __init__(self, model):
+        if not shutil.which('claude'):
+            raise ProviderError('Claude Code не установлен на хосте')
+        self.model = model
+        self.home = Path(tempfile.mkdtemp(prefix='agi-bridge-claude-'))
+
+    def reply(self, system, messages):
+        command = ['claude', '-p', '--model', self.model, '--output-format', 'json', '--no-session-persistence',
+                   '--tools', '', '--setting-sources', '', '--strict-mcp-config', '--max-turns', '4',
+                   '--system-prompt', system, '--json-schema', json.dumps(REPLY_SCHEMA),
+                   json.dumps(messages, ensure_ascii=False)]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=240, cwd=self.home, stdin=subprocess.DEVNULL)
+            data = json.loads(result.stdout)
+            if result.returncode or data.get('is_error') or data.get('subtype') != 'success':
+                print(f"claude-code: rc={result.returncode} subtype={data.get('subtype')} is_error={data.get('is_error')} "
+                      f"stderr={result.stderr[-300:]!r}", file=sys.stderr, flush=True)
+                raise ProviderError('Claude Code не завершил ответ')
+            return validate_reply(data['structured_output'])
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"claude-code: {type(exc).__name__}: {str(exc)[:300]}", file=sys.stderr, flush=True)
+            raise ProviderError('Claude Code не вернул структурированный ответ') from None
+
+    def close(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+
+class Bridge:
+    def __init__(self, model, scripted=None, backend='chatgpt'):
         self.model = model
         self.provider = None
+        self.scripted = scripted  # Test-only: a fixed configuration instead of a live model.
+        self.backend = backend
 
     def close(self):
         if self.provider:
@@ -63,7 +101,15 @@ class Bridge:
                     m['role'] not in ('user', 'assistant') or not isinstance(m['content'], str)
                     for m in messages)):
             raise ProviderError('Некорректный диалог')
+        if self.scripted is not None:
+            return {'message': 'Тестовый сценарий: конфигурация подготовлена заранее и передана приложению на проверку. '
+                               'Пароль и шифрование задаются в приватной форме; запись диска не начиналась.',
+                    'suggestions': [], 'lookup': [], 'configuration': self.scripted}
         try:
+            if self.backend == 'claude-code':
+                if self.provider is None:
+                    self.provider = ClaudeCodeBackend(self.model)
+                return self.provider.reply(system, messages)
             if self.provider is None:
                 self.provider = ChatGPTProvider(token_source=host_tokens)
             # Reload the host's latest token before every turn and on refresh requests.
@@ -112,16 +158,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', type=Path, required=True)
     parser.add_argument('--model')
+    parser.add_argument('--scripted', type=Path, help='test only: JSON configuration returned instead of a model reply')
+    parser.add_argument('--backend', choices=('chatgpt', 'claude-code'), default='chatgpt',
+                        help='host login to use: Codex app-server (ChatGPT) or headless Claude Code')
     args = parser.parse_args()
-    bridge = Bridge(args.model or host_model())
+    scripted = json.loads(args.scripted.read_text()) if args.scripted else None
+    default_model = 'scripted-test' if scripted is not None else ('sonnet' if args.backend == 'claude-code' else host_model())
+    bridge = Bridge(args.model or default_model, scripted, args.backend)
     def stop(*_):
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stop)
     try:
-        host_tokens()  # Fail before QEMU starts if the host has never signed in.
+        if scripted is None and args.backend == 'chatgpt':
+            host_tokens()  # Fail before QEMU starts if the host has never signed in.
         serve(args.socket, bridge)
-    except Exception:
-        print('Cannot start development bridge: check host Codex login and private socket directory', file=sys.stderr)
+    except Exception as exc:
+        # The exception type helps local debugging; provider errors never carry secrets.
+        print(f'Cannot start development bridge ({type(exc).__name__}): check host login and private socket directory', file=sys.stderr)
         return 1
     finally:
         bridge.close()
