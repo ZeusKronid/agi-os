@@ -67,12 +67,17 @@
   --animate-ripple: ripple 2.6s linear infinite;
   --animate-ping-ring: ping-ring 1.6s var(--ease-out-strong) infinite;
   --animate-wave: wave 0.8s ease-in-out infinite;
-  /* Живой восход hero: солнце встаёт из-за заголовка, дуга дорисовывается, зенит и точки проявляются последними. */
+  /* Живой восход hero, как в прототипе: солнце встаёт из-за заголовка, дуга рисуется вдоль себя в темпе
+     подъёма, каждый луч растёт от дуги наружу (задержка и длительность — инлайн у луча: у зенита раньше
+     и быстрее, у горизонта позже и дольше), зенит и точки проявляются последними. Только transform,
+     rotate и opacity HTML-слоёв: их ведёт композитор, так что гидрация не замораживает вход. */
   --animate-sun-rise: sun-rise 1.8s var(--ease-out-strong) 0.25s both;
-  --animate-sun-arc: sun-arc 1.6s var(--ease-in-out-strong) 0.3s both;
-  /* Задержка у каждого луча своя (инлайн `animation-delay`): от зенита к горизонту. */
-  --animate-sun-ray: sun-arc 1.2s var(--ease-out-strong) both;
-  --animate-sun-late: sun-late 0.7s var(--ease-out-strong) 1.2s both;
+  --animate-sun-sweep: sun-sweep 1.8s var(--ease-out-strong) 0.25s both;
+  --animate-sun-unsweep: sun-sweep 1.8s var(--ease-out-strong) 0.25s both;
+  --animate-sun-ray: sun-ray 1s var(--ease-out-strong) both;
+  --animate-sun-late: sun-late 1.1s var(--ease-out-strong) 0.55s both;
+  /* Шапка на входе: элементы опускаются на место, быстрее и короче, чем подъём hero. */
+  --animate-drop: drop 0.7s var(--ease-out-strong) both;
   /* Дорисовка штриха с `pathLength=1` и `stroke-dasharray: 1` (кольцо «Ready to boot»). */
   --animate-draw: draw 1s var(--ease-in-out-strong) both;
 
@@ -82,15 +87,27 @@
       transform: translateY(1.25rem);
     }
   }
-  /* Сдвиг в единицах viewBox восхода (0.55 радиуса): старт за линией горизонта. */
+  /* Сдвиг 0.55 радиуса (85 из 336 единиц высоты слоя): старт за линией горизонта. */
   @keyframes sun-rise {
     from {
-      transform: translateY(85px);
+      transform: translateY(25.3%);
     }
   }
-  @keyframes sun-arc {
+  @keyframes sun-ray {
     from {
-      stroke-dashoffset: 1;
+      transform: scaleX(0);
+    }
+  }
+  /* Окно дуги и дуга внутри стартуют без поворота; конечный поворот (±180°) стоит на элементах. */
+  @keyframes sun-sweep {
+    from {
+      rotate: 0deg;
+    }
+  }
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
     }
   }
   @keyframes sun-late {
