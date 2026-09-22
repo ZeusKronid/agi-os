@@ -16,6 +16,11 @@ export interface SunburstSpec {
   fade: readonly [number, number]
   strokeWidth: number
   farDots: boolean
+  /**
+   * Запас длины луча: луч рисуется в `reach` раз длиннее и в покое укорочен через `stroke-dashoffset`,
+   * чтобы его можно было вытянуть анимацией, не пересчитывая координаты.
+   */
+  reach?: number
 }
 
 export interface Ray {
@@ -24,6 +29,10 @@ export interface Ray {
   x2: string
   y2: string
   opacity: string
+  /** Положение на дуге: 0 — левый край горизонта, 1 — правый (у диска — доля оборота). */
+  sweep: string
+  /** Высота над горизонтом у полукруга: 0 — у горизонта, 1 — в зените. */
+  height: string
 }
 
 /** Детерминированный ГПСЧ: сервер и клиент обязаны получить одинаковую разметку. */
@@ -48,8 +57,9 @@ export function buildRays(spec: SunburstSpec): Ray[] {
   return Array.from({ length: count }, (_, index) => {
     const major = index % 4 === 0
     const angle = Math.PI + (span * index) / spec.rays
-    const length = spec.radius * (major ? spec.long : between(spec.shortMin, spec.shortMax))
+    const length = spec.radius * (major ? spec.long : between(spec.shortMin, spec.shortMax)) * (spec.reach ?? 1)
     const opacity = major ? 0.85 : between(0.3, 0.65)
+    const sweep = index / spec.rays
     const cos = Math.cos(angle)
     const sin = Math.sin(angle)
     return {
@@ -58,6 +68,8 @@ export function buildRays(spec: SunburstSpec): Ray[] {
       x2: (spec.cx + (inner + length) * cos).toFixed(1),
       y2: (spec.cy + (inner + length) * sin).toFixed(1),
       opacity: opacity.toFixed(2),
+      sweep: sweep.toFixed(3),
+      height: (1 - Math.abs(1 - 2 * sweep)).toFixed(3),
     }
   })
 }

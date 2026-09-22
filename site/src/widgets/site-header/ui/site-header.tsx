@@ -2,7 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 
 import { siteConfig } from '@/shared/config'
-import { ButtonLink } from '@/shared/ui/button'
+import { buttonStyles } from '@/shared/ui/button'
 import { Container } from '@/shared/ui/container'
 import { ArrowDownIcon } from '@/shared/ui/icon'
 import { Logo } from '@/shared/ui/logo'
@@ -59,9 +59,9 @@ export function SiteHeader() {
         </nav>
 
         <div className="flex items-center gap-3 justify-self-end sm:order-3">
-          <ButtonLink href={siteConfig.links.download} size="sm" className="max-sm:hidden">
+          <Link to="/install" className={buttonStyles({ size: 'sm', className: 'max-sm:hidden' })}>
             Get AGI OS <ArrowDownIcon />
-          </ButtonLink>
+          </Link>
           <button
             type="button"
             aria-expanded={open}

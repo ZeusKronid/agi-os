@@ -62,7 +62,7 @@ export const gettingStarted: DocPage = {
       content: (
         <>
           <p>
-            <a href={siteConfig.links.download}>Download the image</a>, write it to a USB stick or attach it to a
+            <a href={siteConfig.links.install}>Download the image</a>, write it to a USB stick or attach it to a
             virtual machine, and boot. A Firefox window opens the installer by itself. At this point nothing on your
             disk has changed.
           </p>

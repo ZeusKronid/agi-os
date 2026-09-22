@@ -1,8 +1,8 @@
-import { useId, type ComponentProps } from 'react'
+import { useId, type ComponentProps, type CSSProperties } from 'react'
 
 import { ARC_DOTS, buildRays, type SunburstSpec } from './rays'
 
-type SunburstVariant = 'hero' | 'mark' | 'disc'
+type SunburstVariant = 'hero' | 'mark' | 'disc' | 'split'
 
 const specs: Record<SunburstVariant, SunburstSpec> = {
   // Большой восход над заголовком hero.
@@ -14,6 +14,11 @@ const specs: Record<SunburstVariant, SunburstSpec> = {
   mark: {
     width: 240, height: 98, cx: 120, cy: 92, radius: 60, rays: 40, full: false, seed: 3,
     long: 0.37, shortMin: 0.13, shortMax: 0.27, fade: [1.03, 1.46], strokeWidth: 1, farDots: false,
+  },
+  // Восход hero, разрезанный швом между карточками Get involved: лучи с запасом длины, без центрального луча.
+  split: {
+    width: 640, height: 246, cx: 320, cy: 236, radius: 155, rays: 96, full: false, seed: 7,
+    long: 0.37, shortMin: 0.13, shortMax: 0.27, fade: [1.03, 1.75], strokeWidth: 1, farDots: false, reach: 1.45,
   },
   // Полный диск — приглушённый задник внутри окна демо.
   disc: {
@@ -27,19 +32,27 @@ const rays = {
   hero: buildRays(specs.hero),
   mark: buildRays(specs.mark),
   disc: buildRays(specs.disc),
+  split: buildRays(specs.split),
 } satisfies Record<SunburstVariant, unknown>
 
 interface SunburstProps extends Omit<ComponentProps<'svg'>, 'children'> {
   variant: SunburstVariant
 }
 
-/** Знак-восход: тонкая коралловая дуга с лучами. Декоративный, скрыт от ассистивных технологий. */
+/**
+ * Знак-восход: тонкая коралловая дуга с лучами. Декоративный, скрыт от ассистивных технологий.
+ *
+ * У варианта с `reach` лучи и дуга размечены `pathLength=1` и управляются через `stroke-dashoffset`:
+ * в покое луч укорочен до обычной длины, а `--sun-extend: 1` на любом предке вытягивает его целиком
+ * волной от зенита к горизонту. Дугу и лучи можно дорисовать анимацией: `[data-sun-arc]`, `[data-sun-ray]`.
+ */
 export function Sunburst({ variant, ...props }: SunburstProps) {
   const spec = specs[variant]
   const id = useId().replace(/[^a-zA-Z0-9_-]/g, '')
   const fadeId = `sun-fade-${id}`
   const maskId = `sun-mask-${id}`
   const { cx, cy, radius } = spec
+  const reach = spec.reach
 
   return (
     <svg
@@ -60,23 +73,51 @@ export function Sunburst({ variant, ...props }: SunburstProps) {
       </defs>
 
       <g mask={`url(#${maskId})`} strokeWidth={spec.strokeWidth}>
-        {rays[variant].map((ray, index) => (
-          <line key={index} x1={ray.x1} y1={ray.y1} x2={ray.x2} y2={ray.y2} strokeOpacity={ray.opacity} />
-        ))}
+        {rays[variant].map((ray, index) =>
+          reach ? (
+            <line
+              key={index}
+              data-sun-ray
+              data-sweep={ray.sweep}
+              pathLength={1}
+              x1={ray.x1}
+              y1={ray.y1}
+              x2={ray.x2}
+              y2={ray.y2}
+              strokeOpacity={ray.opacity}
+              className="[stroke-dasharray:1_1] [stroke-dashoffset:calc((1_-_var(--sun-extend,0))_*_var(--sun-rest))] transition-[stroke-dashoffset] duration-700 ease-out-strong motion-reduce:transition-none"
+              style={
+                {
+                  '--sun-rest': (1 - 1 / reach).toFixed(3),
+                  transitionDelay: `${Math.round((1 - Number(ray.height)) * 260)}ms`,
+                } as CSSProperties
+              }
+            />
+          ) : (
+            <line key={index} x1={ray.x1} y1={ray.y1} x2={ray.x2} y2={ray.y2} strokeOpacity={ray.opacity} />
+          ),
+        )}
       </g>
 
       <g strokeWidth="1.5">
         {spec.full ? (
           <circle cx={cx} cy={cy} r={radius} />
         ) : (
-          <path d={`M${cx - radius} ${cy}A${radius} ${radius} 0 0 1 ${cx + radius} ${cy}`} />
+          <path
+            d={`M${cx - radius} ${cy}A${radius} ${radius} 0 0 1 ${cx + radius} ${cy}`}
+            {...(reach ? { 'data-sun-arc': true, pathLength: 1, strokeDasharray: '1 1' } : {})}
+          />
         )}
       </g>
 
       {!spec.full && (
         <g fill="currentColor" stroke="none">
-          <line x1={cx} y1={cy - radius} x2={cx} y2={(cy - radius * 0.46).toFixed(1)} stroke="currentColor" strokeWidth="1" />
-          <circle cx={cx} cy={(cy - radius * 0.43).toFixed(1)} r="2.2" />
+          {!reach && (
+            <>
+              <line x1={cx} y1={cy - radius} x2={cx} y2={(cy - radius * 0.46).toFixed(1)} stroke="currentColor" strokeWidth="1" />
+              <circle cx={cx} cy={(cy - radius * 0.43).toFixed(1)} r="2.2" />
+            </>
+          )}
           {ARC_DOTS.map((degrees) => {
             const angle = (degrees * Math.PI) / 180
             return (

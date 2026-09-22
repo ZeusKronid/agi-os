@@ -13,7 +13,7 @@ const groups = [
   {
     title: 'Product',
     links: [
-      { label: 'Download ISO', href: siteConfig.links.download },
+      { label: 'Download ISO', href: siteConfig.links.install },
       { label: 'How it works', href: `/#${sectionIds.demo}` },
       { label: 'Evidence', href: siteConfig.links.evidence },
     ],
