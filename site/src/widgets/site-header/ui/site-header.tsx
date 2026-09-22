@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { siteConfig } from '@/shared/config'
 import { buttonStyles } from '@/shared/ui/button'
 import { Container } from '@/shared/ui/container'
-import { ArrowDownIcon } from '@/shared/ui/icon'
+import { ArrowDownIcon, GitHubIcon } from '@/shared/ui/icon'
 import { Logo } from '@/shared/ui/logo'
 
 import { mountHeaderScroll } from '../lib/mount-header-scroll'
@@ -64,7 +64,14 @@ export function SiteHeader() {
           </ul>
         </nav>
 
-        <div className="flex items-center gap-3 justify-self-end motion-safe:animate-drop motion-safe:[animation-delay:260ms] sm:order-3">
+        <div className="flex items-center gap-3 justify-self-end motion-safe:animate-drop motion-safe:[animation-delay:260ms] sm:order-3 sm:gap-5">
+          <a
+            href={siteConfig.links.repo}
+            aria-label={`${siteConfig.name} on GitHub`}
+            className="text-ink-muted transition-colors duration-200 hover:text-ink"
+          >
+            <GitHubIcon className="size-[22px]" />
+          </a>
           <Link to="/install" className={buttonStyles({ size: 'sm', className: 'max-sm:hidden' })}>
             Get AGI OS <ArrowDownIcon />
           </Link>
