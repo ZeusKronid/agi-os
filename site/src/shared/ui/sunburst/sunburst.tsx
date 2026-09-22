@@ -55,8 +55,9 @@ interface SunburstProps extends Omit<ComponentProps<'svg'>, 'children'> {
  * волной от зенита к горизонту. Дугу и лучи можно дорисовать анимацией: `[data-sun-arc]`, `[data-sun-ray]`.
  *
  * У варианта с `headroom` (`live`) viewBox продлён вверх, а солнце обрезано по горизонту: оно встаёт
- * из-за линии основания (CSS, с первой отрисовки), а длину лучей потом каждый кадр ведёт JS
- * (`widgets/hero/lib/mount-live-sun.ts`). Без JS это законченный статичный восход hero.
+ * из-за линии основания CSS-анимациями, которые ждут на паузе атрибута `data-sun-go` (его ставит
+ * `widgets/hero/lib/mount-live-sun.ts`, когда главный поток свободен), а длину лучей потом каждый кадр
+ * ведёт JS. Без JS паузу снимает `<noscript>` в hero, и вход играет сразу.
  */
 export function Sunburst({ variant, className, ...props }: SunburstProps) {
   const spec = specs[variant]
@@ -165,7 +166,8 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
         data-cx={cx}
         data-cy={cy}
         data-r={radius}
-        className={cn('overflow-visible', className)}
+        // Вход стоит на паузе, пока JS не поставит `data-sun-go` (страница освободилась после гидрации).
+        className={cn('overflow-visible [&:not([data-sun-go])_*]:[animation-play-state:paused]', className)}
         {...props}
       >
         {defs}
