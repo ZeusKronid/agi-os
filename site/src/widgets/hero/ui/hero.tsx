@@ -39,10 +39,10 @@ export function Hero() {
           </em>{' '}
           <span className="inline-block motion-safe:animate-rise motion-safe:[animation-delay:180ms]">Linux.</span>
         </h1>
-        <p className="mt-[clamp(14px,2.2vh,24px)] font-mono text-[length:clamp(11px,0.95vw,13.5px)] tracking-[0.36em] text-ink-muted uppercase motion-safe:animate-rise motion-safe:[animation-delay:300ms] max-sm:leading-[1.7] max-sm:tracking-[0.2em]">
+        <p className="mt-[clamp(14px,2.2vh,24px)] font-mono text-[length:clamp(11px,0.95vw,13.5px)] tracking-[0.36em] text-ink-muted uppercase motion-safe:animate-rise motion-safe:[animation-delay:520ms] max-sm:leading-[1.7] max-sm:tracking-[0.2em]">
           Infrastructure for a more capable tomorrow.
         </p>
-        <div className="mt-[clamp(22px,3.4vh,34px)] flex flex-wrap justify-center gap-5 motion-safe:animate-rise motion-safe:[animation-delay:380ms] max-sm:gap-3">
+        <div className="mt-[clamp(22px,3.4vh,34px)] flex flex-wrap justify-center gap-5 motion-safe:animate-rise motion-safe:[animation-delay:620ms] max-sm:gap-3">
           <Link to="/install" className={buttonStyles({ className: 'min-w-[200px]' })}>
             Get AGI OS <ArrowDownIcon />
           </Link>
@@ -52,7 +52,7 @@ export function Hero() {
         </div>
         <InstallDemo
           id={sectionIds.demo}
-          className="mx-auto mt-[clamp(22px,3.6vh,52px)] max-w-[920px] motion-safe:animate-rise motion-safe:[animation-delay:480ms]"
+          className="mx-auto mt-[clamp(22px,3.6vh,52px)] max-w-[920px] motion-safe:animate-rise motion-safe:[animation-delay:760ms]"
         />
       </Container>
     </section>
