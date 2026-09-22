@@ -18,7 +18,7 @@ export const siteConfig = {
   license: 'Apache-2.0',
   links: {
     repo,
-    docs: `${repo}#readme`,
+    docs: '/docs',
     // TODO: заменить на страницу релиза с ISO и контрольной суммой, когда она появится.
     download: repo,
     evidence: `${repo}/tree/HEAD/docs/test-results`,
@@ -29,5 +29,7 @@ export const siteConfig = {
     { label: 'Features', href: `/#${sectionIds.features}` },
     { label: 'FAQ', href: `/#${sectionIds.faq}` },
     { label: 'Get Involved', href: `/#${sectionIds.involved}` },
+    // Отдельная страница, а не якорь: шапка рендерит её через router `Link`.
+    { label: 'Docs', to: '/docs' },
   ],
 } as const
