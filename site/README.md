@@ -59,11 +59,11 @@ src/
 │   ├── routes/              #   тонкие file routes TanStack (только связывают URL со страницей)
 │   ├── layouts/             #   RootDocument: <html>, <head>, каркас, монтирование Lenis
 │   └── styles/              #   глобальный CSS, токены темы Tailwind (@theme), keyframes
-├── pages/                   # страницы: home, not-found
+├── pages/                   # страницы: home, docs, install, not-found
 ├── widgets/                 # секции страницы: site-header, hero, agents-marquee, feature-grid,
 │                            #   faq, get-involved, site-footer
-├── features/                # пользовательские возможности: install-demo, scroll-progress
-├── entities/                # бизнес-сущности: agent (адаптеры + иконки), tool (инструменты + иконки)
+├── features/                # пользовательские возможности: install-demo, install-route, docs-search, scroll-progress
+├── entities/                # бизнес-сущности: agent, tool, doc, release (ISO: версия, SHA-256, ссылка)
 └── shared/                  # переиспользуемый фундамент без бизнес-логики
     ├── config/              #   siteConfig (ссылки, навигация), sectionIds
     ├── lib/cn/              #   cn()

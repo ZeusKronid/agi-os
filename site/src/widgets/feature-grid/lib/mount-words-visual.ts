@@ -22,7 +22,7 @@ function collect(root: HTMLElement): Refs | null {
   }
 }
 
-/** Ролик: 0,4 с тишины → волна 3,2 с → пауза со сказанной фразой → схлопывание → 0,6 с пустоты → снова. */
+/** Ролик: 0,4 с тишины → волна 3,2 с → «got it» держится 5 с → сброс справа налево за ~0,9 с → 0,5 с пустоты → снова. */
 function build(refs: Refs): gsap.core.Timeline {
   const { label, mic, bars, words } = refs
   const N = bars.length
@@ -30,20 +30,12 @@ function build(refs: Refs): gsap.core.Timeline {
   // Амплитуды и моменты «дослушано» — общий профиль речи (`shared/lib/motion/speech`).
   const { amplitude, clusters, heardAt } = speechProfile(N)
 
-  // Схлопывание волны: каждый столбик едет к центру дорожки.
-  const waveRect = bars[0]?.parentElement?.getBoundingClientRect()
-  const collapseX = bars.map((bar) => {
-    if (!waveRect) return 0
-    const rect = bar.getBoundingClientRect()
-    return waveRect.left + waveRect.width / 2 - (rect.left + rect.width / 2)
-  })
-
   // force3D: false — иначе GSAP на время твина переводит каждый из 84 столбиков в отдельный слой композитора.
   // Состояния (`data-*`) меняются через `set({ attr })`, а не `call()`: перемотка назад честно возвращает прежние значения.
   const tl = gsap.timeline({ repeat: -1, paused: true, defaults: { ease: 'expo.out', force3D: false } })
 
   // Сброс в начале каждого цикла.
-  tl.set(bars, { scaleY: 0.04, opacity: 1, x: 0, attr: { 'data-hit': 'false' } })
+  tl.set(bars, { scaleY: 0.04, attr: { 'data-hit': 'false' } })
   tl.set(words, { opacity: 0, y: 4, attr: { 'data-hit': 'false' } })
   tl.set(mic, { attr: { 'data-on': 'true' } })
   tl.set(label, { attr: { 'data-state': 'listening' } })
@@ -65,14 +57,19 @@ function build(refs: Refs): gsap.core.Timeline {
     if (isTool) tl.set(word, { attr: { 'data-hit': 'true' } }, at + 0.08)
   })
 
-  // Got it: микрофон гаснет, фраза остаётся висеть, потом уходит вместе с волной.
+  // Got it: микрофон гаснет, фраза и окрашенная волна держатся 5 с.
   tl.set(mic, { attr: { 'data-on': 'false' } }, 3.9)
   tl.set(label, { attr: { 'data-state': 'heard' } }, 3.9)
-  tl.to(words, { opacity: 0, y: -4, duration: 0.35, ease: 'power1.in' }, 5.7)
-  bars.forEach((bar, i) =>
-    tl.to(bar, { x: collapseX[i], scaleY: 0.04, opacity: 0, duration: 0.55, ease: 'power3.in' }, 5.65 + Math.abs(i / N - 0.5) * 0.15),
-  )
-  tl.to(label, { duration: 0.6 }, 6.4)
+
+  // Сброс справа налево: слова стираются с конца, столбики теряют цвет и оседают к базовой линии, как ластиком.
+  const RESET = 8.9
+  ;[...words].reverse().forEach((word, i) => tl.to(word, { opacity: 0, y: 0, duration: 0.2, ease: 'power1.in' }, RESET + i * 0.07))
+  bars.forEach((bar, i) => {
+    const at = RESET + ((N - 1 - i) / N) * 0.6
+    tl.set(bar, { attr: { 'data-hit': 'false' } }, at)
+    tl.to(bar, { scaleY: 0.04, duration: 0.25, ease: 'power2.in' }, at)
+  })
+  tl.to(label, { duration: 0.5 }, RESET + 0.9)
 
   return tl
 }
@@ -81,7 +78,7 @@ function build(refs: Refs): gsap.core.Timeline {
  * Callback ref (React 19): ролик «слушаю» для карточки «Say it in words».
  * - Таймлайн GSAP с повтором; идёт только пока визуал виден, встаёт на паузу при фокусе внутри.
  * - Клик по микрофону запускает ролик заново.
- * - Схлопывание волны измеряется из раскладки, поэтому при ресайзе и после загрузки шрифтов таймлайн собирается заново.
+ * - Набор видимых столбиков зависит от раскладки (на мобильном каждый второй скрыт), поэтому при ресайзе и после загрузки шрифтов таймлайн собирается заново.
  * - SSR-разметка показывает фразу дослушанной: без JavaScript карточка остаётся законченной картинкой.
  */
 export function mountWordsVisual(root: HTMLElement | null): void | (() => void) {

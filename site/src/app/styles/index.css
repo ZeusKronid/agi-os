@@ -59,6 +59,8 @@
   --animate-ripple: ripple 2.6s linear infinite;
   --animate-ping-ring: ping-ring 1.6s var(--ease-out-strong) infinite;
   --animate-wave: wave 0.8s ease-in-out infinite;
+  /* Дорисовка штриха с `pathLength=1` и `stroke-dasharray: 1` (кольцо «Ready to boot»). */
+  --animate-draw: draw 1s var(--ease-in-out-strong) both;
 
   @keyframes rise {
     from {
@@ -106,6 +108,14 @@
   @keyframes wave {
     50% {
       transform: scaleY(3.2);
+    }
+  }
+  @keyframes draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
     }
   }
   @keyframes ping-ring {
