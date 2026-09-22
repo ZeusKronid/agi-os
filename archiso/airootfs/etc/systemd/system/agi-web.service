@@ -1,13 +1,14 @@
 [Unit]
 Description=AGIOS localhost website and preview VM manager
 Wants=network-online.target
-After=network-online.target agi-guacd.service agi-test-workspace.service
+After=network-online.target agi-guacd.service
 Requires=agi-guacd.service
+ConditionKernelCommandLine=!agios.guest
 [Service]
 Type=simple
 User=agi
 Group=agi
-SupplementaryGroups=kvm render video
+SupplementaryGroups=kvm render video disk optical
 StateDirectory=agi-os
 Environment=AGIOS_DATA_DIR=/var/lib/agi-os
 Environment=DISPLAY=:0

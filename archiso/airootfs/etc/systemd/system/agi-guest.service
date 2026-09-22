@@ -1,0 +1,12 @@
+[Unit]
+Description=AGIOS preview VM guest: installer over the private virtio channel
+After=systemd-udev-settle.service network-online.target
+Wants=systemd-udev-settle.service network-online.target
+ConditionKernelCommandLine=agios.guest
+[Service]
+Type=simple
+ExecStart=/usr/bin/python -u /usr/local/share/agi-os/web/guest.py
+StandardOutput=journal
+StandardError=journal
+[Install]
+WantedBy=multi-user.target

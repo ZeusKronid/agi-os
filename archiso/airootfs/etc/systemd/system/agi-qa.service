@@ -1,0 +1,16 @@
+[Unit]
+Description=AGIOS test-only serial instrumentation
+After=agi-web.service systemd-udev-settle.service
+ConditionPathExists=/sys/firmware/qemu_fw_cfg/by_name/opt/org.agi-os.test/raw
+ConditionPathExists=/dev/virtio-ports/org.agi-os.qa
+ConditionKernelCommandLine=!agios.guest
+[Service]
+User=agi
+Group=agi
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/agi/.Xauthority
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/usr/bin/python -u /usr/local/share/agi-os/qa-guest.py
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target

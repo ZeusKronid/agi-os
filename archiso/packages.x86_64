@@ -73,6 +73,7 @@ xorg-xrandr
 zsh
 
 # Local website and preview VM inside the Live environment
+ntfs-3g
 python-aiohttp
 qemu-system-x86
 qemu-img
