@@ -93,12 +93,19 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
     ) : (
       <line
         key={index}
-        {...(live ? { 'data-sun-ray': true } : {})}
         x1={ray.x1}
         y1={ray.y1}
         x2={ray.x2}
         y2={ray.y2}
         strokeOpacity={ray.opacity}
+        {...(live && {
+          // Лучи вырастают от дуги наружу: сначала у зенита, к горизонту позже (как подъём в прототипе).
+          'data-sun-ray': true,
+          pathLength: 1,
+          strokeDasharray: '1 1',
+          className: 'motion-safe:animate-sun-ray',
+          style: { animationDelay: `${(0.25 + (1 - Number(ray.height)) * 0.6).toFixed(2)}s` },
+        })}
       />
     ),
   )

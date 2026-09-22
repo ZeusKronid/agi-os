@@ -112,12 +112,16 @@ function showState(tl: Timeline, states: HTMLElement[], index: number, at: numbe
   states.forEach((state, i) => tl.to(state, { autoAlpha: i === index ? 1 : 0, duration: 0.25 }, at))
 }
 
-/** Рамка-прогресс: штрих дорисовывается линейно внутри каждого шага, чтобы совпадать с легендой. */
+/**
+ * Рамка-прогресс: штрих дорисовывается линейно внутри каждого шага, чтобы совпадать с легендой.
+ * `pathLength=1` укладывает весь периметр в 0…1, поэтому `autoRound: false`: иначе GSAP округляет px
+ * до целых и рамка стоит пустой, а потом дорисовывается скачком.
+ */
 function rim(tl: Timeline, rect: SVGRectElement) {
   tl.set(rect, { strokeDashoffset: 1 }, 0)
   MARKS.forEach((mark, i) => {
     const end = MARKS[i + 1] ?? TOTAL
-    tl.to(rect, { strokeDashoffset: 1 - end / TOTAL, duration: end - mark, ease: 'none' }, mark)
+    tl.to(rect, { strokeDashoffset: 1 - end / TOTAL, duration: end - mark, ease: 'none', autoRound: false }, mark)
   })
 }
 

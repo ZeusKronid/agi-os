@@ -70,6 +70,8 @@
   /* Живой восход hero: солнце встаёт из-за заголовка, дуга дорисовывается, зенит и точки проявляются последними. */
   --animate-sun-rise: sun-rise 1.8s var(--ease-out-strong) 0.25s both;
   --animate-sun-arc: sun-arc 1.6s var(--ease-in-out-strong) 0.3s both;
+  /* Задержка у каждого луча своя (инлайн `animation-delay`): от зенита к горизонту. */
+  --animate-sun-ray: sun-arc 1.2s var(--ease-out-strong) both;
   --animate-sun-late: sun-late 0.7s var(--ease-out-strong) 1.2s both;
   /* Дорисовка штриха с `pathLength=1` и `stroke-dasharray: 1` (кольцо «Ready to boot»). */
   --animate-draw: draw 1s var(--ease-in-out-strong) both;
