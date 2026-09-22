@@ -41,9 +41,9 @@ export function InstallDemo({ id, className }: InstallDemoProps) {
         ))}
       </div>
 
-      {/* Высота окна на десктопе: всё, что остаётся от первого экрана после шапки, восхода, заголовка,
-          кнопок и отступов (≈660px), в пределах 436–620px. На мобайле — фиксированный минимум. */}
-      <div className="relative min-h-[clamp(436px,calc(100svh_-_660px),620px)] overflow-hidden rounded-2xl bg-[#0d0a09] inset-ring inset-ring-line max-sm:min-h-[450px]">
+      {/* Высота окна на десктопе — 62% экрана (480–700px): окно начинается ниже середины первого экрана
+          и уходит за сгиб, приглашая скроллить. На мобайле — фиксированный минимум. */}
+      <div className="relative min-h-[clamp(480px,62svh,700px)] overflow-hidden rounded-2xl bg-[#0d0a09] inset-ring inset-ring-line max-sm:min-h-[450px]">
         <svg data-rim="" aria-hidden="true" className="pointer-events-none absolute inset-0 z-[4] size-full text-accent">
           <rect
             data-rim-path=""

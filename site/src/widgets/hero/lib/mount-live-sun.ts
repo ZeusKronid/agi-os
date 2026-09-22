@@ -10,6 +10,10 @@ const IDLE_PERIOD_MS = 2600
 /** Насколько голос удлиняет луч и сколько энергии волны за кадр считается «громко». */
 const VOICE_REACH = 0.7
 const VOICE_FULL = 0.22
+/** Длительность входа солнца (CSS: задержки лучей + 1,2 с роста); после неё начинается дыхание. */
+const ENTRANCE_MS = 2300
+/** Сколько ждать свободного главного потока до старта входа. */
+const IDLE_TIMEOUT_MS = 1200
 /** Шаги демо (Listen · Preview · Build · Install) — внутренние точки дуги: 205°, 243°, 297°, 335°. */
 const STEP_DOTS = [1, 2, 3, 4] as const
 
@@ -33,7 +37,10 @@ const noise = (index: number) => {
 
 /**
  * Callback ref (React 19) на секцию hero: оживляет `Sunburst variant="live"`.
- * - Подъём из-за заголовка и дорисовка дуги — чистый CSS с первой отрисовки; здесь только длина лучей и точки.
+ * - Подъём из-за заголовка и дорисовка дуги — CSS, но старт даёт этот модуль: SVG-анимации идут в главном
+ *   потоке, и если начать их с первой отрисовки, гидрация и запуск остальных анимаций страницы (длинные
+ *   задачи на 60–100 мс) замораживают солнце посреди подъёма. Поэтому `data-sun-go` ставится, когда
+ *   главный поток свободен (`requestIdleCallback`), а до этого на месте солнца пусто.
  * - Лучи тянутся к курсору (линза), в покое линза медленно качается. Ниже горизонта курсор отражается вверх,
  *   так что линза идёт за ним по горизонтали. Тап работает так же.
  * - Солнце слушает демо: пока микрофон включён, энергия волны (сумма изменений столбиков за кадр)
@@ -70,7 +77,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   const motionSafe = window.matchMedia(MOTION_SAFE_QUERY)
   const lens = { angle: 1.5 * Math.PI, strength: 0 }
   const target = { angle: 1.5 * Math.PI, strength: 0 }
-  const start = performance.now()
+  let start = Number.POSITIVE_INFINITY
   let pointer = false
   let voice = 0
   let visible = false
@@ -114,8 +121,10 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     frame = 0
     const smooth = motionSafe.matches
     if (!pointer) {
-      target.angle = 1.5 * Math.PI + (smooth ? IDLE_SWING * Math.sin((now - start) / IDLE_PERIOD_MS) : 0)
-      target.strength = smooth ? IDLE_STRENGTH : 0
+      // Дыхание начинается после входа, чтобы не спорить с ростом лучей.
+      const breathing = smooth && now > start
+      target.angle = 1.5 * Math.PI + (breathing ? IDLE_SWING * Math.sin((now - start) / IDLE_PERIOD_MS) : 0)
+      target.strength = breathing ? IDLE_STRENGTH : 0
     }
     const ease = smooth ? 0.12 : 1
     lens.angle += (target.angle - lens.angle) * ease
@@ -150,6 +159,14 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     wake()
   }
 
+  const go = () => {
+    svg.setAttribute('data-sun-go', '')
+    start = performance.now() + ENTRANCE_MS
+  }
+  // В Safari нет `requestIdleCallback` — там просто короткая пауза.
+  const hasIdle = typeof window.requestIdleCallback === 'function'
+  const idle = hasIdle ? window.requestIdleCallback(go, { timeout: IDLE_TIMEOUT_MS }) : window.setTimeout(go, 300)
+
   const observer = new IntersectionObserver(([entry]) => {
     visible = !!entry?.isIntersecting
     wake()
@@ -161,6 +178,8 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   document.addEventListener('visibilitychange', wake)
 
   return () => {
+    if (hasIdle) window.cancelIdleCallback(idle)
+    else window.clearTimeout(idle)
     cancelAnimationFrame(frame)
     observer.disconnect()
     root.removeEventListener('pointermove', aim)
