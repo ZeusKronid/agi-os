@@ -1,0 +1,5 @@
+export { gsap, registerScrollTrigger } from './gsap'
+export { MOTION_SAFE_QUERY, REDUCED_MOTION_QUERY } from './media'
+export { revealOnScroll } from './reveal'
+export { mountSmoothScroll } from './smooth-scroll'
+export { SPEECH_SPANS, speechProfile, type SpeechProfile } from './speech'
