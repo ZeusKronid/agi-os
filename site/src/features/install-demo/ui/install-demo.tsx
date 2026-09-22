@@ -1,5 +1,4 @@
 import { cn } from '@/shared/lib/cn'
-import { Sunburst } from '@/shared/ui/sunburst'
 
 import { mountInstallDemo } from '../lib/mount-install-demo'
 import { BuildScene, InstallScene, ListenScene, PreviewScene, Scene } from './scenes'
@@ -56,10 +55,6 @@ export function InstallDemo({ id, className }: InstallDemoProps) {
             className="fill-none stroke-current stroke-[1.5] [stroke-dasharray:1] [stroke-dashoffset:1]"
           />
         </svg>
-        <Sunburst
-          variant="disc"
-          className="pointer-events-none absolute top-1/2 -right-[110px] size-[280px] -translate-y-1/2 text-accent opacity-[0.32] max-sm:hidden"
-        />
         <p
           aria-hidden="true"
           className="absolute top-[22px] left-6 z-[3] m-0 flex items-center gap-2 font-mono text-[10.5px] leading-none tracking-[0.16em] text-ink-muted uppercase max-sm:top-[18px] max-sm:left-4"
