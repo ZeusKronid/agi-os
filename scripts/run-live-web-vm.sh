@@ -1,30 +1,43 @@
 #!/usr/bin/env bash
-# External VM is only the test computer. The website and preview VM run inside it.
+# External test VM = the "computer". It boots the AGIOS Live ISO from an optical
+# drive; the website, agent, Guacamole and the inner preview VM run inside it.
+# Attached test disks: a blank target disk (serial AGIOS_TARGET) that plays the
+# computer's own disk, and an optional second medium (an exFAT "USB stick").
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
-mode=live
-if [[ ${1:-} == --mode ]]; then mode=${2:-}; shift 2; fi
-[[ $# == 0 && ( $mode == live || $mode == disk ) ]] || { echo 'Usage: run-live-web-vm.sh [--mode live|disk]'; exit 1; }
-iso=${AGIOS_LIVE_ISO:-$repo/out/agi-os-live-web.iso}
-[[ $mode == disk || -f "$iso" ]] || { echo 'Build out/agi-os-live-web.iso first.' >&2; exit 1; }
+mode=live firmware=uefi memory=10240 fresh=false target_size=20G iso=
+while (($#)); do
+    case "$1" in
+        --mode) mode=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        --memory) memory=$2; shift 2;;
+        --target-size) target_size=$2; shift 2;;
+        --iso) iso=$2; shift 2;;
+        --fresh) fresh=true; shift;;
+        *) echo 'Usage: run-live-web-vm.sh [--mode live|disk] [--firmware uefi|bios] [--memory MiB] [--target-size 20G] [--iso PATH] [--fresh]' >&2; exit 1;;
+    esac
+done
+[[ $mode == live || $mode == disk ]] || { echo 'Invalid mode' >&2; exit 1; }
+[[ $firmware == uefi || $firmware == bios ]] || { echo 'Invalid firmware' >&2; exit 1; }
+if [[ -z $iso ]]; then
+    shopt -s nullglob; images=(out/agi-os-20*-x86_64.iso); ((${#images[@]})) || { echo 'Build an ISO first: scripts/build-iso.sh' >&2; exit 1; }
+    iso=${images[${#images[@]}-1]}
+fi
+[[ $mode == disk || -f "$iso" ]] || { echo "ISO not found: $iso" >&2; exit 1; }
 [[ -r /dev/kvm && -w /dev/kvm ]] || { echo 'KVM unavailable'; exit 1; }
-if [[ -r /sys/module/kvm_intel/parameters/nested ]]; then
-    nested=$(cat /sys/module/kvm_intel/parameters/nested)
-elif [[ -r /sys/module/kvm_amd/parameters/nested ]]; then
-    nested=$(cat /sys/module/kvm_amd/parameters/nested)
+if [[ -r /sys/module/kvm_intel/parameters/nested ]]; then nested=$(cat /sys/module/kvm_intel/parameters/nested)
+elif [[ -r /sys/module/kvm_amd/parameters/nested ]]; then nested=$(cat /sys/module/kvm_amd/parameters/nested)
 else nested=N; fi
 [[ $mode == disk || $nested == Y || $nested == 1 ]] || { echo 'Enable nested virtualization on the test host.'; exit 1; }
 mkdir -p .local/live-test
-if [[ $mode == live && ! -f .local/live-test-workspace.img ]]; then
-    truncate -s 48G .local/live-test-workspace.img
-    mkfs.ext4 -q -F -L AGIOS_TESTDATA -E root_owner="$(id -u):$(id -g)" .local/live-test-workspace.img
+target=.local/live-test-target.qcow2
+if $fresh; then rm -f "$target" .local/live-test/OVMF_VARS-$firmware.fd; fi
+if [[ ! -f $target ]]; then
+    [[ $mode == live ]] || { echo 'No installed target disk'; exit 1; }
+    qemu-img create -q -f qcow2 "$target" "$target_size"
 fi
-if [[ ! -f .local/live-test-final.qcow2 ]]; then
-    [[ $mode == live ]] || { echo 'No installed final test disk'; exit 1; }
-    qemu-img create -q -f qcow2 .local/live-test-final.qcow2 40G
-fi
-[[ -f .local/live-test/OVMF_VARS.fd ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd .local/live-test/OVMF_VARS.fd
+media=.local/live-test-media.img   # Optional: created by scripts/web/make-test-media.sh
 bridge_dir= bridge_pid= qemu_pid=
 cleanup() {
     if [[ -n "$qemu_pid" ]]; then kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; fi
@@ -36,61 +49,64 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-memory=4096 cpus=4
+cpus=6
+if [[ $mode == disk ]]; then memory=4096 cpus=4; fi
 if [[ $mode == live ]]; then
-    memory=10240 cpus=6
     bridge_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/agios-live.XXXXXXXX")
-    python -B scripts/dev-bridge.py --socket "$bridge_dir/llm.sock" > .local/live-test/bridge.log 2>&1 &
+    bridge_args=(--socket "$bridge_dir/llm.sock")
+    # AGIOS_TEST_SCRIPTED=<config.json>: a fixed configuration instead of a live model (test only).
+    [[ -n ${AGIOS_TEST_SCRIPTED:-} ]] && bridge_args+=(--scripted "$AGIOS_TEST_SCRIPTED")
+    # AGIOS_TEST_BRIDGE=claude-code: route the dialogue through the host's headless Claude Code.
+    [[ -n ${AGIOS_TEST_BRIDGE:-} ]] && bridge_args+=(--backend "$AGIOS_TEST_BRIDGE")
+    python -B scripts/dev-bridge.py "${bridge_args[@]}" > .local/live-test/bridge.log 2>&1 &
     bridge_pid=$!
     for attempt in {1..100}; do [[ -S "$bridge_dir/llm.sock" ]] && break; sleep .1; done
     [[ -S "$bridge_dir/llm.sock" ]] || { echo 'LLM test bridge failed'; exit 1; }
 fi
-# The rootless ISO build also prepares matching optional host QEMU modules.
-if [[ -z ${QEMU_MODULE_DIR:-} && -d .local/test-qemu/usr/lib/qemu ]]; then
-    export QEMU_MODULE_DIR="$repo/.local/test-qemu/usr/lib/qemu"
-    export LD_LIBRARY_PATH="$repo/.local/test-qemu/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-# No website/guacd listener runs on the host. Only QA WebDriver and the external
-# VM console are forwarded for test automation. Normal use boots the ISO on metal.
-render=${AGIOS_RENDER_NODE:-}
-if [[ -z $render ]]; then
-    for candidate in /sys/class/drm/renderD*; do
-        [[ $(readlink -f "$candidate/device/driver") == */nvidia ]] && continue
-        render=/dev/dri/${candidate##*/}; break
-    done
-fi
-graphics=(-display none -device virtio-vga)
-if [[ ${AGIOS_TEST_GL:-0} == 1 && -n $render && -r $render && -w $render ]]; then
-    graphics=(-display "egl-headless,rendernode=$render" -device virtio-vga-gl)
-fi
-args=(-name 'AGIOS Live boot — test computer' -machine q35 -accel kvm -cpu host
-      -m "$memory" -smp "$cpus" "${graphics[@]}" -vnc 127.0.0.1:97
+# No KVM async page faults for the outer guest: with nested virtualization and host
+# memory pressure they left guest tasks stuck in kvm_async_pf_task_wait forever.
+args=(-name "AGIOS Live boot — test computer ($firmware)" -machine q35 -accel kvm -cpu host,kvm-asyncpf=off,kvm-asyncpf-int=off
+      -m "$memory" -smp "$cpus" -display none -vga std -vnc 127.0.0.1:97
       -device qemu-xhci -device usb-tablet
-      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd
-      -drive "if=pflash,format=raw,file=$repo/.local/live-test/OVMF_VARS.fd"
-      -drive "file=$repo/.local/live-test-final.qcow2,format=qcow2,if=none,id=final,discard=unmap,detect-zeroes=unmap"
-      -device virtio-blk-pci,drive=final,serial=AGIOS_TARGET,bootindex=3
+      -device virtio-balloon-pci,free-page-reporting=on
+      -drive "file=$repo/$target,format=qcow2,if=none,id=target,discard=unmap,detect-zeroes=unmap"
+      -device virtio-blk-pci,drive=target,serial=AGIOS_TARGET,bootindex=3
       -qmp "unix:$repo/.local/live-test/qmp.sock,server=on,wait=off")
+if [[ $firmware == uefi ]]; then
+    [[ -f .local/live-test/OVMF_VARS-uefi.fd ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd .local/live-test/OVMF_VARS-uefi.fd
+    args+=(-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd
+           -drive "if=pflash,format=raw,file=$repo/.local/live-test/OVMF_VARS-uefi.fd")
+fi
 if [[ $mode == live ]]; then
-    args+=(-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:14444-:4444
+    args+=(-nic user,model=virtio-net-pci
            -fw_cfg name=opt/org.agi-os.test,string=1
            -device virtio-serial-pci
            -chardev "socket,id=llm,path=$bridge_dir/llm.sock"
            -device virtserialport,chardev=llm,name=org.agi-os.llm
            -chardev "socket,id=qa,path=$repo/.local/live-test/qa.sock,server=on,wait=off"
-           -device virtserialport,chardev=qa,name=org.agi-os.qa)
-    args+=(-drive "file=$iso,media=cdrom,readonly=on,if=none,id=live"
-           -device ide-cd,drive=live,bootindex=1
-           -drive "file=$repo/.local/live-test-workspace.img,format=raw,if=none,id=workspace"
-           -device virtio-blk-pci,drive=workspace,serial=AGIOS_TESTDATA)
+           -device virtserialport,chardev=qa,name=org.agi-os.qa
+           -drive "file=$iso,media=cdrom,readonly=on,if=none,id=live"
+           -device ide-cd,drive=live,bootindex=1)
+    if [[ -f $media ]]; then
+        args+=(-drive "file=$repo/$media,format=raw,if=none,id=media"
+               -device usb-storage,drive=media,serial=AGIOS_MEDIA,removable=on)
+    fi
+    if [[ -n ${AGIOS_TEST_MIRROR:-} ]]; then
+        args+=(-fw_cfg "name=opt/org.agi-os.test-mirror,string=$AGIOS_TEST_MIRROR")
+    fi
+    if [[ -n ${AGIOS_TEST_CACHE_ISO:-} ]]; then
+        [[ -f "$AGIOS_TEST_CACHE_ISO" ]] || { echo 'QA package cache ISO missing'; exit 1; }
+        args+=(-drive "file=$AGIOS_TEST_CACHE_ISO,media=cdrom,readonly=on,if=none,id=testcache"
+               -device ide-cd,drive=testcache,bus=ide.1)
+    fi
 else
     args+=(-nic user,model=virtio-net-pci)
 fi
-if [[ $mode == live && -n ${AGIOS_TEST_CACHE_ISO:-} ]]; then
-    [[ -f "$AGIOS_TEST_CACHE_ISO" ]] || { echo 'QA package cache ISO missing'; exit 1; }
-    args+=(-drive "file=$AGIOS_TEST_CACHE_ISO,media=cdrom,readonly=on,if=none,id=testcache"
-           -device ide-cd,drive=testcache,bus=ide.1)
+# Hard memory cap for the whole test machine so a busy guest can never push the host into swap.
+runner=()
+if command -v systemd-run >/dev/null; then
+    runner=(systemd-run --user --scope --quiet -p "MemoryMax=$((memory + 1536))M" -p "MemorySwapMax=0")
 fi
-qemu-system-x86_64 "${args[@]}" > .local/live-test/qemu.log 2>&1 &
+"${runner[@]}" qemu-system-x86_64 "${args[@]}" > .local/live-test/qemu.log 2>&1 &
 qemu_pid=$!
 wait "$qemu_pid"

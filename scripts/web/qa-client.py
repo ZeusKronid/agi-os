@@ -13,9 +13,8 @@ class QAClient:
         self.socket.settimeout(600)
         self.socket.connect(str(ROOT/'.local/live-test/qa.sock'))
         self.stream = self.socket.makefile('rb')
-        while True:
-            ready = json.loads(self.stream.readline())
-            if ready.get('ready'): break
+        # The guest announces readiness once; later clients simply probe with a no-op.
+        self.call('exec', args=['true'])
 
     def call(self, method, **data):
         request_id = uuid.uuid4().hex
