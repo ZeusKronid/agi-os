@@ -28,7 +28,6 @@ export const siteConfig = {
   },
   nav: [
     { label: 'Features', href: `/#${sectionIds.features}` },
-    { label: 'FAQ', href: `/#${sectionIds.faq}` },
     { label: 'Get Involved', href: `/#${sectionIds.involved}` },
     // Отдельная страница, а не якорь: шапка рендерит её через router `Link`.
     { label: 'Docs', to: '/docs' },
