@@ -1,0 +1,21 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360"
+     xmlns="http://www.w3.org/2000/svg">
+  <g fill="none" stroke="#fff" stroke-width="34"
+     stroke-linecap="square" stroke-linejoin="miter">
+
+    <!-- A / Delta -->
+    <path d="M90 275 L185 85 L280 275 Z"/>
+
+    <!-- G -->
+    <path d="M470 90 L330 180 L470 280 L470 190 L415 190"/>
+
+    <!-- I -->
+    <path d="M565 90 L565 275"/>
+
+    <!-- O / Diamond -->
+    <path d="M760 85 L855 180 L760 275 L665 180 Z"/>
+
+    <!-- S -->
+    <path d="M1080 90 L945 155 L1075 215 L945 280"/>
+  </g>
+</svg>
