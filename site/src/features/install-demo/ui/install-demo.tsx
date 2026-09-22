@@ -42,7 +42,9 @@ export function InstallDemo({ id, className }: InstallDemoProps) {
         ))}
       </div>
 
-      <div className="relative min-h-[clamp(436px,calc(100svh_-_575px),470px)] overflow-hidden rounded-2xl bg-[#0d0a09] inset-ring inset-ring-line max-sm:min-h-[450px]">
+      {/* Высота окна на десктопе: всё, что остаётся от первого экрана после шапки, восхода, заголовка,
+          кнопок и отступов (≈660px), в пределах 436–620px. На мобайле — фиксированный минимум. */}
+      <div className="relative min-h-[clamp(436px,calc(100svh_-_660px),620px)] overflow-hidden rounded-2xl bg-[#0d0a09] inset-ring inset-ring-line max-sm:min-h-[450px]">
         <svg data-rim="" aria-hidden="true" className="pointer-events-none absolute inset-0 z-[4] size-full text-accent">
           <rect
             data-rim-path=""
@@ -58,14 +60,9 @@ export function InstallDemo({ id, className }: InstallDemoProps) {
           variant="disc"
           className="pointer-events-none absolute top-1/2 -right-[110px] size-[280px] -translate-y-1/2 text-accent opacity-[0.32] max-sm:hidden"
         />
-        <div aria-hidden="true" className="flex gap-2.5 px-6 pt-[22px] max-sm:px-4 max-sm:pt-[18px]">
-          <i className="size-[9px] rounded-full bg-[#e2553b]" />
-          <i className="size-[9px] rounded-full bg-[#f0a93b]" />
-          <i className="size-[9px] rounded-full bg-[#4a4541]" />
-        </div>
         <p
           aria-hidden="true"
-          className="absolute top-[22px] left-1/2 z-[3] m-0 flex -translate-x-1/2 items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-ink-muted uppercase max-sm:top-[19px] max-sm:left-[78px] max-sm:translate-x-0"
+          className="absolute top-[22px] left-6 z-[3] m-0 flex items-center gap-2 font-mono text-[10.5px] leading-none tracking-[0.16em] text-ink-muted uppercase max-sm:top-[18px] max-sm:left-4"
         >
           <i
             data-status-dot=""

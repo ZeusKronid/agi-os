@@ -7,12 +7,17 @@ import { Sunburst } from '@/shared/ui/sunburst'
 
 // Одна вертикальная ось: лого в шапке → луч восхода → заголовок → подстрочник → кнопки → окно демо.
 // Вступление — чистый CSS (`motion-safe:animate-rise`): стартует с первой отрисовки SSR-разметки,
-// не ждёт гидрации и отключается при reduced motion. Размеры завязаны на высоту вьюпорта,
-// чтобы весь блок вместе с демо помещался в первый экран.
+// не ждёт гидрации и отключается при reduced motion.
+// На десктопе секция занимает весь первый экран под шапкой (104px): отступы и высота окна демо
+// считаются от высоты вьюпорта, остаток распределяется поровну сверху и снизу, так что marquee
+// и следующая секция начинаются только за сгибом.
 export function Hero() {
   return (
-    <section aria-labelledby="hero-title" className="pb-9 text-center max-sm:pb-6">
-      <Container>
+    <section
+      aria-labelledby="hero-title"
+      className="flex flex-col pt-[clamp(8px,3vh,48px)] pb-[clamp(28px,3vh,56px)] text-center max-sm:pt-0 max-sm:pb-6 sm:min-h-[calc(100svh-104px)]"
+    >
+      <Container className="flex flex-1 flex-col justify-center">
         <Sunburst
           variant="hero"
           className="mx-auto -mb-4 block h-auto w-[min(620px,88vw)] text-accent motion-safe:animate-rise"
@@ -36,7 +41,7 @@ export function Hero() {
         </div>
         <InstallDemo
           id={sectionIds.demo}
-          className="mx-auto mt-[clamp(22px,3.6vh,36px)] max-w-[820px] motion-safe:animate-rise motion-safe:[animation-delay:320ms]"
+          className="mx-auto mt-[clamp(22px,3.6vh,52px)] max-w-[920px] motion-safe:animate-rise motion-safe:[animation-delay:320ms]"
         />
       </Container>
     </section>
