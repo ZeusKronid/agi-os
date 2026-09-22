@@ -34,6 +34,12 @@ const specs: Record<SunburstVariant, SunburstSpec> = {
   },
 }
 
+/** Детерминированный шум 0..1: одинаковый на сервере и клиенте. */
+const noise = (index: number, salt: number) => {
+  const x = Math.sin(index * 12.9898 + salt * 78.233) * 43758.5453
+  return x - Math.floor(x)
+}
+
 // Лучи считаются один раз на модуль: чистая детерминированная математика, одинаковая на сервере и клиенте.
 const rays = {
   hero: buildRays(specs.hero),
@@ -163,8 +169,10 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
           style={{ aspectRatio: `${spec.width} / ${fullHeight}` }}
         >
           {/* Лучи — полоски от дуги наружу. Каждая растёт через scaleX со своей задержкой: сначала у зенита,
-              к горизонту позже и дольше (как рост лучей вслед за подъёмом в прототипе). Затухание к концу луча
-              — градиент самой полоски (у SVG это делала радиальная маска). */}
+              к горизонту позже и дольше (как рост лучей вслед за подъёмом в прототипе). Сразу за ростом
+              начинается сияние: луч вразнобой удлиняется и укорачивается (свойство `scale`, своя амплитуда,
+              период и сдвиг) — с первой отрисовки, не дожидаясь JS. Затухание к концу луча — градиент самой
+              полоски (у SVG это делала радиальная маска). */}
           <div className="absolute" style={{ left: `${((cx / spec.width) * 100).toFixed(3)}%`, top: horizon }}>
             {rays[variant].map((ray, index) => {
               const x1 = Number(ray.x1) - cx
@@ -173,6 +181,14 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
               const length = Math.hypot(Number(ray.x2) - cx, Number(ray.y2) - cy) - inner
               const angle = Math.atan2(y1, x1)
               const fromZenith = 1 - Number(ray.height)
+              const delay = 0.25 + 0.17 * fromZenith
+              const timing = {
+                '--ray-delay': `${delay.toFixed(3)}s`,
+                '--ray-duration': `${(0.45 + 1.2 * fromZenith ** 3).toFixed(3)}s`,
+                '--shimmer': (1.1 + 0.32 * noise(index, 1)).toFixed(3),
+                '--shimmer-duration': `${(0.6 + 0.8 * noise(index, 2)).toFixed(3)}s`,
+                '--shimmer-delay': `${(delay + 0.1 + 0.5 * noise(index, 3)).toFixed(3)}s`,
+              } as CSSProperties
               return (
                 <div key={index} className="absolute top-0 left-0" style={{ rotate: `${angle.toFixed(4)}rad` }}>
                   <i
@@ -189,8 +205,7 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
                       marginTop: `calc(max(1px, ${unit(spec.strokeWidth)}) / -2)`,
                       opacity: ray.opacity,
                       backgroundImage: `linear-gradient(90deg, currentColor ${unit(Math.max(0, radius * spec.fade[0] - inner))}, transparent ${unit(radius * spec.fade[1] - inner)})`,
-                      animationDelay: `${(0.25 + 0.17 * fromZenith).toFixed(3)}s`,
-                      animationDuration: `${(0.45 + 1.2 * fromZenith ** 3).toFixed(3)}s`,
+                      ...timing,
                     }}
                   />
                 </div>

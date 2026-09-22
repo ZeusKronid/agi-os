@@ -74,7 +74,6 @@
   --animate-sun-rise: sun-rise 1.8s var(--ease-out-strong) 0.25s both;
   --animate-sun-sweep: sun-sweep 1.8s var(--ease-out-strong) 0.25s both;
   --animate-sun-unsweep: sun-sweep 1.8s var(--ease-out-strong) 0.25s both;
-  --animate-sun-ray: sun-ray 1s var(--ease-out-strong) both;
   --animate-sun-late: sun-late 1.1s var(--ease-out-strong) 0.55s both;
   /* Шапка на входе: элементы опускаются на место, быстрее и короче, чем подъём hero. */
   --animate-drop: drop 0.7s var(--ease-out-strong) both;
@@ -96,6 +95,12 @@
   @keyframes sun-ray {
     from {
       transform: scaleX(0);
+    }
+  }
+  /* Сияние: `scale`, а не `transform`, чтобы складываться с ростом луча; оба ведёт композитор. */
+  @keyframes sun-shimmer {
+    to {
+      scale: var(--shimmer) 1;
     }
   }
   /* Окно дуги и дуга внутри стартуют без поворота; конечный поворот (±180°) стоит на элементах. */
@@ -223,6 +228,14 @@
     radial-gradient(1.1px 1.1px at 300px 470px, rgb(255 255 255 / 0.22) 50%, transparent 52%),
     radial-gradient(1px 1px at 470px 520px, rgb(255 170 130 / 0.3) 50%, transparent 52%),
     radial-gradient(1px 1px at 30px 500px, rgb(255 255 255 / 0.12) 50%, transparent 52%);
+}
+
+/* Живой восход: рост луча и сразу за ним сияние. Не токен в `@theme`: параметры — инлайн-переменные
+   у каждого луча, а `var()` внутри переменной на :root подставился бы там, где их нет, и анимация пропала бы. */
+@utility animate-sun-ray {
+  animation:
+    sun-ray var(--ray-duration) var(--ease-out-strong) var(--ray-delay) both,
+    sun-shimmer var(--shimmer-duration) ease-in-out var(--shimmer-delay) infinite alternate;
 }
 
 /* Затухание краёв бегущей строки. */
