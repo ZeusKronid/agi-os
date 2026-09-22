@@ -166,7 +166,8 @@ class Configuration:
         fields = [
             f"Удалить ВСЕ данные: {self.disk} · {disk['size'] / 2**30:.1f} ГиБ · {disk.get('model', '')}",
             f"Серийный номер: {disk.get('serial') or 'не указан'}",
-            "Разметка: весь диск, GPT, отдельный загрузочный раздел и корень; без шифрования и swap",
+            "Разметка: весь диск, GPT, отдельный загрузочный раздел и корень; swap — zram в памяти",
+            "Шифрование корня (LUKS2): по выбору в форме подтверждения, пароль вводится отдельно",
             f"Файловая система: {self.filesystem}; загрузчик: {self.bootloader}",
             f"Окружение: {self.desktop}; сессия: {self.session or 'консоль'}",
             f"Компьютер: {self.hostname}; пользователь: {self.username} (sudo с паролем)",
@@ -202,8 +203,11 @@ Do not overwrite engine-managed accounts, permissions, storage, package manager,
 system services or boot configuration. session is the installed desktop-file basename without .desktop,
 or an empty string for console. Do not add autologin or passwordless sudo.
 The current executable storage handlers support whole-disk erase with GPT;
-ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. No encryption, swap,
-dual boot or partition preservation handler exists yet. Explain if these are
+ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
+device by default (no swap partition, no hibernation). Full-root LUKS2 encryption
+is available: the user enables it and enters its passphrase privately in the app's
+confirmation form, never in this dialogue; just tell them it is offered there.
+No dual boot or partition preservation handler exists yet. Explain if these are
 requested; never misrepresent or silently omit them. User must agree to a supported
 alternative before you propose a configuration. Applications and environments
 are open choices from official core/extra repositories, not a fixed catalog.

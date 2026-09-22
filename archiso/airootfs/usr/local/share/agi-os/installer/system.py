@@ -3,7 +3,9 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from domain import ValidationError
@@ -28,7 +30,7 @@ def fingerprint(disk):
 
 def inventory():
     data = json.loads(read_command(["lsblk", "--json", "--bytes", "--output",
-        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN"]))
+        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,PTTYPE,RM,TRAN,START"]))
 
     def in_use(node):
         holders = Path("/sys/class/block") / node["name"] / "holders"
@@ -43,6 +45,10 @@ def inventory():
         disk["eligible"] = not (disk["ro"] or in_use(disk) or disk["size"] < 12 * 2**30)
         disk["reason"] = "" if disk["eligible"] else "Диск занят, доступен только для чтения или меньше 12 ГиБ"
         disk["fingerprint"] = fingerprint(disk)
+        disk["partitions"] = [
+            {k: child.get(k) for k in ("path", "size", "fstype", "label", "partlabel", "start")}
+            | {"mounted": bool([m for m in child.get("mountpoints", []) if m])}
+            for child in disk.get("children", []) if child.get("type") == "part"]
         disks.append(disk)
     return {"live": live_environment(), "firmware": "uefi" if Path("/sys/firmware/efi").is_dir() else "bios",
             "cpu_count": os.cpu_count(), "disks": disks}
@@ -89,6 +95,31 @@ class Catalog:
         if missing:
             raise ValidationError("Пакеты не найдены в core/extra: " + ", ".join(missing))
         return [entries[p]["repository"] + "/" + p for p in packages]
+
+    def estimate(self, packages):
+        """Exact installed and download sizes of the resolved package set (with dependencies)."""
+        qualified = self.validate(packages)
+        # Resolve against an empty local database: the Live system already has most
+        # dependencies installed, and a real installation starts from nothing.
+        scratch = Path(tempfile.mkdtemp(prefix="agi-estimate-"))
+        (scratch / "local").mkdir()
+        (scratch / "sync").symlink_to("/var/lib/pacman/sync")
+        try:
+            resolved = read_command(["pacman", "--dbpath", str(scratch), "-Sp", "--print-format", "%n %s", "--", *qualified], timeout=120)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        names, download = [], 0
+        for line in resolved.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1].isdigit():
+                names.append(fields[0])
+                download += int(fields[1])
+        installed = 0
+        for line in read_command(["pacman", "-Si", "--", *names], timeout=120).splitlines():
+            if line.startswith("Installed Size"):
+                value, unit = line.split(":", 1)[1].split()
+                installed += float(value) * {"B": 1, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30}[unit]
+        return {"packages": len(names), "installed": int(installed), "download": download}
 
 
 def demo_inventory():
