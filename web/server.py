@@ -1,29 +1,46 @@
 #!/usr/bin/env python3
-"""Local AGIOS website: conversation, VM installation and Guacamole preview."""
+"""Local AGIOS website: conversation, reversible preview, installation onto the computer's disk."""
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 
-vendor = Path(__file__).resolve().parent / 'vendor'
-if vendor.is_dir():
-    sys.path.insert(0, str(vendor))
 from aiohttp import web
 
-from settings import SOURCE_ROOT as ROOT, ENGINE, DATA_ROOT, INSTALLER_ISO, GUACAMOLE_JS
+from settings import SOURCE_ROOT as ROOT, ENGINE, DATA_ROOT, GUACAMOLE_JS
 sys.path.insert(0, str(ENGINE))
 from controller import Controller
 from domain import Configuration, ValidationError
 from providers import APIProvider, ProviderError, PROVIDERS
-from system import demo_inventory
+from worker import packages_for
 from runtime import VirtualMachine
 from guacamole import tunnel
 
 from provider import LiveProvider, connect_chatgpt
 from system import live_environment
-from deployment import review as deployment_review, target_inventory
+from deployment import consent as consent_binding, orphan_previews, target_inventory
+
+GIB = 2**30
+
+
+async def privileged(script, request):
+    """Run a root helper of this site with one JSON request; secrets travel only over stdin."""
+    process = await asyncio.create_subprocess_exec(
+        'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web' / script),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await process.communicate(json.dumps({**request, 'data_root': str(DATA_ROOT)}).encode() + b'\n')
+    try:
+        answer = json.loads(out.decode() or '{}')
+    except ValueError:
+        answer = {}
+    if 'error' in answer:
+        raise ValidationError(answer['error'])
+    if process.returncode or 'result' not in answer:
+        raise ValidationError('Операция с носителем не выполнена: ' + err.decode(errors='replace')[-800:])
+    return answer['result']
 
 
 class State:
@@ -36,13 +53,11 @@ class State:
         self.error = None
         self.vm = None
         self.build_task = None
-        self.deploy_task = None
-        self.final_review = None
+        self.final_task = None
+        self.plan = None
         self.lock = asyncio.Lock()
         self.provider = LiveProvider()
-        snapshot = demo_inventory()
-        snapshot['disks'][0].update(model='Новый виртуальный диск AGIOS', serial='', size=32 * 2**30)
-        self.controller = Controller(snapshot, self.provider, notify=self.notify)
+        self.controller = Controller(target_inventory(), self.provider, notify=self.notify)
         self.record = DATA_ROOT / 'session.json'
         self.restore()
 
@@ -50,23 +65,27 @@ class State:
         if kind == 'status':
             self.status = value
 
+    def refresh_inventory(self):
+        self.controller.snapshot = target_inventory()
+        return self.controller.snapshot
+
     def persist(self):
         self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         data = {'messages': self.messages, 'history': self.controller.history,
                 'configuration': self.controller.configuration.as_dict() if self.controller.configuration else None,
-                'vm': str(self.vm.directory) if self.vm else self.saved_vm,
-                'disk_ready': self.phase == 'ready' or getattr(self, 'disk_ready', False),
-                'built_digest': self.built_digest, 'deployment': self.deployment}
+                'vm': self.vm.describe() if self.vm else self.saved_vm,
+                'disk_ready': self.disk_ready, 'built': self.built, 'preview': self.preview, 'final': self.final}
         temp = self.record.with_suffix('.tmp')
         temp.write_text(json.dumps(data, ensure_ascii=False))
         temp.chmod(0o600)
         temp.replace(self.record)
 
     def restore(self):
-        self.built_digest = None
-        self.deployment = {'phase': 'idle', 'events': []}
         self.saved_vm = None
         self.disk_ready = False
+        self.built = None    # {'configuration', 'consent', 'encrypted'} of the system in the preview
+        self.preview = None  # {'option', 'image', 'revert', 'monitor', 'budget'} from storage_worker
+        self.final = {'phase': 'idle', 'events': []}
         if self.record.exists():
             data = json.loads(self.record.read_text())
             self.messages = data['messages']
@@ -75,51 +94,108 @@ class State:
                 self.controller.configuration = Configuration.parse(data['configuration'])
             self.saved_vm = data.get('vm')
             self.disk_ready = data.get('disk_ready', False)
-            self.built_digest = data.get('built_digest')
-            self.deployment = data.get('deployment', {'phase':'idle','events':[]})
-            if self.deployment['phase'] == 'writing':
-                self.deployment.update(phase='error', error='Перенос прерван. Конечный диск требует проверки; успех не подтверждён.')
+            self.built = data.get('built')
+            self.preview = data.get('preview')
+            self.final = data.get('final', {'phase': 'idle', 'events': []})
+            if self.final['phase'] == 'working':
+                self.final.update(phase='error', error='Завершение установки прервано. Проверьте диск; успех не подтверждён.')
+            if self.final['phase'] == 'complete':
+                self.phase, self.status = 'finalized', 'Система готова к загрузке с диска компьютера'
+            elif self.preview and self.preview.get('revert', {}).get('kind') == 'ram' and not Path(self.preview['image']['path']).exists():
+                # Memory does not survive a Live restart: the preview is gone, the disks were never touched.
+                self.preview, self.built, self.disk_ready, self.saved_vm = None, None, False, None
+
+    def current_consent(self):
+        config = self.controller.configuration
+        if not config:
+            return None
+        try:
+            return consent_binding(config, self.controller.snapshot)
+        except ValidationError as exc:
+            return {'error': str(exc), 'target': config.disk}
 
     def public(self):
         config = self.controller.configuration
+        consent = self.current_consent()
+        snapshot = self.controller.snapshot
+        running = bool(self.vm and self.vm.running)
+        busy = self.controller.installing or self.final['phase'] == 'working'
+        built = None
+        if self.built:
+            built_config = Configuration.parse(self.built['configuration'])
+            built = {'summary': built_config.summary(self.built['consent']['disk']), 'target': self.built['consent']['target'],
+                     'encrypted': self.built['encrypted'], 'digest': self.built['consent']['digest'],
+                     'storage': self.preview['option']['title'] if self.preview else None,
+                     'on_target': bool(self.preview and self.preview['image']['format'] == 'raw'
+                                       and self.preview['image']['path'].startswith(self.built['consent']['target'])),
+                     'revert': self.preview['option']['revert'] if self.preview else None}
+        current = self.preview['image']['path'] if self.preview else None
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
                 'error': self.error, 'model': self.provider.model,
+                'firmware': snapshot['firmware'], 'orphans': orphan_previews(snapshot, current),
+                'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
-                'summary': config.summary(self.controller.snapshot['disks'][0]) if config else None,
-                'digest': config.digest() if config else None,
-                'events': self.events[-100:], 'running': bool(self.vm and self.vm.running),
-                'console_id': self.vm.process.pid if self.vm and self.vm.running else None,
-                'vm': str(self.vm.directory) if self.vm else self.saved_vm,
-                'can_resume': self.disk_ready and not (self.vm and self.vm.running),
-                'built_digest': self.built_digest, 'deployment': self.deployment,
-                'final_review': self.final_review,
-                'can_deploy': bool(self.disk_ready and config and self.built_digest == config.digest())}
+                'summary': config.summary(consent['disk']) if config and consent and 'disk' in consent else None,
+                'consent': consent, 'plan': self.plan, 'events': self.events[-100:], 'running': running,
+                'console_id': self.vm.process.pid if running else None,
+                'vm': self.vm.describe() if self.vm else self.saved_vm,
+                'can_plan': bool(config and consent and 'digest' in consent and not running and not busy and not self.preview),
+                'can_resume': bool(self.disk_ready and not running and not busy and self.final['phase'] != 'complete'),
+                'can_revert': bool(self.preview and not busy and not running and self.final['phase'] != 'complete'),
+                'built': built,
+                'can_finalize': bool(self.disk_ready and self.built and self.preview and not running and not busy and self.final['phase'] != 'complete'),
+                'final': self.final}
 
-    async def build(self, config, password, memory, cpus):
+    async def monitor_memory(self):
+        """Stop an in-memory preview before the zram budget is exhausted."""
+        monitor, budget = self.preview.get('monitor'), self.preview.get('budget')
+        while monitor and self.vm and self.vm.running:
+            try:
+                used = int(Path(monitor).read_text().split()[2])
+            except (OSError, ValueError, IndexError):
+                return
+            if used > budget * 0.97:
+                self.error = 'Оперативной памяти не хватило для превью; установка остановлена. Выберите другое хранилище.'
+                await self.vm.stop()
+                return
+            await asyncio.sleep(2)
+
+    async def build(self, config, consent, option, password, passphrase, memory, cpus):
+        watchdog = None
         try:
-            self.phase, self.status = 'starting', 'Запускаю установочную VM'
+            self.phase, self.status = 'starting', 'Готовлю хранилище превью: ' + option['title']
             self.disk_ready = False
-            self.built_digest = None
-            self.final_review = None
-            self.deployment = {'phase': 'idle', 'events': []}
-            self.vm = VirtualMachine(memory, cpus)
+            self.built = None
+            self.final = {'phase': 'idle', 'events': []}
             self.persist()
+            prepared = await privileged('storage_worker.py', {'op': 'prepare', 'option': option, 'needed': self.plan['needed'],
+                                                              'vm_memory': memory * 2**20, 'target': config.disk,
+                                                              'compression': self.plan['compression']})
+            self.preview = {'option': option, **prepared}
+            self.vm = VirtualMachine(prepared['image'], memory, cpus)
+            self.persist()
+            self.status = 'Запускаю установочную VM'
             await self.vm.start()
+            if prepared.get('monitor'):
+                watchdog = asyncio.create_task(self.monitor_memory())
             self.phase, self.status = 'installing', 'Ожидаю готовности установщика внутри VM'
             def event(value):
                 self.events.append(value)
                 self.status = value.get('text', self.status)
-            await self.vm.install(config, password, event)
-            self.phase, self.status = 'ready', 'Система установлена. VM загружается с диска без ISO'
+            await self.vm.install(config, password, passphrase, event)
+            self.phase, self.status = 'ready', 'Система установлена в превью и загружена'
             self.disk_ready = True
-            self.built_digest = config.digest()
+            self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase)}
         except asyncio.CancelledError:
-            self.phase, self.status = 'stopped', 'VM остановлена. Виртуальный диск сохранён'
+            self.phase, self.status = 'stopped', 'VM остановлена. Установка не завершена'
             raise
         except Exception as exc:
-            self.phase, self.error, self.status = 'error', str(exc) or 'Превышено время ожидания VM', 'Сборка не завершена'
+            self.phase, self.status = 'error', 'Установка не завершена'
+            self.error = self.error or str(exc) or 'Превышено время ожидания VM'
         finally:
-            password = None
+            password = passphrase = None
+            if watchdog:
+                watchdog.cancel()
             self.controller.installing = False
             self.persist()
 
@@ -152,10 +228,14 @@ async def state_get(request):
     return web.json_response(request.app['state'].public())
 
 
+def not_busy(state):
+    if state.lock.locked() or state.controller.installing or state.final['phase'] == 'working':
+        raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
+
+
 async def chat(request):
     state = request.app['state']
-    if state.lock.locked() or state.controller.installing:
-        raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
+    not_busy(state)
     data = await request.json()
     text = data.get('text', '')
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
@@ -167,9 +247,11 @@ async def chat(request):
         state.messages.append({'role': 'user', 'content': text})
         state.status = 'Агент обдумывает конфигурацию…'
         try:
+            await asyncio.to_thread(state.refresh_inventory)
             reply = await asyncio.to_thread(state.controller.respond, text)
             state.messages.append({'role': 'assistant', 'content': reply['message'], 'suggestions': reply['suggestions']})
-            state.status = 'Конфигурация готова к сборке' if state.controller.configuration else 'Продолжим обсуждение'
+            state.status = 'Конфигурация готова: выберите, где сделать превью' if state.controller.configuration else 'Продолжим обсуждение'
+            state.plan = None
         except Exception as exc:
             state.error = str(exc)
             state.status = 'Не удалось получить ответ агента'
@@ -179,12 +261,9 @@ async def chat(request):
 
 async def configure(request):
     state = request.app['state']
-    if state.lock.locked() or state.controller.installing:
-        raise web.HTTPConflict(text='Сейчас выполняется операция')
+    not_busy(state)
     data = await request.json()
     async with state.lock:
-        if state.controller.installing:
-            raise web.HTTPConflict(text='Дождитесь завершения установки')
         kind = data.get('kind', 'chatgpt')
         if kind == 'chatgpt':
             state.status = 'Завершите вход в открывшейся вкладке браузера'
@@ -200,34 +279,87 @@ async def configure(request):
     return web.json_response(state.public())
 
 
-async def build(request):
-    state = request.app['state']
-    if state.lock.locked() or state.controller.installing or (state.vm and state.vm.running):
-        raise web.HTTPConflict(text='Остановите текущую VM перед новой сборкой')
-    data = await request.json()
-    if state.lock.locked() or state.controller.installing or (state.vm and state.vm.running):
-        raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
-    config = state.controller.configuration
-    if not config or data.get('digest') != config.digest():
-        raise ValidationError('Конфигурация изменилась. Проверьте её ещё раз')
-    password = data.get('password', '')
-    if not isinstance(password, str) or not 8 <= len(password) <= 256 or any(c in password for c in '\n\r\0'):
-        raise ValidationError('Пароль должен содержать от 8 до 256 символов без переносов строк')
+def vm_size(data):
     memory, cpus = data.get('memory', 4096), data.get('cpus', 4)
     if type(memory) is not int or not 2048 <= memory <= 32768 or type(cpus) is not int or not 1 <= cpus <= 16:
         raise ValidationError('Допустимо 2–32 ГиБ RAM и 1–16 CPU')
-    if not INSTALLER_ISO.exists():
-        raise ValidationError('В Live ISO отсутствует образ установщика внутренней VM')
-    state.error = None
-    state.events = []
-    state.controller.installing = True
-    state.build_task = asyncio.create_task(state.build(config, password, memory, cpus))
-    return web.json_response({'accepted': True}, status=202)
+    return memory, cpus
+
+
+async def plan(request):
+    """Estimate the system size and list reversible places for the preview."""
+    state = request.app['state']
+    not_busy(state)
+    data = await request.json()
+    async with state.lock:
+        if not state.public()['can_plan']:
+            raise ValidationError('Сначала согласуйте конфигурацию с агентом или уберите текущее превью')
+        memory, _ = vm_size(data)
+        encrypt = data.get('encrypt') is True
+        config = state.controller.configuration
+        state.status = 'Считаю размер системы и ищу место для превью…'
+        await asyncio.to_thread(state.refresh_inventory)
+        consent = consent_binding(config, state.controller.snapshot)
+        estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config))
+        needed = int(estimate['installed'] * 1.2) + 2 * GIB
+        # LUKS output is incompressible: an encrypted in-memory preview needs its full size.
+        compression = 1.0 if encrypt else 1.3
+        probe = await privileged('storage_worker.py', {'op': 'probe', 'needed': needed, 'target': config.disk,
+                                                       'vm_memory': memory * 2**20, 'compression': compression})
+        digest = hashlib.sha256(json.dumps({'consent': consent['digest'], 'needed': needed, 'memory': memory, 'encrypt': encrypt,
+                                            'options': [o['id'] for o in probe['options']]}, sort_keys=True).encode()).hexdigest()
+        state.plan = {'digest': digest, 'estimate': estimate, 'needed': needed, 'memory': memory, 'encrypt': encrypt,
+                      'compression': compression, 'options': probe['options'], 'consent': consent['digest']}
+        state.status = 'Выберите, где сделать превью, и подтвердите'
+        return web.json_response(state.public())
+
+
+def secret_text(value, name, low, high):
+    if not isinstance(value, str) or not low <= len(value) <= high or any(c in value for c in '\n\r\0'):
+        raise ValidationError(f'{name}: от {low} до {high} символов без переносов строк')
+    return value
+
+
+async def build(request):
+    state = request.app['state']
+    not_busy(state)
+    if state.vm and state.vm.running:
+        raise web.HTTPConflict(text='Остановите текущую VM перед новой установкой')
+    data = await request.json()
+    async with state.lock:
+        if state.controller.installing or (state.vm and state.vm.running) or state.preview:
+            raise web.HTTPConflict(text='Сначала уберите текущее превью')
+        config = state.controller.configuration
+        if not config or not state.plan:
+            raise ValidationError('Сначала рассчитайте место для превью')
+        await asyncio.to_thread(state.refresh_inventory)
+        consent = consent_binding(config, state.controller.snapshot)
+        if data.get('digest') != state.plan['digest'] or state.plan['consent'] != consent['digest']:
+            raise ValidationError('Конфигурация, диск или варианты хранилища изменились. Рассчитайте место заново')
+        option = next((o for o in state.plan['options'] if o['id'] == data.get('option')), None)
+        if not option or not option['fits']:
+            raise ValidationError('Выберите подходящий вариант хранилища превью')
+        if data.get('accepted') is not True:
+            raise ValidationError('Подтвердите выбранный вариант')
+        if option['destructive'] and data.get('confirmation') != option['confirm']:
+            raise ValidationError('Для этого варианта введите точный путь: ' + option['confirm'])
+        password = secret_text(data.get('password', ''), 'Пароль пользователя', 8, 256)
+        passphrase = ''
+        if state.plan['encrypt']:
+            passphrase = secret_text(data.get('passphrase', ''), 'Пароль шифрования', 8, 512)
+        memory, cpus = vm_size(data)
+        if memory != state.plan['memory']:
+            raise ValidationError('Память VM изменилась; рассчитайте место заново')
+        state.error = None
+        state.events = []
+        state.controller.installing = True
+        state.build_task = asyncio.create_task(state.build(config, consent, option, password, passphrase, memory, cpus))
+        return web.json_response({'accepted': True}, status=202)
 
 
 async def stop(request):
     state = request.app['state']
-    if state.lock.locked() or state.deployment['phase'] == 'writing':
+    if state.lock.locked() or state.final['phase'] == 'working':
         raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
     async with state.lock:
         if state.build_task and not state.build_task.done():
@@ -235,134 +367,161 @@ async def stop(request):
             await asyncio.gather(state.build_task, return_exceptions=True)
         if state.vm:
             await state.vm.stop()
-        state.phase, state.status = 'stopped', 'VM остановлена. Диск сохранён'
+        if state.disk_ready:
+            state.phase, state.status = 'stopped', 'VM остановлена. Превью сохранено'
         state.persist()
         return web.json_response(state.public())
+
 
 async def resume(request):
     state = request.app['state']
-    if state.lock.locked() or state.deployment['phase'] == 'writing':
+    if state.lock.locked() or state.final['phase'] == 'working':
         raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
     async with state.lock:
-        if state.controller.installing or (state.vm and state.vm.running) or not state.disk_ready:
-            raise ValidationError('Нет остановленной установленной системы')
+        if not state.public()['can_resume']:
+            raise ValidationError('Нет остановленного превью')
         if not state.vm:
-            # Restore only a generated VM directory inside this project.
-            directory = Path(state.saved_vm).resolve()
-            if directory.parent != (DATA_ROOT / 'vm').resolve() or not directory.name.startswith('web-'):
-                raise ValidationError('Некорректный путь VM')
-            vm = VirtualMachine.__new__(VirtualMachine)
-            from runtime import available_port
-            vm.directory, vm.memory, vm.cpus, vm.disk_gib = directory, 4096, 4, 32
-            vm.vnc_port = available_port()
-            vm.process = vm.log = vm.server = vm.connection = vm.reader = vm.writer = None
-            state.vm = vm
+            state.vm = VirtualMachine.restore(state.saved_vm)
         await state.vm.start(install=False)
-        state.phase, state.status = 'ready', 'VM запущена с сохранённого виртуального диска'
+        state.phase, state.status = 'ready', 'Превью запущено снова'
+        state.persist()
         return web.json_response(state.public())
 
-def deployable(state):
-    config = state.controller.configuration
-    if state.controller.installing or state.deployment['phase'] == 'writing':
-        raise ValidationError('Дождитесь завершения текущей установки')
-    if not state.disk_ready or not config or state.built_digest != config.digest():
-        raise ValidationError('Сначала соберите и проверьте актуальную конфигурацию в превью')
-    if state.vm and state.vm.running:
-        raise ValidationError('Сначала завершите работу системы внутри превью через меню выключения')
-    directory = Path(state.vm.directory if state.vm else state.saved_vm).resolve()
-    if directory.parent != (DATA_ROOT / 'vm').resolve() or not directory.name.startswith('web-'):
-        raise ValidationError('Некорректный путь превью')
-    return directory / 'system.qcow2', config
+
+async def release_preview(state):
+    """Undo the preview storage and forget the preview; disks return to their prior state."""
+    result = await privileged('storage_worker.py', {'op': 'revert', 'state': state.preview['revert']})
+    state.preview, state.built, state.disk_ready, state.saved_vm, state.vm = None, None, False, None, None
+    state.events = []
+    return result
 
 
-async def targets(request):
-    snapshot = await asyncio.to_thread(target_inventory)
-    return web.json_response(snapshot)
-
-
-async def final_review(request):
+async def revert(request):
     state = request.app['state']
+    if state.lock.locked() or state.final['phase'] == 'working':
+        raise web.HTTPConflict(text='Дождитесь завершения текущей операции')
+    async with state.lock:
+        if not state.preview or state.final['phase'] == 'complete':
+            raise ValidationError('Нет превью, которое можно убрать')
+        if state.build_task and not state.build_task.done():
+            state.build_task.cancel()
+            await asyncio.gather(state.build_task, return_exceptions=True)
+        if state.vm:
+            await state.vm.stop()
+        result = await release_preview(state)
+        state.phase, state.status, state.error = 'idle', result['text'], None
+        state.persist()
+        return web.json_response(state.public())
+
+
+async def remove_orphan(request):
+    """Delete a preview partition left by an earlier session; other partitions stay untouched."""
+    state = request.app['state']
+    not_busy(state)
     data = await request.json()
     async with state.lock:
-        image, config = deployable(state)
-        state.final_review = await asyncio.to_thread(deployment_review, image, config, data['target'])
+        snapshot = await asyncio.to_thread(state.refresh_inventory)
+        current = state.preview['image']['path'] if state.preview else None
+        orphan = next((o for o in orphan_previews(snapshot, current) if o['device'] == data.get('device')), None)
+        if orphan is None:
+            raise ValidationError('Такого раздела превью нет')
+        result = await privileged('storage_worker.py', {'op': 'revert', 'state': {'kind': 'partition', 'disk': orphan['disk'], 'device': orphan['device']}})
+        await asyncio.to_thread(state.refresh_inventory)
+        state.status = result['text']
         return web.json_response(state.public())
 
 
-async def transfer_task(state, proposal, confirmation):
-    state.controller.installing = True
-    state.deployment = {'phase':'writing', 'target':proposal['target'], 'events':[]}
+async def finalize_task(state, payload):
+    state.final = {'phase': 'working', 'target': payload['target'], 'layout': payload['layout'], 'events': []}
     state.persist()
     try:
-        payload = {k:proposal[k] for k in ('source','identity','configuration','target','digest')}
-        payload['confirmation'] = confirmation
         process = await asyncio.create_subprocess_exec(
-            'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web/deploy_worker.py'),
+            'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web/finalize_worker.py'),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        process.stdin.write(json.dumps(payload).encode()+b'\n')
+        process.stdin.write(json.dumps(payload).encode() + b'\n')
         await process.stdin.drain()
         process.stdin.close()
+        payload.pop('passphrase', None)
         stderr_task = asyncio.create_task(process.stderr.read())
-        complete = False
+        complete, mode = False, None
         async for line in process.stdout:
             event = json.loads(line)
-            state.deployment['events'].append(event)
+            state.final['events'].append(event)
             state.status = event.get('text', state.status)
-            if event['kind'] == 'deployed':
-                complete = True
-            if event['kind'] == 'deploy-error':
-                state.deployment['error'] = event['text']
+            if event['kind'] == 'finalized':
+                complete, mode = True, event.get('mode')
+            if event['kind'] == 'final-error':
+                state.final['error'] = event['text']
         code = await process.wait()
         stderr = (await stderr_task).decode(errors='replace')
         if code or not complete:
-            raise ValidationError(state.deployment.get('error') or stderr[-1500:] or 'Перенос не завершён')
-        state.deployment['phase'] = 'complete'
+            raise ValidationError(state.final.get('error') or stderr[-1500:] or 'Завершение не выполнено')
+        if mode == 'copy':
+            # The copy is verified; the temporary preview storage is no longer needed.
+            result = await privileged('storage_worker.py', {'op': 'revert', 'state': state.preview['revert']})
+            state.final['events'].append({'kind': 'final-progress', 'text': 'Временное хранилище превью убрано: ' + result['text']})
+        state.final['phase'] = 'complete'
+        state.phase, state.status = 'finalized', 'Система готова к загрузке с диска компьютера'
     except Exception as exc:
-        state.deployment.update(phase='error', error=str(exc))
-        state.status = 'Установка на конечный диск не завершена'
+        state.final.update(phase='error', error=str(exc))
+        state.status = 'Завершение установки не выполнено'
     finally:
+        payload.pop('passphrase', None)
         state.controller.installing = False
-        state.final_review = None
         state.persist()
 
 
-async def final_install(request):
+async def finalize(request):
     state = request.app['state']
     data = await request.json()
     async with state.lock:
-        image, config = deployable(state)
-        proposal = state.final_review
-        if not proposal or data.get('digest') != proposal['digest']:
-            raise ValidationError('Проверьте конечный диск заново')
-        if data.get('confirmation') != proposal['target'] or data.get('preview_accepted') is not True:
-            raise ValidationError('Подтвердите проверку превью и введите путь выбранного диска')
-        current = await asyncio.to_thread(deployment_review, image, config, proposal['target'])
-        if current['digest'] != proposal['digest']:
-            state.final_review = None
-            raise ValidationError('Образ или конечный диск изменился; нужно новое подтверждение')
+        if not state.public()['can_finalize']:
+            raise ValidationError('Сначала установите систему в превью и завершите её работу через меню выключения')
+        built = state.built
+        layout = data.get('layout')
+        if layout not in ('erase', 'alongside'):
+            raise ValidationError('Выберите: стереть диск или установить рядом с существующими системами')
+        if data.get('confirmation') != built['consent']['target'] or data.get('accepted') is not True:
+            raise ValidationError('Подтвердите установку и введите точный путь диска: ' + built['consent']['target'])
+        await asyncio.to_thread(state.refresh_inventory)
+        current = consent_binding(Configuration.parse(built['configuration']), state.controller.snapshot)
+        if current['fingerprint'] != built['consent']['fingerprint']:
+            raise ValidationError('Конечный диск изменился после подтверждения')
+        passphrase = ''
+        if built['encrypted']:
+            passphrase = secret_text(data.get('passphrase', ''), 'Пароль шифрования', 8, 512)
+        payload = {'target': built['consent']['target'], 'fingerprint': built['consent']['fingerprint'],
+                   'configuration': built['configuration'], 'passphrase': passphrase,
+                   'image': state.preview['image'], 'layout': layout, 'confirmation': data['confirmation']}
         # Mark synchronously before scheduling, preventing a concurrent second submission.
         state.controller.installing = True
-        state.deployment = {'phase':'writing','target':proposal['target'],'events':[]}
-        state.deploy_task = asyncio.create_task(transfer_task(state, proposal, data['confirmation']))
-        return web.json_response({'accepted':True}, status=202)
+        state.final = {'phase': 'working', 'target': payload['target'], 'layout': layout, 'events': []}
+        state.final_task = asyncio.create_task(finalize_task(state, payload))
+        return web.json_response({'accepted': True}, status=202)
 
 
-async def finish_live(request):
+async def power(request):
     state = request.app['state']
-    if state.deployment['phase'] != 'complete' or state.controller.installing:
-        raise ValidationError('Сначала завершите установку на конечный диск')
+    data = await request.json()
+    if state.final['phase'] != 'complete' or state.controller.installing:
+        raise ValidationError('Сначала завершите установку на диск компьютера')
     if not live_environment():
         raise ValidationError('Выключение доступно только внутри Live')
-    proc = await asyncio.create_subprocess_exec('sudo', '-n', 'shutdown', '-h', '+1')
+    action = data.get('action')
+    if action not in ('poweroff', 'reboot'):
+        raise ValidationError('Неизвестное действие')
+    proc = await asyncio.create_subprocess_exec('sudo', '-n', 'shutdown', '-h' if action == 'poweroff' else '-r', '+1')
     if await proc.wait():
         raise ValidationError('Не удалось запланировать выключение')
-    return web.json_response({'scheduled':True, 'message':'Live выключится через минуту. После выключения извлеките носитель и загрузитесь с конечного диска.'})
+    message = ('Live выключится через минуту. Извлеките носитель и включите компьютер: он загрузится с установленного диска.'
+               if action == 'poweroff' else 'Компьютер перезагрузится через минуту. Извлеките носитель AGIOS, чтобы загрузилась установленная система.')
+    return web.json_response({'scheduled': True, 'message': message})
 
 
 async def cleanup(app):
     state = app['state']
-    if state.deploy_task and not state.deploy_task.done():
-        await asyncio.shield(state.deploy_task)
+    if state.final_task and not state.final_task.done():
+        await asyncio.shield(state.final_task)
     if state.build_task and not state.build_task.done():
         state.build_task.cancel()
         await asyncio.gather(state.build_task, return_exceptions=True)
@@ -378,13 +537,14 @@ def application(port=8787, guacd_port=14822):
     app.router.add_get('/api/state', state_get)
     app.router.add_post('/api/chat', chat)
     app.router.add_post('/api/provider', configure)
+    app.router.add_post('/api/plan', plan)
     app.router.add_post('/api/build', build)
     app.router.add_post('/api/stop', stop)
     app.router.add_post('/api/resume', resume)
-    app.router.add_get('/api/targets', targets)
-    app.router.add_post('/api/final/review', final_review)
-    app.router.add_post('/api/final/install', final_install)
-    app.router.add_post('/api/final/poweroff', finish_live)
+    app.router.add_post('/api/revert', revert)
+    app.router.add_post('/api/orphans/remove', remove_orphan)
+    app.router.add_post('/api/final/finalize', finalize)
+    app.router.add_post('/api/final/power', power)
     app.router.add_get('/tunnel', tunnel)
     app.router.add_get('/', index)
     app.router.add_static('/static', ROOT / 'web/static')
@@ -401,4 +561,4 @@ if __name__ == '__main__':
     if not live_environment():
         parser.error('Сайт AGIOS запускается внутри загруженной Live-среды. Для теста загрузите Live ISO в QEMU.')
     os.umask(0o077)
-    web.run_app(application(args.port, args.guacd_port), host='127.0.0.1', port=args.port, access_log=None)
+    web.run_app(application(args.port, args.guacd_port), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5)

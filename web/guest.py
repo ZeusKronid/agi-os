@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run the existing installer inside the live VM over its private virtio port."""
+"""Headless guest of the preview VM: runs the installer over its private virtio port.
+
+Started by agi-guest.service only when the Live medium boots with `agios.guest`.
+"""
 import json
 from pathlib import Path
 import subprocess
@@ -41,6 +44,7 @@ def main():
         proc.stdin.write(json.dumps(request) + '\n')
         proc.stdin.flush()
         request.pop('password', None)
+        request.pop('passphrase', None)
         installed = False
         try:
             for line in proc.stdout:
