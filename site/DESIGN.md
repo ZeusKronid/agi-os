@@ -155,6 +155,15 @@ Helios строится на сдержанности: почти чёрный �
 ### Action Card (Get involved)
 Две карточки min-height 280px. `fill`: фон Accent, текст On Accent, круглая кнопка-стрелка On Accent. `line`: фон Surface, рамка Line Accent → Accent. Крупный полупрозрачный знак в углу, стрелка поворачивается из -45° в 0° на hover, карточка поднимается на 4px.
 
+### Docs (`/docs`, `pages/docs`)
+Справочник в три колонки на сетке `Container`: дерево разделов 250px слева, статья по центру шириной 66 символов, «On this page» 210px справа; обе боковые колонки липкие под шапкой (`top: 104px`). Шапка та же, что на главной, пункт «Docs» — router `Link` с `aria-current`. Без восхода и без `Reveal`: страница читается, а не листается, и переходы между страницами мгновенные.
+
+- **Контент** — `entities/doc`: страницы (`slug`, глава, заголовок с одним `em`, лид, секции) как React-узлы, поиск идёт по заголовку и `summary` секции. Обзор живёт на `/docs`, остальные — на `/docs/<slug>`; неизвестный slug → 404.
+- **Дерево** (`widgets/docs-sidebar`) — главы антиквой 17px с шевроном (Accent, когда раскрыто), страницы Geist 14px Ink Muted; текущая страница и активная секция отмечены линией 1px Accent слева поверх разделителя Line. Getting Started и глава текущей страницы раскрыты по умолчанию. Ниже `md` дерево уезжает в drawer (Surface, 320px, Escape закрывает), над статьёй появляется панель «Search · Docs menu».
+- **Статья** — крошки mono 11px капс с точкой Accent → h1 `clamp(36px, 4.2vw, 56px)` с одним курсивным словом → лид 18px Ink Muted → секции с h2 30px (`scroll-mt-28`, чтобы якорь вставал под шапку) → карточки «← Previous / Next →» (Surface, Line → Line Accent на hover, подъём 2px). Типографика статьи — `Prose`, `Bullets` (точка Accent), `Steps` (номер mono с ведущим нулём), `Note` (Surface, лейбл mono капс Accent; `warn` — рамка Line Accent), `DocTable`. Команды и адреса — `shared/ui/command-line`: плашка Elevated, точка Accent, кнопка Copy → «Copied» цветом OK.
+- **On this page** (`widgets/docs-toc`) — scroll-spy через IntersectionObserver (`shared/lib/scroll-spy`), активный пункт — линия Accent. Ниже `lg` сворачивается в `details` под лидом.
+- **Поиск** (`features/docs-search`) — кнопка-«поле» с подсказкой ⌘K, палитра поверх страницы (Surface, `animate-tile`, подложка `canvas/70` + blur): ↑↓ выбор, Enter переход к секции, Esc закрытие; пустой результат — отдельное состояние с подсказками.
+
 ### Statement Footer
 Единственная светлая поверхность. Фон Cream, три группы ссылок в ряд, «Back to top» справа, юридическая строка, ниже огромный wordmark AGIOS (`clamp(96px, 23vw, 340px)`, Dalek Pinpoint), прижатый к нижнему краю и слегка обрезанный.
 

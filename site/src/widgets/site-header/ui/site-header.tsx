@@ -10,6 +10,7 @@ import { Logo } from '@/shared/ui/logo'
 import { mountHeaderScroll } from '../lib/mount-header-scroll'
 
 const MENU_ID = 'site-menu'
+const navLinkStyles = 'font-serif text-[17px] text-ink-soft transition-colors duration-200 hover:text-ink'
 
 // Без бордеров. Раскладка: ссылки слева, знак по центру (ось hero), действие справа.
 export function SiteHeader() {
@@ -34,16 +35,24 @@ export function SiteHeader() {
         >
           <ul className="flex gap-[38px] max-sm:flex-col max-sm:gap-4">
             {siteConfig.nav.map((item) => (
-              <li key={item.href}>
-                {/* Обычный <a>: плавный переход к якорю перехватывает Lenis (`anchors: true`),
-                    без Lenis (reduced motion) срабатывает нативный переход. */}
-                <a
-                  href={item.href}
-                  onClick={() => setOpen(false)}
-                  className="font-serif text-[17px] text-ink-soft transition-colors duration-200 hover:text-ink"
-                >
-                  {item.label}
-                </a>
+              <li key={item.label}>
+                {'href' in item ? (
+                  /* Обычный <a>: плавный переход к якорю перехватывает Lenis (`anchors: true`),
+                     без Lenis (reduced motion) срабатывает нативный переход. */
+                  <a href={item.href} onClick={() => setOpen(false)} className={navLinkStyles}>
+                    {item.label}
+                  </a>
+                ) : (
+                  /* Отдельная страница (например, /docs): клиентский переход роутера, активная — Ink. */
+                  <Link
+                    to={item.to}
+                    onClick={() => setOpen(false)}
+                    className={navLinkStyles}
+                    activeProps={{ className: `${navLinkStyles} text-ink`, 'aria-current': 'page' }}
+                  >
+                    {item.label}
+                  </Link>
+                )}
               </li>
             ))}
           </ul>
