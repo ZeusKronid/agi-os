@@ -10,10 +10,9 @@ import { Sunburst } from '@/shared/ui/sunburst'
 import { mountLiveSun } from '../lib/mount-live-sun'
 
 // Одна вертикальная ось: лого в шапке → луч восхода → заголовок → подстрочник → кнопки → окно демо.
-// Вступление слов, подстрочника, кнопок и окна — CSS с первой отрисовки. Заголовок — горизонт: слова
-// поднимаются первыми, а живой восход встаёт из-за них (`Sunburst variant="live"`), когда главный поток
-// освободится после гидрации; дальше `mountLiveSun` ведёт лучи: линза к курсору, дыхание, голос демо,
-// точки шагов на дуге.
+// Вступление — CSS с первой отрисовки, только transform и opacity (гидрация его не замораживает).
+// Заголовок — горизонт: слова поднимаются первыми, живой восход встаёт из-за них (`Sunburst variant="live"`);
+// дальше `mountLiveSun` ведёт лучи: линза к курсору, дыхание, голос демо, точки шагов на дуге.
 // Масштаб задаёт `--hero-h1` (от ширины и высоты экрана): от него растут восход и окно демо, поэтому
 // на любом экране окно начинается примерно на 62–68% высоты и уходит за сгиб, как в прототипе.
 export function Hero() {
@@ -23,15 +22,12 @@ export function Hero() {
       aria-labelledby="hero-title"
       className="touch-pan-y pt-[clamp(8px,3vh,48px)] pb-[clamp(28px,3vh,56px)] text-center [--hero-h1:clamp(40px,min(6vw,9.6vh),112px)] [--hero-sun:min(88vw,max(min(620px,70vh),calc(var(--hero-h1)*7.2)))] max-sm:pt-0 max-sm:pb-6"
     >
-      {/* Без JS паузу входа солнца снимать некому: пусть играет сразу. */}
-      <noscript>
-        <style>{'[data-sun-live] *{animation-play-state:running!important}'}</style>
-      </noscript>
       <Container className="flex flex-col">
-        {/* У `live` viewBox продлён вверх на 90/640 ширины под вытянутые лучи — компенсируем отрицательным отступом. */}
+        {/* У `live` сверху запас 90/640 ширины под вытянутые лучи — компенсируем отрицательным отступом.
+            Обёртка кончается ровно на горизонте, а заголовок заходит под основание дуги, как у статичного восхода. */}
         <Sunburst
           variant="live"
-          className="mx-auto -mt-[calc(var(--hero-sun)*90/640)] -mb-4 block h-auto w-(--hero-sun) text-accent"
+          className="mx-auto -mt-[calc(var(--hero-sun)*90/640)] mb-[calc(var(--hero-sun)*10/640_-_16px)] w-(--hero-sun) text-accent"
         />
         <h1
           id="hero-title"

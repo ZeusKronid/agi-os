@@ -10,24 +10,23 @@ const IDLE_PERIOD_MS = 2600
 /** Насколько голос удлиняет луч и сколько энергии волны за кадр считается «громко». */
 const VOICE_REACH = 0.7
 const VOICE_FULL = 0.22
-/** Длительность входа солнца (CSS: задержки лучей + 1,2 с роста); после неё начинается дыхание. */
-const ENTRANCE_MS = 2300
-/** Сколько ждать свободного главного потока до старта входа. */
-const IDLE_TIMEOUT_MS = 1200
+/** Вход солнца (CSS с первой отрисовки) заканчивается примерно к этой отметке от начала загрузки; потом — дыхание. */
+const ENTRANCE_END_MS = 2000
 /** Шаги демо (Listen · Preview · Build · Install) — внутренние точки дуги: 205°, 243°, 297°, 335°. */
 const STEP_DOTS = [1, 2, 3, 4] as const
 
 interface LiveRay {
-  el: SVGLineElement
+  el: HTMLElement
   angle: number
-  inner: number
   length: number
   opacity: number
+  /** Длина и прозрачность из SSR-разметки: к ним луч возвращается в покое. */
+  restWidth: string
+  restOpacity: string
   /** Доля голоса у луча: у каждого своя, чтобы поле шелестело, а не пульсировало целиком. */
   voice: number
 }
 
-const num = (el: Element, name: string) => Number(el.getAttribute(name))
 const clamp = (value: number) => Math.min(1, Math.max(0, value))
 /** Детерминированный шум 0..1 по индексу луча. */
 const noise = (index: number) => {
@@ -37,10 +36,9 @@ const noise = (index: number) => {
 
 /**
  * Callback ref (React 19) на секцию hero: оживляет `Sunburst variant="live"`.
- * - Подъём из-за заголовка и дорисовка дуги — CSS, но старт даёт этот модуль: SVG-анимации идут в главном
- *   потоке, и если начать их с первой отрисовки, гидрация и запуск остальных анимаций страницы (длинные
- *   задачи на 60–100 мс) замораживают солнце посреди подъёма. Поэтому `data-sun-go` ставится, когда
- *   главный поток свободен (`requestIdleCallback`), а до этого на месте солнца пусто.
+ * - Подъём из-за заголовка, рост лучей и дорисовка дуги — композиторный CSS с первой отрисовки
+ *   (`Sunburst variant="live"`); здесь только длина лучей-полосок и точки. Пока линза и голос в нуле,
+ *   лучи не трогаются, чтобы не пересобирать слои посреди входа.
  * - Лучи тянутся к курсору (линза), в покое линза медленно качается. Ниже горизонта курсор отражается вверх,
  *   так что линза идёт за ним по горизонтали. Тап работает так же.
  * - Солнце слушает демо: пока микрофон включён, энергия волны (сумма изменений столбиков за кадр)
@@ -49,26 +47,25 @@ const noise = (index: number) => {
  */
 export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   if (!root) return
-  const svg = root.querySelector<SVGSVGElement>('svg[data-sun-live]')
-  if (!svg) return
+  const sun = root.querySelector<HTMLElement>('[data-sun-live]')
+  if (!sun) return
 
-  const cx = Number(svg.dataset.cx)
-  const cy = Number(svg.dataset.cy)
-  const rays: LiveRay[] = Array.from(svg.querySelectorAll<SVGLineElement>('[data-sun-ray]'), (el, index) => {
-    const x1 = num(el, 'x1') - cx
-    const y1 = num(el, 'y1') - cy
-    const inner = Math.hypot(x1, y1)
-    const angle = Math.atan2(y1, x1)
+  // Центр солнца — на нижнем крае обёртки (горизонт), по горизонтали — доля ширины.
+  const center = Number(sun.dataset.center)
+  const units = Number(sun.dataset.units)
+  const rays: LiveRay[] = Array.from(sun.querySelectorAll<HTMLElement>('[data-sun-ray]'), (el, index) => {
+    const angle = Number(el.dataset.angle)
     return {
       el,
       angle: angle <= 0 ? angle + 2 * Math.PI : angle,
-      inner,
-      length: Math.hypot(num(el, 'x2') - cx, num(el, 'y2') - cy) - inner,
-      opacity: num(el, 'stroke-opacity'),
+      length: Number(el.dataset.length),
+      opacity: Number(el.dataset.opacity),
+      restWidth: el.style.width,
+      restOpacity: el.style.opacity,
       voice: 0.4 + noise(index) * 0.9,
     }
   })
-  const dots = Array.from(svg.querySelectorAll<SVGCircleElement>('[data-sun-dot]'))
+  const dots = Array.from(root.querySelectorAll<SVGCircleElement>('[data-sun-dot]'))
   const tabs = Array.from(root.querySelectorAll<HTMLElement>('[data-demo-step]'))
   const mic = root.querySelector<HTMLElement>('[data-mic]')
   const bars = Array.from(root.querySelectorAll<HTMLElement>('[data-wave] > i'))
@@ -77,7 +74,8 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   const motionSafe = window.matchMedia(MOTION_SAFE_QUERY)
   const lens = { angle: 1.5 * Math.PI, strength: 0 }
   const target = { angle: 1.5 * Math.PI, strength: 0 }
-  let start = Number.POSITIVE_INFINITY
+  const start = Math.max(performance.now(), ENTRANCE_END_MS)
+  let raysAtRest = true
   let pointer = false
   let voice = 0
   let visible = false
@@ -93,18 +91,32 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     return mic?.dataset.on === 'true' ? clamp(energy / VOICE_FULL) : 0
   }
 
-  const paint = (now: number) => {
+  const paintRays = (now: number) => {
     // Пока звучит голос, линза уступает ему.
     const strength = lens.strength * (1 - voice * 0.6)
+    // Лучи в покое уже совпадают с SSR-разметкой: не трогаем их, пока что-то не сдвинется.
+    const rest = strength < 0.002 && voice < 0.002
+    if (rest && raysAtRest) return
+    raysAtRest = rest
+    if (rest) {
+      for (const ray of rays) {
+        ray.el.style.width = ray.restWidth
+        ray.el.style.opacity = ray.restOpacity
+      }
+      return
+    }
     for (const ray of rays) {
       const delta = ray.angle - lens.angle
       const lit = Math.exp(-(delta * delta) / (LENS_SIGMA * LENS_SIGMA)) * strength
       const heard = voice * ray.voice * (0.65 + 0.35 * Math.sin(now * 0.011 + ray.angle * 9))
-      const outer = ray.inner + ray.length * (1 + LENS_REACH * lit) * (1 + VOICE_REACH * heard)
-      ray.el.setAttribute('x2', (cx + outer * Math.cos(ray.angle)).toFixed(1))
-      ray.el.setAttribute('y2', (cy + outer * Math.sin(ray.angle)).toFixed(1))
-      ray.el.setAttribute('stroke-opacity', Math.min(1, ray.opacity + 0.4 * lit + 0.35 * heard).toFixed(2))
+      const length = ray.length * (1 + LENS_REACH * lit) * (1 + VOICE_REACH * heard)
+      ray.el.style.width = `calc(${length.toFixed(2)} * 100cqw / ${units})`
+      ray.el.style.opacity = Math.min(1, ray.opacity + 0.4 * lit + 0.35 * heard).toFixed(2)
     }
+  }
+
+  const paint = (now: number) => {
+    paintRays(now)
 
     const step = tabs.findIndex((tab) => tab.dataset.active === 'true')
     STEP_DOTS.forEach((dotIndex, stepIndex) => {
@@ -140,12 +152,8 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   }
 
   const aim = (event: PointerEvent) => {
-    const box = svg.getBoundingClientRect()
-    const view = svg.viewBox.baseVal
-    const scale = view.width / box.width
-    const x = view.x + (event.clientX - box.left) * scale
-    const y = view.y + (event.clientY - box.top) * scale
-    let angle = Math.atan2(y - cy, x - cx)
+    const box = sun.getBoundingClientRect()
+    let angle = Math.atan2(event.clientY - box.bottom, event.clientX - (box.left + box.width * center))
     if (angle < 0) angle += 2 * Math.PI
     // Ниже горизонта отражаем курсор вверх: линза идёт за ним по горизонтали.
     if (angle < Math.PI) angle = 2 * Math.PI - angle
@@ -159,14 +167,6 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     wake()
   }
 
-  const go = () => {
-    svg.setAttribute('data-sun-go', '')
-    start = performance.now() + ENTRANCE_MS
-  }
-  // В Safari нет `requestIdleCallback` — там просто короткая пауза.
-  const hasIdle = typeof window.requestIdleCallback === 'function'
-  const idle = hasIdle ? window.requestIdleCallback(go, { timeout: IDLE_TIMEOUT_MS }) : window.setTimeout(go, 300)
-
   const observer = new IntersectionObserver(([entry]) => {
     visible = !!entry?.isIntersecting
     wake()
@@ -178,8 +178,6 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   document.addEventListener('visibilitychange', wake)
 
   return () => {
-    if (hasIdle) window.cancelIdleCallback(idle)
-    else window.clearTimeout(idle)
     cancelAnimationFrame(frame)
     observer.disconnect()
     root.removeEventListener('pointermove', aim)

@@ -13,6 +13,8 @@ const MENU_ID = 'site-menu'
 const navLinkStyles = 'font-serif text-[17px] text-ink-soft transition-colors duration-200 hover:text-ink'
 
 // Без бордеров. Раскладка: ссылки слева, знак по центру (ось hero), действие справа.
+// На входе элементы опускаются на место (CSS с первой отрисовки, вместе со словами hero): знак первым,
+// ссылки лесенкой, кнопка последней. Анимируются дети, а не сама липкая шапка — её фон и blur не трогаем.
 export function SiteHeader() {
   const [open, setOpen] = useState(false)
 
@@ -23,7 +25,7 @@ export function SiteHeader() {
       className="sticky top-0 z-40 transition-[background-color] duration-300 data-[scrolled=true]:bg-canvas/85 data-[scrolled=true]:backdrop-blur-md"
     >
       <Container className="grid h-[72px] grid-cols-[1fr_auto] items-center gap-6 sm:h-[104px] sm:grid-cols-[1fr_auto_1fr]">
-        <Link to="/" aria-label={`${siteConfig.name} home`} className="justify-self-start text-ink sm:order-2 sm:justify-self-center">
+        <Link to="/" aria-label={`${siteConfig.name} home`} className="justify-self-start text-ink motion-safe:animate-drop sm:order-2 sm:justify-self-center">
           <Logo className="h-[22px] w-auto sm:h-8" />
         </Link>
 
@@ -34,8 +36,12 @@ export function SiteHeader() {
           className="max-sm:absolute max-sm:inset-x-0 max-sm:top-[72px] max-sm:hidden max-sm:bg-canvas max-sm:px-4 max-sm:pt-4 max-sm:pb-7 max-sm:data-[open=true]:block sm:order-1"
         >
           <ul className="flex gap-[38px] max-sm:flex-col max-sm:gap-4">
-            {siteConfig.nav.map((item) => (
-              <li key={item.label}>
+            {siteConfig.nav.map((item, index) => (
+              <li
+                key={item.label}
+                className="motion-safe:animate-drop"
+                style={{ animationDelay: `${80 + index * 50}ms` }}
+              >
                 {'href' in item ? (
                   /* Обычный <a>: плавный переход к якорю перехватывает Lenis (`anchors: true`),
                      без Lenis (reduced motion) срабатывает нативный переход. */
@@ -58,7 +64,7 @@ export function SiteHeader() {
           </ul>
         </nav>
 
-        <div className="flex items-center gap-3 justify-self-end sm:order-3">
+        <div className="flex items-center gap-3 justify-self-end motion-safe:animate-drop motion-safe:[animation-delay:260ms] sm:order-3">
           <Link to="/install" className={buttonStyles({ size: 'sm', className: 'max-sm:hidden' })}>
             Get AGI OS <ArrowDownIcon />
           </Link>

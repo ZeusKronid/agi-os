@@ -54,17 +54,16 @@ interface SunburstProps extends Omit<ComponentProps<'svg'>, 'children'> {
  * в покое луч укорочен до обычной длины, а `--sun-extend: 1` на любом предке вытягивает его целиком
  * волной от зенита к горизонту. Дугу и лучи можно дорисовать анимацией: `[data-sun-arc]`, `[data-sun-ray]`.
  *
- * У варианта с `headroom` (`live`) viewBox продлён вверх, а солнце обрезано по горизонту: оно встаёт
- * из-за линии основания CSS-анимациями, которые ждут на паузе атрибута `data-sun-go` (его ставит
- * `widgets/hero/lib/mount-live-sun.ts`, когда главный поток свободен), а длину лучей потом каждый кадр
- * ведёт JS. Без JS паузу снимает `<noscript>` в hero, и вход играет сразу.
+ * Вариант с `headroom` (`live`) — HTML-обёртка, обрезанная по горизонту: лучи-полоски, дуга в поворотном
+ * окне и SVG с точками. Он встаёт из-за линии основания с первой отрисовки на композиторных анимациях,
+ * а длину лучей потом каждый кадр ведёт JS (`widgets/hero/lib/mount-live-sun.ts`).
+ * Без JS это законченный статичный восход.
  */
 export function Sunburst({ variant, className, ...props }: SunburstProps) {
   const spec = specs[variant]
   const id = useId().replace(/[^a-zA-Z0-9_-]/g, '')
   const fadeId = `sun-fade-${id}`
   const maskId = `sun-mask-${id}`
-  const clipId = `sun-clip-${id}`
   const { cx, cy, radius } = spec
   const reach = spec.reach
   const live = spec.headroom !== undefined
@@ -99,14 +98,6 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
         x2={ray.x2}
         y2={ray.y2}
         strokeOpacity={ray.opacity}
-        {...(live && {
-          // Лучи вырастают от дуги наружу: сначала у зенита, к горизонту позже (как подъём в прототипе).
-          'data-sun-ray': true,
-          pathLength: 1,
-          strokeDasharray: '1 1',
-          className: 'motion-safe:animate-sun-ray',
-          style: { animationDelay: `${(0.25 + (1 - Number(ray.height)) * 0.6).toFixed(2)}s` },
-        })}
       />
     ),
   )
@@ -147,53 +138,93 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
       <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y={top} width={spec.width} height={fullHeight}>
         <rect y={top} width={spec.width} height={fullHeight} fill={`url(#${fadeId})`} />
       </mask>
-      {live && (
-        <clipPath id={clipId}>
-          <rect y={top} width={spec.width} height={cy - top} />
-        </clipPath>
-      )}
     </defs>
   )
 
   if (live) {
+    const view = `0 ${top} ${spec.width} ${fullHeight}`
+    // Длина в единицах viewBox → CSS: обёртка — контейнер, 100cqw = ширина восхода.
+    const unit = (value: number) => `calc(${value.toFixed(2)} * 100cqw / ${spec.width})`
+    const horizon = `${(((cy - top) / fullHeight) * 100).toFixed(3)}%`
     return (
-      <svg
-        viewBox={`0 ${top} ${spec.width} ${fullHeight}`}
-        fill="none"
-        stroke="currentColor"
-        aria-hidden="true"
+      // Обёртка обрезает всё по горизонту (основание дуги): солнце встаёт из-за заголовка.
+      // Вход повторяет прототип, но собран только из transform/opacity HTML-слоёв — их ведёт композитор,
+      // поэтому гидрация и длинные задачи главного потока его не замораживают.
+      <div
         data-sun-live
-        data-cx={cx}
-        data-cy={cy}
-        data-r={radius}
-        // Вход стоит на паузе, пока JS не поставит `data-sun-go` (страница освободилась после гидрации).
-        className={cn('overflow-visible [&:not([data-sun-go])_*]:[animation-play-state:paused]', className)}
-        {...props}
+        data-center={(cx / spec.width).toFixed(4)}
+        data-units={spec.width}
+        aria-hidden="true"
+        className={cn('@container relative overflow-hidden', className)}
+        style={{ aspectRatio: `${spec.width} / ${cy - top}` }}
       >
-        {defs}
-        {/* Горизонт — основание дуги: всё солнце обрезано по нему и встаёт из-за заголовка. */}
-        <g clipPath={`url(#${clipId})`}>
-          <g className="motion-safe:animate-sun-rise">
-            <g mask={`url(#${maskId})`} strokeWidth={spec.strokeWidth}>
-              {rayLines}
-            </g>
-            <path
-              d={`M${cx - radius} ${cy}A${radius} ${radius} 0 0 1 ${cx + radius} ${cy}`}
-              strokeWidth="1.5"
-              pathLength={1}
-              strokeDasharray="1 1"
-              className="motion-safe:animate-sun-arc"
-            />
-            <g fill="currentColor" stroke="none" className="motion-safe:animate-sun-late">
-              {zenith}
-              {arcDots}
-            </g>
-          </g>
-        </g>
-        <g fill="currentColor" stroke="none" className="motion-safe:animate-sun-late">
-          {farDots}
-        </g>
-      </svg>
+        <div
+          className="absolute inset-x-0 top-0 motion-safe:animate-sun-rise"
+          style={{ aspectRatio: `${spec.width} / ${fullHeight}` }}
+        >
+          {/* Лучи — полоски от дуги наружу. Каждая растёт через scaleX со своей задержкой: сначала у зенита,
+              к горизонту позже и дольше (как рост лучей вслед за подъёмом в прототипе). Затухание к концу луча
+              — градиент самой полоски (у SVG это делала радиальная маска). */}
+          <div className="absolute" style={{ left: `${((cx / spec.width) * 100).toFixed(3)}%`, top: horizon }}>
+            {rays[variant].map((ray, index) => {
+              const x1 = Number(ray.x1) - cx
+              const y1 = Number(ray.y1) - cy
+              const inner = Math.hypot(x1, y1)
+              const length = Math.hypot(Number(ray.x2) - cx, Number(ray.y2) - cy) - inner
+              const angle = Math.atan2(y1, x1)
+              const fromZenith = 1 - Number(ray.height)
+              return (
+                <div key={index} className="absolute top-0 left-0" style={{ rotate: `${angle.toFixed(4)}rad` }}>
+                  <i
+                    data-sun-ray
+                    data-angle={angle.toFixed(4)}
+                    data-length={length.toFixed(2)}
+                    data-opacity={ray.opacity}
+                    className="absolute top-0 block origin-left motion-safe:animate-sun-ray"
+                    style={{
+                      left: unit(inner),
+                      width: unit(length),
+                      // Не тоньше 1px: на узком восходе полоска в 0,5px почти не рисуется (SVG-линии так не пропадали).
+                      height: `max(1px, ${unit(spec.strokeWidth)})`,
+                      marginTop: `calc(max(1px, ${unit(spec.strokeWidth)}) / -2)`,
+                      opacity: ray.opacity,
+                      backgroundImage: `linear-gradient(90deg, currentColor ${unit(Math.max(0, radius * spec.fade[0] - inner))}, transparent ${unit(radius * spec.fade[1] - inner)})`,
+                      animationDelay: `${(0.25 + 0.17 * fromZenith).toFixed(3)}s`,
+                      animationDuration: `${(0.45 + 1.2 * fromZenith ** 3).toFixed(3)}s`,
+                    }}
+                  />
+                </div>
+              )
+            })}
+          </div>
+          {/* Дуга рисуется вдоль себя: окно-полуплоскость поворачивается вокруг центра солнца от горизонта
+              слева к горизонту справа, а дуга внутри вращается навстречу и стоит на месте. */}
+          <div
+            className="absolute inset-x-0 h-full origin-top overflow-hidden rotate-180 motion-safe:animate-sun-sweep"
+            style={{ top: horizon }}
+          >
+            <svg
+              viewBox={view}
+              fill="none"
+              stroke="currentColor"
+              className="absolute inset-x-0 block h-full w-full -rotate-180 motion-safe:animate-sun-unsweep"
+              style={{ top: `-${horizon}`, transformOrigin: `50% ${horizon}` }}
+            >
+              <path d={`M${cx - radius} ${cy}A${radius} ${radius} 0 0 1 ${cx + radius} ${cy}`} strokeWidth="1.5" />
+            </svg>
+          </div>
+          <svg
+            viewBox={view}
+            fill="currentColor"
+            stroke="none"
+            className="absolute inset-0 block size-full motion-safe:animate-sun-late"
+          >
+            {zenith}
+            {arcDots}
+            {farDots}
+          </svg>
+        </div>
+      </div>
     )
   }
 
