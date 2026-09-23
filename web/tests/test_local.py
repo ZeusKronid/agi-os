@@ -95,6 +95,20 @@ class LocalApiTests(AioHTTPTestCase):
         response = await self.request('/api/screenshot', {})
         self.assertEqual(response.status, 404)
 
+    async def test_new_vm_keeps_only_the_newest_earlier_vm_directory(self):
+        import os
+        import runtime
+        root = Path(self.directory.name)
+        for age, name in enumerate(('web-old', 'web-older', 'web-newest')):
+            (root / 'vm' / name).mkdir(parents=True)
+            (root / 'vm' / name / 'guest-console.log').write_text('log')
+            os.utime(root / 'vm' / name, (1000 - age * 100 if name != 'web-newest' else 2000,) * 2)
+        with patch.object(runtime, 'DATA_ROOT', root):
+            vm = runtime.VirtualMachine({'format': 'qcow2', 'path': str(root / 'none.qcow2')})
+            restored = runtime.VirtualMachine.restore({'directory': str(root / 'vm/web-newest'), 'image': vm.image})
+        self.assertEqual(sorted(p.name for p in (root / 'vm').iterdir()), sorted(['web-newest', vm.directory.name]))
+        self.assertTrue((restored.directory / 'guest-console.log').exists())  # resuming prunes nothing
+
     async def test_runtime_refuses_to_start_outside_live(self):
         import runtime
         with patch.object(runtime, 'DATA_ROOT', Path(self.directory.name)), \
