@@ -72,7 +72,8 @@ class FreeSpaceTests(unittest.TestCase):
 
     def test_blank_disk_is_free_but_bare_filesystem_is_user_data(self):
         blank = {'path': '/dev/sdb', 'size': 8 * GIB, 'pttype': None, 'fstype': None}
-        self.assertEqual(storage_worker.free_regions(blank), [(2048, 8 * GIB // 512 - 34)])
+        with patch.object(storage_worker, 'looks_blank', return_value=True):
+            self.assertEqual(storage_worker.free_regions(blank), [(2048, 8 * GIB // 512 - 34)])
         bare = {'path': '/dev/sdb', 'size': 8 * GIB, 'pttype': None, 'fstype': 'exfat'}
         self.assertEqual(storage_worker.free_regions(bare), [])
 
@@ -89,7 +90,8 @@ class ProbeTests(unittest.TestCase):
         target.update(pttype=None, fstype=None, partitions=[], tran='sata')
         with patch.object(storage_worker, 'inventory', return_value=snapshot), \
                 patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
-                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'):
+                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'), \
+                patch.object(storage_worker, 'looks_blank', return_value=True):
             result = storage_worker.probe({'needed': 6 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
         kinds = {o['kind']: o for o in result['options']}
         self.assertFalse(kinds['ram']['fits'])
@@ -104,14 +106,16 @@ class ProbeTests(unittest.TestCase):
         snapshot['disks'][0].update(pttype=None, fstype=None, partitions=[])
         with patch.object(storage_worker, 'inventory', return_value=snapshot), \
                 patch.object(storage_worker, 'mem_available', return_value=20 * GIB), \
-                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'):
+                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'), \
+                patch.object(storage_worker, 'looks_blank', return_value=True):
             result = storage_worker.probe({'needed': 6 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
         ram = next(o for o in result['options'] if o['kind'] == 'ram')
         self.assertTrue(ram['fits'])
         self.assertTrue(ram.get('recommended'))
 
     def test_erase_is_never_reverted_silently(self):
-        result = storage_worker.revert({'state': {'kind': 'erase', 'disk': '/dev/vda', 'device': '/dev/vda1'}})
+        with patch.object(storage_worker, 'inventory', return_value=demo_inventory()):
+            result = storage_worker.revert({'state': {'kind': 'erase', 'disk': '/dev/vda', 'device': '/dev/vda1'}})
         self.assertFalse(result['reverted'])
 
 

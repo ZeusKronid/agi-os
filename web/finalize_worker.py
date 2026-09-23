@@ -31,6 +31,8 @@ from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
 from system import inventory, live_environment, selected_disk
 from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path
+from deployment import restrict_test_targets
+import storage_worker
 
 SECTOR = 512
 GIB = 2**30
@@ -38,6 +40,9 @@ ALIGN = 2048
 SOURCE_MAP = 'agi-final-source'
 TARGET_MAP = 'agi-final-target'
 TYPES = {'bios': 'ef02', 'boot': 'ef00', 'linux': '8300'}
+# The preview's filesystems were written by the preview VM: read them without trusting
+# setuid bits, device nodes or executables on the Live host.
+SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
 
 
 def run_json(runner, args):
@@ -47,23 +52,43 @@ def run_json(runner, args):
 def checked_request(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError('Завершение установки разрешено только внутри Live')
-    if set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation'}:
+    if not isinstance(request, dict) or set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation'}:
         raise ValidationError('Неизвестный запрос завершения')
+    if not isinstance(request['configuration'], dict) or not all(isinstance(request[k], str) for k in ('target', 'fingerprint', 'confirmation')):
+        raise ValidationError('Некорректный запрос завершения')
     config = Configuration.parse(request['configuration'])
     if config.disk != request['target'] or request['confirmation'] != request['target']:
         raise ValidationError('Введите точный путь конечного диска для подтверждения')
     if request['layout'] not in ('erase', 'alongside'):
         raise ValidationError('Неизвестный вариант разметки')
-    disk = selected_disk(inventory(), request['target'])
+    snapshot = restrict_test_targets(inventory())
+    disk = selected_disk(snapshot, request['target'])
     if disk['fingerprint'] != request['fingerprint']:
         raise ValidationError('Диск изменился после подтверждения; завершение отменено')
     passphrase = request['passphrase']
-    if not isinstance(passphrase, str) or any(c in passphrase for c in '\n\r\x00'):
+    if not isinstance(passphrase, str) or len(passphrase) > 1024 or any(c in passphrase for c in '\n\r\x00'):
         raise ValidationError('Некорректный пароль шифрования')
-    image = request['image']
-    if image.get('format') not in ('qcow2', 'raw') or not isinstance(image.get('path'), str):
-        raise ValidationError('Некорректное описание образа превью')
+    request['image'] = checked_image(request['image'], snapshot, disk)
     return config, disk
+
+
+def checked_image(image, snapshot, target):
+    """The preview must be storage the storage helper prepared, never an arbitrary file or device:
+    a qcow2 image inside its root-owned mount points, or a partition named AGIOS-PREVIEW."""
+    if not isinstance(image, dict) or set(image) != {'format', 'path'} or not isinstance(image['path'], str):
+        raise ValidationError('Некорректное описание образа превью')
+    path = image['path']
+    if image['format'] == 'qcow2':
+        allowed = {str(storage_worker.PREVIEW / 'ram/preview.qcow2'),
+                   str(storage_worker.PREVIEW / 'media' / storage_worker.NAME / 'preview.qcow2')}
+        if path not in allowed or os.path.realpath(path) != path or not Path(path).is_file():
+            raise ValidationError('Образ превью находится вне подготовленного хранилища')
+        return {'format': 'qcow2', 'path': path, 'on_target': False}
+    if image['format'] == 'raw':
+        disk, _ = storage_worker.find_partition(snapshot, path)
+        storage_worker.preview_partition(snapshot, disk['path'], path)
+        return {'format': 'raw', 'path': path, 'on_target': disk['path'] == target['path']}
+    raise ValidationError('Некорректное описание образа превью')
 
 
 class Source:
@@ -126,7 +151,7 @@ class Source:
 
 
 def read_record(runner, root_device, mount):
-    runner.run(['mount', '-o', 'ro', root_device, str(mount)])
+    runner.run(['mount', '-o', SOURCE_MOUNT, root_device, str(mount)])
     try:
         return json.loads((mount / 'var/lib/agi-os/installation.json').read_text())
     finally:
@@ -211,9 +236,9 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     src_root, encrypted = source.open_root(root_number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
-    runner.run(['mount', '-o', 'ro', src_root, str(src_mount)])
+    runner.run(['mount', '-o', SOURCE_MOUNT, src_root, str(src_mount)])
     source.mount = src_mount
-    runner.run(['mount', '-o', 'ro', source.partition(boot_number), str(src_mount / 'boot')])
+    runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
     used = int(runner.run(['du', '-sxB1', str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
     needed = used + used // 5 + 2 * GIB
     emit('final-progress', text=f'Создаю разделы на {target} для {used / GIB:.1f} ГиБ данных')
@@ -345,8 +370,7 @@ def finalize(request, runner):
         check_record(record, config, firmware, encrypted)
         if source.opened:
             runner.run(['cryptsetup', 'close', SOURCE_MAP]); source.opened = False
-        on_target = request['image']['format'] == 'raw' and request['image']['path'].startswith(target)
-        if on_target:
+        if request['image']['on_target']:
             source.detach()
             boot, root_partition, _ = promote(runner, request, disk, source, firmware)
             root = root_partition

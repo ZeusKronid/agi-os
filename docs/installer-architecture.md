@@ -30,7 +30,8 @@ flowchart TD
 `agi-web.service` запускает сайт от пользователя `agi` (группы `kvm`, `disk`,
 `optical`); привилегированные шаги выполняются короткими root-помощниками через
 `sudo -n` с JSON на stdin: `storage_worker.py` (probe / prepare / revert) и
-`finalize_worker.py`. `agi-guacd.service` запускает guacd из squashfs
+`finalize_worker.py`; сайт для них — недоверенный вызывающий, см.
+[модель угроз root-помощников](root-helpers-threat-model.md). `agi-guacd.service` запускает guacd из squashfs
 (`RootImage=`). Внутренняя VM получает ядро и initramfs с загрузочного
 носителя Live, сам носитель — только для чтения, и параметр `agios.guest`,
 по которому запускается `agi-guest.service`, а сайт, guacd и рабочий стол — нет.
