@@ -13,7 +13,6 @@ compared with SHA256SUMS. Exit code 0 means both checks passed.
 import argparse
 import hashlib
 from pathlib import Path
-import importlib.util
 import re
 import subprocess
 import sys
@@ -42,12 +41,17 @@ def verified_by(home, signature, data):
     return signer_fingerprint(result.stdout)
 
 
+REJECT = {"EXPSIG", "EXPKEYSIG", "REVKEYSIG", "BADSIG", "ERRSIG"}
+
+
 def signer_fingerprint(status):
-    """Shared with sign-iso.py: a good, current signature only (not expired or revoked)."""
-    spec = importlib.util.spec_from_file_location("sign_iso", Path(__file__).with_name("sign-iso.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.signer_fingerprint(status)
+    """A good, current signature only (not expired or revoked). Kept identical to
+    sign-iso.py on purpose: this script must work when downloaded alone."""
+    words = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] ")]
+    kinds = {w[1] for w in words if len(w) > 1}
+    if "GOODSIG" not in kinds or kinds & REJECT:
+        return None
+    return next((w[-1] for w in words if len(w) >= 3 and w[1] == "VALIDSIG"), None)
 
 
 def verify(iso, key, fingerprint):
