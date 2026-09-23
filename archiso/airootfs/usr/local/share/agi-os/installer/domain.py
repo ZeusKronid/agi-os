@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from configcheck import ConfigCheckError, static as check_file
 from hardware import describe, driver_plan, virtual
 
 
@@ -145,6 +146,10 @@ class Configuration:
                         raise ValidationError("Этот системный файл управляется установочным движком")
                 if not isinstance(item["content"], str) or len(item["content"]) > 50000 or "\x00" in item["content"]:
                     raise ValidationError("Некорректное содержимое файла настроек")
+                try:
+                    check_file("home" if name == "home_files" else "system", str(path), item["content"])
+                except ConfigCheckError as exc:
+                    raise ValidationError(str(exc))
                 files.append((str(path), item["content"]))
             if len({p for p, _ in files}) != len(files):
                 raise ValidationError("Повторяющиеся файлы настроек")
@@ -189,10 +194,11 @@ class Configuration:
             fields.append("Превью работает на виртуальном железе и НЕ проверяет: "
                           + (", ".join(plan["unverified"]) or ("ничего особенного — оборудование виртуальное" if virtual(hardware)
                                                                else "особого оборудования не найдено")))
-        for path, content in self.home_files:
-            fields.append(f"Настройки ~/{path}:\n{content}")
-        for path, content in self.system_files:
-            fields.append(f"Системные настройки /{path}:\n{content}")
+        paths = [f"~/{path}" for path, _ in self.home_files] + [f"/{path}" for path, _ in self.system_files]
+        if paths:
+            # The contents are shown file by file in the review's own block.
+            fields.append("Файлы настроек от агента (содержимое — в блоке «Файлы настроек»):\n"
+                          + "\n".join(f"• {path}" for path in paths))
         return "\n\n".join(fields)
 
 
@@ -212,6 +218,10 @@ needed for a usable result. Use services to enable the selected display manager;
 use home_files for required user .config files, including Wayland keyboard settings
 when needed. Use system_files for environment/greeter configuration (relative etc/
 or usr/local/share/ paths); e.g. greetd needs a command to launch a greeter/session.
+Every file must be complete and valid for its program: the app parses JSON/JSONC,
+TOML, INI, XML, desktop and systemd files before install and runs the program's own
+checker (foot -C, sway -C, i3 -C, Hyprland --verify-config…) in the installed preview;
+errors come back to you to fix. Write only options you are sure the installed version supports.
 Do not overwrite engine-managed accounts, permissions, storage, package manager,
 system services or boot configuration. session is the installed desktop-file basename without .desktop,
 or an empty string for console. Do not add autologin or passwordless sudo.

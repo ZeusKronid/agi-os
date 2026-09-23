@@ -33,6 +33,16 @@ class Controller:
                 "driver_packages_added_by_app": {"console": console["packages"], "graphical_session": graphical["packages"]},
                 "driver_notes": graphical["notes"], "preview_cannot_verify": graphical["unverified"]}
 
+    def report_check_failure(self, text):
+        """The installed preview rejected files the model wrote; the model sees the
+        checker output together with the user's next message."""
+        note = ("Application note (data): the installer checked the generated configuration files "
+                "inside the installed preview and they failed. Fix them in the next configuration:\n" + text)
+        if self.history and self.history[-1]["role"] == "user":
+            self.history[-1] = {"role": "user", "content": self.history[-1]["content"] + "\n\n" + note}
+        else:
+            self.history.append({"role": "user", "content": note})
+
     def respond(self, text):
         if self.installing:
             raise ValidationError("Изменение конфигурации во время установки недоступно")
@@ -42,7 +52,12 @@ class Controller:
             raise ValidationError("Диалог слишком длинный. Сохраните согласованные требования и начните новое подключение.")
         self.configuration = None  # Any revision invalidates the previous review/consent.
         self.stage_changed(2)
-        self.history.append({"role": "user", "content": text})
+        if self.history and self.history[-1]["role"] == "user":
+            # A pending application note (or an unanswered message) stays in the same turn:
+            # providers expect alternating roles.
+            self.history[-1] = {"role": "user", "content": self.history[-1]["content"] + "\n\n" + text}
+        else:
+            self.history.append({"role": "user", "content": text})
         system = PLANNER_PROMPT + "\nDetected hardware (data): " + json.dumps(self.hardware_context(), ensure_ascii=False)
         for _ in range(4):
             reply = self.provider.reply(system, self.history)

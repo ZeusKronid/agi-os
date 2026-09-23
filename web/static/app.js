@@ -89,6 +89,7 @@ function render(state) {
     $('resume').disabled = finalizing;
     renderHardware(state.hardware);
     renderFound(state);
+    renderFiles(state.files || []);
     $('previewInfo').hidden = !state.built || state.final.phase === 'complete';
     if (state.built) { $('previewStorage').textContent = state.built.storage || ''; $('previewRevertHint').textContent = 'Превью можно убрать в любой момент: ' + (state.built.revert || '') + '. Диск ' + state.built.target + ' ещё не менялся' + (state.built.on_target ? ', кроме одной временной записи раздела' : '') + '.'; }
     $('revert').disabled = !state.can_revert;
@@ -144,6 +145,35 @@ function renderFound(state) {
         if (item.can_remove) actions.append(foundAction('Убрать', 'previews/remove', item, (item.kind === 'file' ? 'Удалить папку AGIOS-PREVIEW на ' : 'Удалить временный раздел ') + item.device + '? Остальные данные не меняются.', true));
         row.append(actions); $('orphanList').append(row);
     }
+}
+let lastFiles = '';
+function highlight(content) {
+    // Text nodes only: a file is data from the model and must never become markup.
+    const pre = document.createElement('pre'); pre.className = 'code';
+    for (const line of content.split('\n')) {
+        const row = document.createElement('span'); let match;
+        if (/^\s*(#|;|\/\/|--)/.test(line)) { row.className = 'c'; row.textContent = line; }
+        else if (/^\s*\[[^\]]*\]\s*$/.test(line) || /^\s*(Section|EndSection|SubSection|EndSubSection)\b/i.test(line)) { row.className = 's'; row.textContent = line; }
+        else if ((match = line.match(/^(\s*"?[\w.$@:\/\[\]-]+"?)(\s*[=:]\s*|\s+)(.*)$/))) {
+            const key = document.createElement('span'); key.className = 'k'; key.textContent = match[1];
+            row.append(key, document.createTextNode(match[2] + match[3]));
+        } else row.textContent = line;
+        pre.append(row, document.createTextNode('\n'));
+    }
+    return pre;
+}
+function renderFiles(files) {
+    $('files').hidden = !files.length;
+    const key = JSON.stringify(files); if (key === lastFiles) return; lastFiles = key;
+    $('fileList').replaceChildren(...files.map(file => {
+        const box = document.createElement('details'); box.className = 'file';
+        const head = document.createElement('summary');
+        const path = document.createElement('b'); path.textContent = file.display;
+        const checks = document.createElement('small');
+        checks.textContent = file.checks.length ? 'Проверка: ' + file.checks.join(', ') : 'Автоматической проверки для этого формата нет — прочитайте сами';
+        checks.className = file.checks.length ? '' : 'unchecked';
+        head.append(path, checks); box.append(head, highlight(file.content)); return box;
+    }));
 }
 let lastHardware = '';
 function renderHardware(hardware) {
