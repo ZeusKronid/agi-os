@@ -30,7 +30,7 @@ class LiveProvider:
 
     def reply(self, system, messages):
         if self.backend is None:
-            raise ProviderError('Подключите модель: войдите в ChatGPT или укажите API в настройках сайта')
+            raise ProviderError('Connect a model: sign in to ChatGPT or add an API in the model settings')
         self.backend.model = self.model
         return self.backend.reply(system + CONTEXT, messages)
 
