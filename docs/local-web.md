@@ -271,7 +271,8 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
   (`/etc/systemd/sleep.conf.d/agi-os-hibernate.conf`): QEMU handles ACPI S4 as a
   delayed power-off, so in platform mode the guest kernel sees the sleep call
   return, rolls the hibernation back and erases the image. Real firmware keeps
-  platform mode.
+  platform mode, so the trial is not run inside the preview VM: hibernation is
+  checked on the installed computer. An unreadable kernel log is not a pass.
 - Secure Boot: the Live ISO itself is not signed and boots only with Secure Boot
   off or in Setup Mode. Booting it with Secure Boot on would need Arch's
   unsigned kernel behind a Microsoft-signed `shim` plus a MOK the user enrolls
