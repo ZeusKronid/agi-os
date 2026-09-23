@@ -1,17 +1,26 @@
 import Lenis from 'lenis'
 
 import { gsap, registerScrollTrigger, ScrollTrigger } from './gsap'
-import { REDUCED_MOTION_QUERY } from './media'
+import { REDUCED_MOTION_QUERY, RESPECT_REDUCED_MOTION } from './media'
 
 // Значения GSAP по умолчанию — возвращаем их при остановке Lenis.
 const GSAP_LAG_THRESHOLD = 500
 const GSAP_LAG_ADJUSTED = 33
 
+/** Длительность догона в секундах: колесо и якоря доезжают с expo-out затуханием (easing Lenis по умолчанию). */
+const SCROLL_DURATION = 1.4
+
 /** Запускает Lenis на общем с GSAP тикере и возвращает полную очистку. */
 function startSmoothScroll(): () => void {
   registerScrollTrigger()
 
-  const lenis = new Lenis({ autoRaf: false, anchors: true })
+  // Lenis 1.3 сам глушит сглаживание при `prefers-reduced-motion`, поэтому передаём ему решение сайта.
+  const lenis = new Lenis({
+    autoRaf: false,
+    anchors: true,
+    duration: SCROLL_DURATION,
+    respectReducedMotion: RESPECT_REDUCED_MOTION,
+  })
   const onTick = (time: number) => lenis.raf(time * 1000)
 
   lenis.on('scroll', ScrollTrigger.update)
