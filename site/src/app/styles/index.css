@@ -236,6 +236,11 @@
     sun-shimmer var(--shimmer-duration) ease-in-out var(--shimmer-delay) infinite alternate;
 }
 
+/* Сияние без роста: луч вернулся на экран уже выросшим (см. `data-paused` в `mount-live-sun.ts`). */
+@utility animate-sun-shimmer {
+  animation: sun-shimmer var(--shimmer-duration) ease-in-out var(--shimmer-delay) infinite alternate;
+}
+
 /* Затухание краёв бегущей строки. */
 @utility mask-fade-x {
   mask-image: linear-gradient(90deg, transparent, black 6%, black 94%, transparent);

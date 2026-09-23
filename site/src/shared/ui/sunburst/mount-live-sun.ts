@@ -26,6 +26,9 @@ interface LiveRay {
   fromBase: string
   /** Прозрачность из SSR-разметки: к ней луч возвращается в покое. */
   restOpacity: string
+  /** Последние записанные значения: стиль трогаем, только когда они меняются. */
+  transform: string
+  shownOpacity: string
   /** Доля голоса у луча: у каждого своя, чтобы поле шелестело, а не пульсировало целиком. */
   voice: number
 }
@@ -48,8 +51,8 @@ const noise = (index: number) => {
  * - Солнце слушает демо: пока микрофон включён, энергия волны (сумма изменений столбиков за кадр)
  *   удлиняет лучи. Активный шаг демо подсвечивает свою точку на дуге, пройденные остаются крупными.
  * - Цикл идёт, только пока hero виден и вкладка открыта. SSR-разметка — законченный статичный восход.
- * - За экраном бесконечное CSS-сияние лучей стоит на паузе (`data-paused`): 97 анимаций закатного солнца
- *   в футере иначе крутились бы всё время, пока читают страницу выше.
+ * - За экраном с лучей сняты все CSS-анимации (`data-paused`): даже на паузе 96 анимаций держали бы
+ *   по композиторному слою и утяжеляли каждый кадр скролла выше по странице.
  */
 export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   if (!root) return
@@ -68,6 +71,8 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
       toBase: `translateX(calc(${el.dataset.inner} * 100cqw / ${units}))`,
       fromBase: `translateX(calc(${el.dataset.inner} * -100cqw / ${units}))`,
       restOpacity: el.style.opacity,
+      transform: el.style.transform,
+      shownOpacity: el.style.opacity,
       voice: 0.4 + noise(index) * 0.9,
     }
   })
@@ -98,6 +103,13 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     return mic?.dataset.on === 'true' ? clamp(energy / VOICE_FULL) : 0
   }
 
+  // Лучи вдали от линзы стоят на месте: запись того же значения всё равно пачкала бы стиль и заставляла
+  // браузер пересчитывать его, когда ScrollTrigger на скролле читает позицию страницы.
+  const setRay = (ray: LiveRay, transform: string, opacity: string) => {
+    if (ray.transform !== transform) ray.el.style.transform = ray.transform = transform
+    if (ray.shownOpacity !== opacity) ray.el.style.opacity = ray.shownOpacity = opacity
+  }
+
   const paintRays = (now: number) => {
     // Пока звучит голос, линза уступает ему.
     const strength = lens.strength * (1 - voice * 0.6)
@@ -106,10 +118,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     if (rest && raysAtRest) return
     raysAtRest = rest
     if (rest) {
-      for (const ray of rays) {
-        ray.el.style.transform = ''
-        ray.el.style.opacity = ray.restOpacity
-      }
+      for (const ray of rays) setRay(ray, '', ray.restOpacity)
       return
     }
     for (const ray of rays) {
@@ -118,8 +127,11 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
       const heard = voice * ray.voice * (0.65 + 0.35 * Math.sin(now * 0.011 + ray.angle * 9))
       const stretch = (1 + LENS_REACH * lit) * (1 + VOICE_REACH * heard)
       // Вытягиваем от основания луча: сдвиг к основанию, scaleX, сдвиг обратно — только композитор, без раскладки.
-      ray.el.style.transform = `${ray.toBase} scaleX(${stretch.toFixed(3)}) ${ray.fromBase}`
-      ray.el.style.opacity = Math.min(1, ray.opacity + 0.4 * lit + 0.35 * heard).toFixed(2)
+      setRay(
+        ray,
+        `${ray.toBase} scaleX(${stretch.toFixed(3)}) ${ray.fromBase}`,
+        Math.min(1, ray.opacity + 0.4 * lit + 0.35 * heard).toFixed(2),
+      )
     }
   }
 
@@ -132,8 +144,10 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
       if (!dot || step < 0) return
       const pulse = motionSafe.matches ? 0.9 * (0.5 + 0.5 * Math.sin(now * 0.008)) : 0
       const radius = stepIndex < step ? 2.6 : stepIndex === step ? 2.8 + pulse : 1.6
-      dot.setAttribute('r', radius.toFixed(2))
-      dot.setAttribute('opacity', stepIndex <= step ? '1' : '0.55')
+      const r = radius.toFixed(2)
+      const opacity = stepIndex <= step ? '1' : '0.55'
+      if (dot.getAttribute('r') !== r) dot.setAttribute('r', r)
+      if (dot.getAttribute('opacity') !== opacity) dot.setAttribute('opacity', opacity)
     })
   }
 
@@ -176,7 +190,10 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
 
   const observer = new IntersectionObserver(([entry]) => {
     visible = !!entry?.isIntersecting
-    sun.dataset.paused = String(!visible)
+    // `true` снимает с лучей все анимации; `false` ставится только после ухода с экрана,
+    // чтобы не оборвать вход при загрузке: вернувшиеся лучи уже выросли и только мерцают.
+    if (!visible) sun.dataset.paused = 'true'
+    else if (sun.dataset.paused) sun.dataset.paused = 'false'
     wake()
   })
   observer.observe(root)

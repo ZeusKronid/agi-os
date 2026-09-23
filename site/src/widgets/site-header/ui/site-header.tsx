@@ -22,7 +22,7 @@ export function SiteHeader() {
     <header
       ref={mountHeaderScroll}
       data-scrolled="false"
-      className="sticky top-0 z-40 transition-[background-color] duration-300 data-[scrolled=true]:bg-canvas/85 data-[scrolled=true]:backdrop-blur-md"
+      className="sticky top-0 z-40 transition-[background-color] duration-300 data-[scrolled=true]:bg-canvas/95"
     >
       <Container className="grid h-[72px] grid-cols-[1fr_auto] items-center gap-6 sm:h-[104px] sm:grid-cols-[1fr_auto_1fr]">
         <Link to="/" aria-label={`${siteConfig.name} home`} className="justify-self-start text-ink motion-safe:animate-drop sm:order-2 sm:justify-self-center">

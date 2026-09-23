@@ -124,7 +124,7 @@ export function SiteFooter() {
         />
         <a
           href={`#${sectionIds.top}`}
-          className="group/rise absolute bottom-[calc(var(--fs)*0.66_+_var(--sun-w)*155/640*0.3)] left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-canvas/85 px-4 py-2.5 font-mono text-[11px] tracking-[0.26em] whitespace-nowrap text-ink-muted uppercase inset-ring inset-ring-line backdrop-blur-sm transition-[color,scale,box-shadow] duration-200 hover:text-ink hover:inset-ring-line-accent active:scale-[0.96]"
+          className="group/rise absolute bottom-[calc(var(--fs)*0.66_+_var(--sun-w)*155/640*0.3)] left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-canvas/95 px-4 py-2.5 font-mono text-[11px] tracking-[0.26em] whitespace-nowrap text-ink-muted uppercase inset-ring inset-ring-line transition-[color,scale,box-shadow] duration-200 hover:text-ink hover:inset-ring-line-accent active:scale-[0.96]"
         >
           <ArrowUpIcon className="size-3.5 transition-[translate] duration-300 ease-out-strong group-hover/rise:-translate-y-0.5" />
           Back to sunrise

@@ -5,8 +5,10 @@
 export function mountHeaderScroll(node: HTMLElement | null): void | (() => void) {
   if (!node) return
 
+  // Пишем только смену состояния: запись на каждом кадре скролла пачкала бы стили всей шапки.
   const update = () => {
-    node.dataset.scrolled = String(window.scrollY > 8)
+    const scrolled = String(window.scrollY > 8)
+    if (node.dataset.scrolled !== scrolled) node.dataset.scrolled = scrolled
   }
   update()
   window.addEventListener('scroll', update, { passive: true })
