@@ -14,6 +14,12 @@ from pathlib import Path
 
 RECORD = Path("/var/lib/agi-os/installation.json")
 HIBERNATE_WAIT = 300
+# A real resume jumps CLOCK_BOOTTIME by the whole time the computer was off (writing the
+# image, powering off, booting, loading it): far more than the snapshot itself takes.
+RESUME_GAP = 10
+# The kernel's own words when a hibernation did not happen and the session just went on.
+HIBERNATE_ABORTED = ("rolling back", "Image saving failed", "Failed to hibernate",
+                     "Cannot find swap device", "Not enough free swap", "hibernation: Error")
 
 
 def command(args):
@@ -122,6 +128,31 @@ def clocks():
     return time.time(), time.clock_gettime(time.CLOCK_BOOTTIME) - time.clock_gettime(time.CLOCK_MONOTONIC)
 
 
+def kernel_messages_since(started):
+    """Kernel log of this boot since `started` (the user is in wheel, which may read the
+    journal), or None when it cannot be read."""
+    code, output = command(["journalctl", "-k", "-b", "-o", "cat", "--no-pager", f"--since=@{started}"])
+    return output if code == 0 else None
+
+
+def resumed(system_root, boot_id, marker, nonce, gap, started):
+    """Whether the session really came back from a hibernation image. The same boot and
+    RAM marker alone are not proof: when the platform wakes the kernel right away (QEMU
+    handles ACPI S4 as a delayed power-off), it rolls the hibernation back, the session
+    goes on and the image is erased."""
+    same_boot = (system_root / "proc/sys/kernel/random/boot_id").read_text().strip() == boot_id
+    if not same_boot or read(marker) != nonce:
+        return False, "После гибернации сеанс не совпадает"
+    log = kernel_messages_since(started)
+    aborted = next((line for line in (log or "").splitlines() if any(w in line for w in HIBERNATE_ABORTED)), None)
+    if aborted:
+        return False, "Гибернация не состоялась, ядро вернуло сеанс без выключения: " + aborted.strip()[:200]
+    if gap < RESUME_GAP:
+        return False, (f"Гибернация не подтверждена: сеанс был остановлен лишь {gap:.0f} с — "
+                       "компьютер не выключался и не загружал образ")
+    return True, "Сеанс восстановлен после гибернации"
+
+
 def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT):
     """Hibernate once and prove the session came back: this process and a RAM-only
     marker survive a resume, never a fresh boot. A fresh boot is detected on the next run."""
@@ -140,6 +171,7 @@ def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT
     state_path.write_text(json.dumps(state, indent=2))
     state_path.chmod(0o600)
     wall, slept = clocks()
+    started = int(wall)
     code, output = command(["systemctl", "hibernate"])
     result, detail = False, "Система отказалась переходить в гибернацию: " + output if code else "Гибернация не началась"
     if not code:
@@ -148,9 +180,7 @@ def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT
             now, now_slept = clocks()
             # The suspended time shows up as a jump of the wall clock and of CLOCK_BOOTTIME over CLOCK_MONOTONIC.
             if now_slept - slept > 1 or now - wall > 30:
-                same_boot = (system_root / "proc/sys/kernel/random/boot_id").read_text().strip() == boot_id
-                result = same_boot and read(marker) == nonce
-                detail = "Сеанс восстановлен после гибернации" if result else "После гибернации сеанс не совпадает"
+                result, detail = resumed(system_root, boot_id, marker, nonce, now_slept - slept, started)
                 break
             wall, slept = now, now_slept
     try:

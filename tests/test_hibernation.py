@@ -135,13 +135,13 @@ class InstallRunner(SwapRunner):
 
 
 class InstallTests(unittest.TestCase):
-    def install(self, swap):
+    def install(self, swap, virtualization="none"):
         config = Configuration.parse(specification(swap=swap, session="", packages=[], services=[]))
         snapshot = demo_inventory()
         disk = snapshot["disks"][0]
         request = {"configuration": config.as_dict(), "fingerprint": disk["fingerprint"],
                    "consent_digest": config.digest(), "password": "private-password",
-                   "hardware": {**snapshot["hardware"], "memory": int(15.3 * GIB)}}
+                   "hardware": {**snapshot["hardware"], "memory": int(15.3 * GIB), "virtualization": virtualization}}
         runner, events = InstallRunner(config), []
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
@@ -157,7 +157,8 @@ class InstallTests(unittest.TestCase):
                 worker.install(request, runner)
             files = {path: (target / path).read_text() for path in
                      ("etc/fstab", "boot/loader/entries/agi-os.conf", "boot/loader/entries/agi-os-fallback.conf",
-                      "var/lib/agi-os/installation.json", "etc/mkinitcpio.conf.d/agi-os.conf") if (target / path).exists()}
+                      "var/lib/agi-os/installation.json", "etc/mkinitcpio.conf.d/agi-os.conf", worker.HIBERNATE_MODE_FILE)
+                     if (target / path).exists()}
         self.assertEqual(events[-1]["kind"], "installed")
         return runner.calls, files
 
@@ -173,7 +174,14 @@ class InstallTests(unittest.TestCase):
         record = json.loads(files["var/lib/agi-os/installation.json"])
         self.assertEqual(record["swap"], "hibernate")
         self.assertEqual(record["hibernation"], {"file": "/swap/swapfile", "size": 16 * GIB,
-                                                 "resume_uuid": "installed-uuid", "resume_offset": 1605632})
+                                                 "resume_uuid": "installed-uuid", "resume_offset": 1605632, "mode": "platform"})
+        self.assertNotIn(worker.HIBERNATE_MODE_FILE, files)  # real firmware keeps ACPI S4 (platform mode)
+
+    def test_virtual_machine_hibernates_in_shutdown_mode(self):
+        """QEMU turns ACPI S4 into a delayed power-off; the kernel then rolls the image back."""
+        _, files = self.install("hibernate", virtualization="kvm")
+        self.assertEqual(files[worker.HIBERNATE_MODE_FILE], "[Sleep]\nHibernateMode=shutdown\n")
+        self.assertEqual(json.loads(files["var/lib/agi-os/installation.json"])["hibernation"]["mode"], "shutdown")
 
     def test_zram_only_leaves_no_swapfile_or_resume(self):
         calls, files = self.install("zram")
@@ -225,6 +233,19 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(passed, detail)
         self.assertTrue(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
         self.assertFalse(list((self.root / "dev/shm").iterdir()))
+
+    def test_rolled_back_hibernation_is_not_a_resume(self):
+        """Run A: the session went on in the same boot after the kernel rolled back; not a pass."""
+        state = self.root / "state"
+        log = "PM: hibernation: Creating image:\nPM: Wakeup event detected during hibernation, rolling back.\n"
+        for output, gap in ((log, 290.0), ("", 2.0)):
+            ticks = iter([(1000.0, 0.0), (1001.0, 0.0), (1004.0, gap)])
+            with self.subTest(gap=gap), patch.object(verify, "command", return_value=(0, output)), \
+                    patch.object(verify, "clocks", side_effect=lambda: next(ticks)), patch.object(verify.time, "sleep"):
+                passed, detail = verify.hibernate(self.record, state, self.root)
+                self.assertFalse(passed, detail)
+                self.assertFalse(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
+        self.assertIn("не подтверждена", detail)
 
     def test_refusal_and_fresh_boot_fail(self):
         state = self.root / "state"
