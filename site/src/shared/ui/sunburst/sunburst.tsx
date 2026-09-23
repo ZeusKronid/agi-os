@@ -200,13 +200,20 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
                 // с первых кадров входа, одинаково до и после того, как дорисуется дуга.
                 '--shimmer-delay': `${(-2 * flicker * noise(index, 3)).toFixed(3)}s`,
               } as CSSProperties
+              // Линзу и голос (`mount-live-sun.ts`) JS ведёт через transform и opacity этой обёртки, а не через
+              // ширину полоски: на полоске крутятся CSS-анимации роста и сияния, и запись в её стиль каждый кадр
+              // стоила пересчёта стилей и раскладки всех лучей.
               return (
-                <div key={index} className="absolute top-0 left-0" style={{ rotate: `${angle.toFixed(4)}rad` }}>
+                <div
+                  key={index}
+                  data-sun-ray
+                  data-angle={angle.toFixed(4)}
+                  data-inner={inner.toFixed(2)}
+                  data-opacity={ray.opacity}
+                  className="absolute top-0 left-0"
+                  style={{ rotate: `${angle.toFixed(4)}rad`, opacity: ray.opacity }}
+                >
                   <i
-                    data-sun-ray
-                    data-angle={angle.toFixed(4)}
-                    data-length={length.toFixed(2)}
-                    data-opacity={ray.opacity}
                     className="absolute top-0 block origin-left motion-safe:animate-sun-ray"
                     style={{
                       left: unit(inner),
@@ -214,7 +221,6 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
                       // Не тоньше 1px: на узком восходе полоска в 0,5px почти не рисуется (SVG-линии так не пропадали).
                       height: `max(1px, ${unit(spec.strokeWidth)})`,
                       marginTop: `calc(max(1px, ${unit(spec.strokeWidth)}) / -2)`,
-                      opacity: ray.opacity,
                       backgroundImage: `linear-gradient(90deg, currentColor ${unit(Math.max(0, radius * spec.fade[0] - inner))}, transparent ${unit(radius * spec.fade[1] - inner)})`,
                       ...timing,
                     }}
