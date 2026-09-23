@@ -294,6 +294,7 @@ class State:
                 'configuration': config.as_dict() if config else None,
                 'files': config_files(config),
                 'summary': config.summary(consent['disk'], snapshot['hardware']) if config and consent and 'disk' in consent else None,
+                'login': config.login_entries() if config else [],
                 'hardware': self.hardware_public(config),
                 'consent': consent, 'plan': self.plan, 'events': self.events[-100:], 'running': running,
                 'console_id': self.vm.process.pid if running else None,
@@ -569,6 +570,8 @@ async def build(request):
             raise ValidationError('Выберите подходящий вариант хранилища превью')
         if data.get('accepted') is not True:
             raise ValidationError('Подтвердите выбранный вариант')
+        if config.login_entries() and data.get('login_reviewed') is not True:
+            raise ValidationError('Просмотрите и подтвердите, что будет запускаться при входе в систему')
         if option['destructive'] and data.get('confirmation') != option['confirm']:
             raise ValidationError('Для этого варианта введите точный путь: ' + option['confirm'])
         password = secret_text(data.get('password', ''), 'Пароль пользователя', 8, 256)

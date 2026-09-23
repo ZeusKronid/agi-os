@@ -12,6 +12,15 @@ until the user explicitly confirms a specific, described change.
    computer's hardware (CPU, chassis, GPU, network, sound, Bluetooth, TPM,
    Secure Boot), the driver packages the engine will add for it and what the
    preview on virtual devices cannot verify; the model receives the same data.
+   Configuration files proposed by the model are limited: `system_files` may not
+   touch accounts, privileges, storage, boot, the package manager or anything
+   that runs as root or inside every process (`ld.so.*`, `profile.d`, systemd
+   system/user units and generators, cron, `tmpfiles.d`, `etc/xdg/autostart`,
+   udev `RUN`, modprobe `install`, LightDM scripts, `LD_PRELOAD`-style
+   environment). Whatever runs at login — `~/.config/autostart`,
+   `~/.config/systemd/user`, `exec` lines of compositor/WM configs, the greetd
+   command — is listed in a separate review block with the exact lines and needs
+   its own confirmation before the preview is built.
 2. **Size and place.** The app computes the exact installed size from package
    metadata (`pacman -Sp`/`-Si`, including dependencies) and lists where the
    preview can live, each option with its undo:

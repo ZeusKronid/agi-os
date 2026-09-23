@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 from configcheck import HINTS, tool_checks
-from domain import Configuration, ValidationError
+from domain import Configuration, ValidationError, system_path_allowed
 from hardware import driver_plan, initramfs_config, profile
 from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
@@ -128,6 +128,14 @@ def trim_cache(runner):
         runner.run(["fstrim", str(TARGET)], timeout=300)
     except ValidationError:
         pass  # Media without discard support simply keep their blocks allocated.
+
+
+def resolved(relative):
+    """Where `relative` really lands inside the target after symlinks, as a relative path."""
+    real = (TARGET / relative).resolve()
+    if not real.is_relative_to(TARGET.resolve()):
+        raise ValidationError("Файл настроек выходит за пределы установленной системы")
+    return real.relative_to(TARGET.resolve()).as_posix()
 
 
 def write_file(relative, text, mode=0o644):
@@ -338,8 +346,14 @@ def install(request, runner):
             ' Identifier "AGI keyboard"\n MatchIsKeyboard "on"\n'
             f' Option "XkbLayout" "{layouts}"\n Option "XkbOptions" "grp:alt_shift_toggle"\nEndSection\n')
         for path, content in config.home_files:
+            if not resolved(f"home/{config.username}/{path}").startswith(f"home/{config.username}/.config/"):
+                raise ValidationError("Файл настроек ведёт за пределы ~/.config: " + path)
             write_file(f"home/{config.username}/{path}", content)
         for path, content in config.system_files:
+            # A symlink already in the installed tree must not redirect a model file
+            # into a protected place (the validator only saw the literal path).
+            if not system_path_allowed(resolved(path)):
+                raise ValidationError("Системный файл ведёт в защищённое место: /" + path)
             write_file(path, content)
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
         check_generated_files(config, runner)
