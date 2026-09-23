@@ -122,6 +122,15 @@ class SigningTests(unittest.TestCase):
             self.assertIsNone(sign_iso.signer_fingerprint(status))
             self.assertIsNone(verify_iso.signer_fingerprint(status))
 
+    def test_verifier_works_without_the_signing_script(self):
+        sign_iso.sign(self.release, self.fingerprint, export_key=True)
+        alone = Path(self.temp.name) / "alone"
+        alone.mkdir()
+        shutil.copy(ROOT / "scripts/release/verify-iso.py", alone)
+        result = subprocess.run(["python3", "-B", str(alone / "verify-iso.py"), str(self.iso),
+                                 "--fingerprint", self.fingerprint], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_passphrase_protected_key_via_environment(self):
         uid = "AGIOS protected <protected@invalid>"
         subprocess.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase", "release-test-pass",
