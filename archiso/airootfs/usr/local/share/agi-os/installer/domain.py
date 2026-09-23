@@ -55,7 +55,7 @@ PROTECTED_SYSTEM = (
     "etc/fstab", "etc/crypttab", "etc/locale.conf", "etc/locale.gen", "etc/hostname", "etc/hosts",
     "etc/localtime", "etc/mkinitcpio.conf", "etc/mkinitcpio.conf.d", "etc/mkinitcpio.d",
     "etc/initcpio", "etc/default/grub", "etc/grub.d", "etc/kernel",
-    "etc/systemd/zram-generator.conf", "usr/local/share/agi-os",
+    "etc/systemd/zram-generator.conf", "etc/vconsole.conf", "usr/local/share/agi-os",
     # package manager: hooks and build scripts run as root or as the user
     "etc/pacman.conf", "etc/pacman.d", "etc/makepkg.conf", "etc/makepkg.conf.d",
     # loaded into every process
@@ -68,21 +68,26 @@ PROTECTED_SYSTEM = (
     "etc/systemd/system-shutdown", "etc/systemd/system-sleep", "etc/tmpfiles.d", "etc/sysusers.d",
     "etc/binfmt.d", "etc/crontab", "etc/cron.d", "etc/cron.hourly", "etc/cron.daily",
     "etc/cron.weekly", "etc/cron.monthly", "etc/anacrontab", "etc/NetworkManager/dispatcher.d",
-    "etc/acpi", "etc/rc.local", "usr/local/share/dbus-1",
+    "etc/acpi", "etc/rc.local", "usr/local/share/dbus-1", "usr/local/share/systemd",
+    "etc/gdm/Init", "etc/gdm/PostLogin", "etc/gdm/PreSession", "etc/gdm/PostSession", "etc/gdm/Xsession",
     # shell and session start-up code for every user; per-user autostart goes to
     # ~/.config and is shown in the separate login review instead
     "etc/xdg/autostart", "etc/profile", "etc/profile.d", "etc/bash.bashrc", "etc/bash.bash_logout",
     "etc/zsh", "etc/fish", "etc/X11/xinit", "etc/X11/Xsession", "etc/X11/Xsession.d",
-    "etc/lightdm/Xsession",
+    "etc/lightdm/Xsession", "etc/xdg/xfce4/xinitrc", "etc/xdg/openbox/autostart",
+    "etc/xdg/openbox/environment", "etc/xdg/labwc/autostart", "etc/xdg/labwc/environment",
+    "etc/xdg/plasma-workspace", "etc/xdg/autostart-scripts",
 )
 
 # Settings inside otherwise allowed files that would run a program as root or
 # inject code into every process started with that environment.
 INJECTED_ENVIRONMENT = re.compile(
     r"^\s*(?:export\s+)?(LD_[A-Z_]+|GCONV_PATH|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP|PYTHONPATH|"
-    r"PERL5OPT|PERL5LIB|RUBYOPT|NODE_OPTIONS|GTK3?_MODULES|GIO_EXTRA_MODULES|QT_PLUGIN_PATH)\s*=", re.M)
+    r"PERL5OPT|PERL5LIB|RUBYOPT|NODE_OPTIONS|GTK3?_MODULES|GIO_EXTRA_MODULES|QT_PLUGIN_PATH|PATH|SHELL|"
+    r"XDG_(?:CONFIG|DATA)_(?:DIRS|HOME))\s*=", re.M)
 DANGEROUS_CONTENT = (
-    (("etc/environment", "etc/environment.d", "~/.config/environment.d"), INJECTED_ENVIRONMENT,
+    (("etc/environment", "etc/environment.d", "~/.config/environment.d", "~/.config/labwc/environment"),
+     INJECTED_ENVIRONMENT,
      "Переменные окружения не могут подгружать код в каждую программу"),
     (("etc/udev/rules.d",), re.compile(r"\b(?:RUN|PROGRAM)\b|\bIMPORT\{program\}|\bENV\{SYSTEMD_(?:USER_)?WANTS\}"),
      "Правила udev не могут запускать программы: они выполняются от root"),
@@ -96,6 +101,10 @@ DANGEROUS_CONTENT = (
      "Автоматический вход без пароля не настраивается"),
     (("etc/sddm.conf", "etc/sddm.conf.d"), re.compile(r"^\s*\[\s*Autologin\s*\][^\[]*^\s*User\s*=\s*\S", re.M),
      "Автоматический вход без пароля не настраивается"),
+    (("etc/sddm.conf", "etc/sddm.conf.d"),
+     re.compile(r"^\s*(?:DisplayCommand|DisplayStopCommand|SessionCommand|ServerPath|CompositorCommand|"
+                r"HaltCommand|RebootCommand|XephyrPath|XauthPath)\s*=", re.M),
+     "Команды SDDM выполняются от root и не настраиваются агентом"),
     (("etc/gdm",), re.compile(r"^\s*(?:Automatic|Timed)LoginEnable\s*=\s*true", re.M | re.I),
      "Автоматический вход без пароля не настраивается"),
     (("etc/sysctl.d", "etc/sysctl.conf"),
@@ -171,12 +180,15 @@ LOGIN_RULES = (
     (("~/.config/niri", "etc/niri"), "niri выполняет эти команды при входе",
      exec_lines(r"^\s*(spawn-at-startup\s+.+)$")),
     (("~/.config/wayfire.ini",), "Wayfire выполняет раздел [autostart] при входе", ini_section("autostart")),
-    (("~/.config/labwc/autostart", "~/.config/openbox/autostart", "~/.config/river/init",
+    (("~/.config/labwc/autostart", "~/.config/openbox/autostart", "~/.config/openbox/environment",
+      "~/.config/xfce4/xinitrc", "~/.config/river/init",
       "~/.config/bspwm/bspwmrc", "~/.config/plasma-workspace/env", "~/.config/plasma-workspace/shutdown",
       "~/.config/autostart-scripts"), "Сценарий оболочки, выполняемый при входе целиком", program_lines),
     (("~/.config/awesome", "~/.config/qtile"),
      "Конфигурация — программа (Lua/Python); строки, запускающие программы при входе", code_run_lines),
     (("~/.config/fish",), "Код оболочки fish: выполняется при каждом запуске терминала", program_lines),
+    (("usr/local/share/xsessions", "usr/local/share/wayland-sessions"),
+     "Описание графического сеанса: эта команда запускается при входе", exec_lines(r"^\s*((?:Try)?Exec\s*=\s*.+)$")),
     (("etc/greetd",), "Экран входа greetd запускает эту команду при загрузке",
      exec_lines(r"^\s*(command\s*=\s*.+)$")),
     (("usr/local/share/gnome-shell/extensions", "usr/local/share/plasma", "usr/local/share/kwin"),
@@ -382,8 +394,9 @@ or in every process (profile.d, ld.so.*, systemd system/user units, cron, udev R
 etc/xdg/autostart, LD_PRELOAD-style environment). Anything that runs at login
 (~/.config/autostart, ~/.config/systemd/user, exec lines in compositor/WM configs,
 greeter commands) is shown to the user in a separate review they must confirm:
-keep it to what the user asked for and explain each command in your message. session is the installed desktop-file basename without .desktop,
-or an empty string for console. Do not add autologin or passwordless sudo.
+keep it to what the user asked for and explain each command in your message.
+The engine writes etc/vconsole.conf itself. session is the installed desktop-file
+basename without .desktop, or an empty string for console. Do not add autologin or passwordless sudo.
 The current executable storage handlers support whole-disk erase with GPT;
 ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
 device by default (no swap partition, no hibernation). Full-root LUKS2 encryption
