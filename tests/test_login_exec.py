@@ -109,7 +109,7 @@ class LoginReviewTests(unittest.TestCase):
                   (".config/xfce4/xinitrc", "xset s off\nexec startxfce4\n"),
                   (".config/foot/foot.ini", "[main]\nfont=monospace:size=11\n")],
             system=[("etc/greetd/config.toml", '[default_session]\ncommand = "tuigreet --cmd sway"\n'),
-                    ("usr/local/share/wayland-sessions/my.desktop", "[Desktop Entry]\nName=My\nExec=sway --unsupported-gpu\n")])
+                    ("usr/local/share/wayland-sessions/my.desktop", "[Desktop Entry]\nType=Application\nName=My\nExec=sway --unsupported-gpu\n")])
         entries = {e["path"]: e["commands"] for e in config.login_entries()}
         self.assertEqual(entries["~/.config/autostart/sync.desktop"], ["Exec=syncthing serve"])
         self.assertEqual(entries["~/.config/sway/config"], ["exec waybar", "exec_always kanshi"])
