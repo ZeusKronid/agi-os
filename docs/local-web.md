@@ -91,8 +91,8 @@ Privileges in Live (`etc/sudoers.d/10-agi-live`): only `agi-web` may use sudo,
 and only for the exact command lines the site runs — the two root helpers,
 `pacman -Sy --noconfirm` (package catalog), `shutdown -h|-r +1` and, on test
 stands, reading the fw_cfg mirror value. The desktop user `agi` (browser,
-terminal, the ChatGPT sign-in adapter) has no sudo, no `wheel` membership and
-no disk group. All passwords (`root`, `agi`, `agi-web`) are locked; LightDM
+terminal) has no sudo, no `wheel` membership and no disk group; the ChatGPT
+sign-in adapter runs under `agi-web` inside bubblewrap. All passwords (`root`, `agi`, `agi-web`) are locked; LightDM
 autologin of `agi` is the only login, there is no root autologin on a console.
 Because the site has no desktop session, the ChatGPT sign-in page is opened by
 the site's own browser tab (`login_url` in `/api/state`), not by `xdg-open`.
