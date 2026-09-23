@@ -3,6 +3,9 @@
 # drive; the website, agent, Guacamole and the inner preview VM run inside it.
 # Attached test disks: a blank target disk (serial AGIOS_TARGET) that plays the
 # computer's own disk, and an optional second medium (an exFAT "USB stick").
+# AGIOS_TEST_HARDWARE=laptop makes the "computer" a notebook: a Notebook SMBIOS
+# chassis and an Intel HD Audio controller drive the driver plan and the "preview
+# cannot verify" list; the NIC becomes an Intel e1000e so the inventory names it.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
@@ -78,7 +81,7 @@ if [[ $firmware == uefi ]]; then
            -drive "if=pflash,format=raw,file=$repo/.local/live-test/OVMF_VARS-uefi.fd")
 fi
 if [[ $mode == live ]]; then
-    args+=(-nic user,model=virtio-net-pci
+    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"
            -fw_cfg name=opt/org.agi-os.test,string=1
            -device virtio-serial-pci
            -chardev "socket,id=llm,path=$bridge_dir/llm.sock"
@@ -100,7 +103,19 @@ if [[ $mode == live ]]; then
                -device ide-cd,drive=testcache,bus=ide.1)
     fi
 else
-    args+=(-nic user,model=virtio-net-pci)
+    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)")
+fi
+if [[ ${AGIOS_TEST_HARDWARE:-} == laptop ]]; then
+    chassis=.local/live-test/smbios-chassis-notebook.bin
+    python - "$chassis" <<'PY'
+import struct, sys
+# SMBIOS type 3 (chassis) v2.7 record: type 10 = Notebook, so the Live sees a laptop.
+strings = [b"AGIOS QA", b"1.0", b"QA-CHASSIS-1", b"QA-ASSET", b"QA-SKU"]
+body = struct.pack("<BBHBBBBBBBBBIBBBBB", 3, 0x16, 0x0300, 1, 10, 2, 3, 4, 3, 3, 3, 3, 0, 0, 0, 0, 0, 5)
+open(sys.argv[1], "wb").write(body + b"\0".join(strings) + b"\0\0")
+PY
+    args+=(-smbios type=1,manufacturer="AGIOS QA",product="Test Laptop" -smbios "file=$chassis"
+           -audiodev none,id=snd0 -device ich9-intel-hda -device hda-duplex,audiodev=snd0)
 fi
 # Hard memory cap for the whole test machine so a busy guest can never push the host into swap.
 runner=()

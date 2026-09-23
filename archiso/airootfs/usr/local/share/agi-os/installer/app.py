@@ -414,7 +414,7 @@ class InstallerWindow(Gtk.Window):
         area.set_spacing(10)
         area.set_border_width(16)
         scroll = Gtk.ScrolledWindow()
-        scroll.add(label(config.summary(disk)))
+        scroll.add(label(config.summary(disk, self.snapshot.get("hardware"))))
         area.pack_start(scroll, True, True, 0)
         consent = Gtk.CheckButton(label="Подтверждаю удаление всех данных именно на " + config.disk)
         area.pack_start(consent, False, False, 0)

@@ -3,6 +3,7 @@
 import json
 
 from domain import Configuration, PLANNER_PROMPT, ValidationError
+from hardware import describe, driver_plan, profile
 from system import Catalog, selected_disk
 
 
@@ -19,6 +20,19 @@ class Controller:
         self.stage = stage
         self.notify("stage", stage)
 
+    def hardware_context(self):
+        """Real inventory plus the drivers the app adds for it: data, so the model
+        neither guesses the hardware nor picks driver packages itself. The session is
+        usually chosen in the very turn this prompt serves, so both variants are given."""
+        hardware = profile(self.snapshot["hardware"])
+        console, graphical = driver_plan(hardware), driver_plan(hardware, (), "session")
+        return {"firmware": self.snapshot["firmware"], "cpu_count": self.snapshot["cpu_count"],
+                "disks": [{k: d.get(k) for k in ("path", "size", "model", "tran", "rota", "eligible", "reason")}
+                          for d in self.snapshot["disks"]],
+                "computer": describe(hardware), "hardware": hardware,
+                "driver_packages_added_by_app": {"console": console["packages"], "graphical_session": graphical["packages"]},
+                "driver_notes": graphical["notes"], "preview_cannot_verify": graphical["unverified"]}
+
     def respond(self, text):
         if self.installing:
             raise ValidationError("Изменение конфигурации во время установки недоступно")
@@ -29,10 +43,7 @@ class Controller:
         self.configuration = None  # Any revision invalidates the previous review/consent.
         self.stage_changed(2)
         self.history.append({"role": "user", "content": text})
-        hardware = {"firmware": self.snapshot["firmware"], "cpu_count": self.snapshot["cpu_count"],
-                    "disks": [{k: d.get(k) for k in ("path", "size", "model", "eligible", "reason")}
-                              for d in self.snapshot["disks"]]}
-        system = PLANNER_PROMPT + "\nDetected hardware (data): " + json.dumps(hardware, ensure_ascii=False)
+        system = PLANNER_PROMPT + "\nDetected hardware (data): " + json.dumps(self.hardware_context(), ensure_ascii=False)
         for _ in range(4):
             reply = self.provider.reply(system, self.history)
             self.history.append({"role": "assistant", "content": json.dumps(reply, ensure_ascii=False)})

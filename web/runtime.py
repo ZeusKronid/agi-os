@@ -162,7 +162,7 @@ class VirtualMachine:
         if not self.running:
             raise RuntimeError('QEMU не запустился: ' + (self.directory / 'qemu.log').read_text()[-1500:])
 
-    async def install(self, config, password, passphrase, notify):
+    async def install(self, config, password, passphrase, notify, hardware=None):
         await asyncio.wait_for(self.connection, 180)
         ready = json.loads(await asyncio.wait_for(self.reader.readline(), 240))
         if ready.get('kind') != 'ready':
@@ -174,8 +174,10 @@ class VirtualMachine:
             raise RuntimeError('Тип загрузки установочной VM не совпадает с компьютером')
         # Inside the VM the preview storage is /dev/vda; consent is re-bound to that view.
         translated = type(config).parse({**config.as_dict(), 'disk': '/dev/vda'})
+        # The guest sees virtual devices; drivers must follow the real computer's inventory.
         request = {'configuration': translated.as_dict(), 'consent_digest': translated.digest(),
-                   'fingerprint': inner['fingerprint'], 'password': password, 'passphrase': passphrase}
+                   'fingerprint': inner['fingerprint'], 'password': password, 'passphrase': passphrase,
+                   'hardware': hardware if hardware is not None else ready['inventory']['hardware']}
         self.writer.write(json.dumps(request).encode() + b'\n')
         await self.writer.drain()
         del request, password, passphrase

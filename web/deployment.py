@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from domain import ValidationError
+from hardware import digest as hardware_digest
 from system import inventory, selected_disk
 
 TEST_MARKER = Path('/sys/firmware/qemu_fw_cfg/by_name/opt/org.agi-os.test/raw')
@@ -35,7 +36,8 @@ def consent(config, snapshot):
     """Bind the reviewed configuration to the exact disk identity and boot mode."""
     disk = selected_disk(snapshot, config.disk)
     binding = {'configuration': config.digest(), 'fingerprint': disk['fingerprint'],
-               'target': config.disk, 'firmware': snapshot['firmware']}
+               'target': config.disk, 'firmware': snapshot['firmware'],
+               'hardware': hardware_digest(snapshot['hardware'], config.packages, config.session)}
     digest = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     return {**binding, 'digest': digest, 'disk': disk,
             'warning': 'Все разделы и данные выбранного диска будут удалены до запуска превью.'}

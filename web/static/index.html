@@ -13,6 +13,8 @@
 <div class="status-line"><i></i><span id="status">Загрузка…</span></div>
 <section id="orphans" hidden><h3>Найдено превью прошлого сеанса</h3><p class="hint">На диске остался временный раздел AGIOS-PREVIEW от предыдущего запуска Live. Его можно убрать — остальные разделы не менялись.</p><div id="orphanList"></div></section>
 
+<section id="hardware" hidden><div class="review-head"><h3>Железо этого компьютера</h3><span>определено на этом компьютере</span></div><ul id="hardwareLines" class="hardware"></ul><p class="hint" id="hardwareDrivers"></p><p class="notice" id="hardwareUnverified"></p></section>
+
 <section id="review" hidden><div class="review-head"><h3>Согласованная конфигурация</h3><span id="reviewDisk"></span></div><details><summary>Посмотреть все настройки</summary><pre id="summary"></pre></details>
 <div id="consentError" class="soft-error" hidden></div>
 <form id="planForm"><div class="fields"><label>Память VM<select id="memory"><option value="4096">4 ГиБ</option><option value="3072">3 ГиБ</option><option value="6144">6 ГиБ</option><option value="8192">8 ГиБ</option><option value="2048">2 ГиБ</option></select></label><label>Процессоры<select id="cpus"><option value="4">4 CPU</option><option value="2">2 CPU</option><option value="8">8 CPU</option></select></label></div><label class="check"><input type="checkbox" id="encrypt">Зашифровать корень системы (LUKS2). Пароль будет запрашиваться при каждой загрузке</label><button id="planButton" type="submit">Рассчитать размер и место для превью →</button><p class="hint">Считаем точный размер системы по данным пакетов и подбираем, где разместить превью, не меняя ваши данные.</p></form>
@@ -36,8 +38,8 @@
 <label>Для подтверждения введите путь диска<input id="targetConfirm" autocomplete="off" required placeholder="Например, /dev/nvme0n1"></label>
 <button type="submit" id="installFinal">Установить на компьютер</button></form>
 <div id="finalError" role="alert" hidden></div>
-<div id="finalProgress" hidden><h3 id="finalPhase"></h3><pre id="finalEvents"></pre></div>
-<div id="finalDone" hidden><h3>Система установлена на диск компьютера</h3><p>Извлеките носитель AGIOS и перезагрузите компьютер: он загрузится с установленной системы. Проверка первого запуска откроется в ней.</p><div class="actions"><button id="rebootLive">Перезагрузить компьютер</button><button id="poweroffLive" class="quiet">Выключить</button></div><p class="hint" id="powerMessage"></p></div>
+<div id="finalProgress" hidden><h3 id="finalPhase"></h3><pre id="finalEvents"></pre><div id="finalWarnings" class="notice" hidden></div></div>
+<div id="finalDone" hidden><h3 id="finalDoneTitle">Система установлена на диск компьютера</h3><p>Извлеките носитель AGIOS и перезагрузите компьютер: он загрузится с установленной системы. Проверка первого запуска откроется в ней.</p><div class="actions"><button id="rebootLive">Перезагрузить компьютер</button><button id="poweroffLive" class="quiet">Выключить</button></div><p class="hint" id="powerMessage"></p></div>
 </section>
 <details id="logs" hidden><summary>Ход установки</summary><pre id="events"></pre></details>
 </section></main>

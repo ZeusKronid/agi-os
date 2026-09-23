@@ -8,7 +8,10 @@ until the user explicitly confirms a specific, described change.
 ## Flow
 
 1. **Conversation.** The agent proposes a configuration; the app validates it
-   against the package catalog and the real disk inventory.
+   against the package catalog and the real disk inventory. The page shows the
+   computer's hardware (CPU, chassis, GPU, network, sound, Bluetooth, TPM,
+   Secure Boot), the driver packages the engine will add for it and what the
+   preview on virtual devices cannot verify; the model receives the same data.
 2. **Size and place.** The app computes the exact installed size from package
    metadata (`pacman -Sp`/`-Si`, including dependencies) and lists where the
    preview can live, each option with its undo:
@@ -37,7 +40,8 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
-   Finally the initramfs is rebuilt for the real hardware, the boot loader is
+   Finally missing hardware drivers are completed for the real computer (a
+   failure is reported, never hidden), the initramfs is rebuilt, the boot loader is
    registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new
    acceptance ID is written for `agi-os-verify`.
 
@@ -63,7 +67,10 @@ AGIOS_TEST_MIRROR=https://geo.mirror.pkgbuild.com ./scripts/run-live-web-vm.sh [
 
 The outer VM is the "computer": it boots the ISO from an optical drive with a
 blank 20 GiB target disk (serial `AGIOS_TARGET`) and, when
-`.local/live-test-media.img` exists, an exFAT USB stick. Only that serial is an
+`.local/live-test-media.img` exists, an exFAT USB stick.
+`AGIOS_TEST_HARDWARE=laptop` adds a Notebook SMBIOS chassis and an Intel HD Audio
+controller (they drive the driver plan and the "preview cannot verify" list) and
+swaps the NIC for an Intel e1000e so the inventory names a real card. Only that serial is an
 eligible target in the marked test VM. The VNC console is `127.0.0.1:5997`;
 `scripts/web/qa-driver.py` drives the site API, QMP screenshots and input.
 The LLM comes from the private host bridge; production boots ask the user to

@@ -19,17 +19,14 @@ import uuid
 from pathlib import Path
 
 from domain import Configuration, ValidationError
+from hardware import driver_plan, initramfs_config, profile
 from system import Catalog, inventory, live_environment, selected_disk
 
 
 TARGET = Path("/mnt/agi-os")
 HERE = Path(__file__).resolve().parent
-BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python",
-                 "intel-ucode", "amd-ucode", "zram-generator")
+BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python", "zram-generator")
 CRYPT_NAME = "cryptroot"
-# The udev-based default HOOKS of mkinitcpio.conf plus `encrypt` before filesystems.
-ENCRYPT_HOOKS = ("HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont "
-                 "block encrypt filesystems fsck)\n")
 
 
 def emit(kind, **data):
@@ -80,10 +77,12 @@ def partition_path(disk, number):
     return disk + ("p" if disk[-1].isdigit() else "") + str(number)
 
 
-def packages_for(config):
+def packages_for(config, hardware):
+    """Everything the target receives: base, filesystem tools, the user's choices and
+    the drivers derived from the real computer's hardware (never from the preview VM)."""
     packages = [*BASE_PACKAGES, config.filesystem + "-progs" if config.filesystem == "btrfs"
                 else {"ext4": "e2fsprogs", "xfs": "xfsprogs", "f2fs": "f2fs-tools"}[config.filesystem],
-                *config.packages]
+                *config.packages, *driver_plan(hardware, config.packages, config.session)["packages"]]
     if config.bootloader == "grub":
         packages += ["grub", "efibootmgr"]
     if config.session:
@@ -127,9 +126,16 @@ def write_file(relative, text, mode=0o644):
 def preflight(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError("Запись дисков разрешена только в загруженной live-системе AGI OS")
-    if set(request) - {"passphrase"} != {"configuration", "fingerprint", "consent_digest", "password"}:
+    if set(request) - {"passphrase", "hardware"} != {"configuration", "fingerprint", "consent_digest", "password"}:
         raise ValidationError("Неизвестный запрос установки")
     config = Configuration.parse(request["configuration"])
+    # Inside the preview VM the site passes the real computer's inventory; a native
+    # run installs for the machine it runs on.
+    if request.get("hardware") is not None:
+        try:
+            request["hardware"] = profile(request["hardware"])
+        except ValueError as exc:
+            raise ValidationError(str(exc))
     if request["consent_digest"] != config.digest():
         raise ValidationError("Конфигурация изменилась после подтверждения")
     snapshot = inventory()
@@ -178,10 +184,17 @@ def release_target():
 
 def install(request, runner):
     config, snapshot, disk = preflight(request)
-    packages = packages_for(config)
+    hardware = request.get("hardware") or snapshot["hardware"]
+    drivers = driver_plan(hardware, config.packages, config.session)
+    packages = packages_for(config, hardware)
     emit("progress", stage=4, text="Проверяю репозитории и пакеты до изменения диска…")
     runner.run(["pacman", "-Sy", "--noconfirm"], timeout=180)
-    qualified = Catalog().validate(packages)
+    catalog = Catalog()
+    try:
+        catalog.validate(drivers["packages"])
+    except ValidationError as exc:
+        raise ValidationError("Ошибка установщика, не вашего выбора — драйверы по железу отсутствуют в репозиториях: " + str(exc))
+    qualified = catalog.validate(packages)
     # Resolve packages before erasing. Downloads belong in the target cache,
     # rather than filling the live session's RAM-backed filesystem.
     runner.run(["pacman", "-Sp", "--noconfirm", "--", *qualified])
@@ -270,11 +283,12 @@ def install(request, runner):
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
         kernel_options = "rw"
+        if initramfs := initramfs_config(drivers, encrypted):
+            write_file("etc/mkinitcpio.conf.d/agi-os.conf", initramfs)
         if encrypted:
-            write_file("etc/mkinitcpio.conf.d/agi-encrypt.conf", ENCRYPT_HOOKS)
             luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip()
             kernel_options = f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME} root={root} rw"
-        for service in dict.fromkeys(["NetworkManager.service", "systemd-timesyncd.service", *config.services]):
+        for service in dict.fromkeys(["NetworkManager.service", "systemd-timesyncd.service", *drivers["services"], *config.services]):
             runner.run([*chroot, "systemctl", "enable", service])
         runner.run([*chroot, "systemctl", "set-default", "graphical.target" if config.session else "multi-user.target"])
         if config.session:
@@ -313,7 +327,7 @@ def install(request, runner):
         record = {"id": uuid.uuid4().hex, "configuration": config.as_dict(), "packages": packages,
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
                   "firmware": firmware, "encrypted": encrypted, "swap": "zram",
-                  "status": "first_boot_pending"}
+                  "hardware": hardware, "drivers": drivers, "status": "first_boot_pending"}
         write_file("var/lib/agi-os/installation.json", json.dumps(record, ensure_ascii=False, indent=2))
         write_file("usr/local/share/agi-os/verify.py", (HERE / "verify.py").read_text())
         write_file("usr/local/bin/agi-os-verify", '#!/bin/sh\nexec python /usr/local/share/agi-os/verify.py "$@"\n', 0o755)
