@@ -42,8 +42,9 @@ def sh(args, timeout=120, input_text=None):
             args, input=input_text, text=True, capture_output=True, timeout=timeout, check=True,
             env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}).stdout
     except Exception as exc:
+        # Output of a command fed on stdin is not logged: the input may be a secret.
         LOG.warning('command.failed', f'{args[0]}: {type(exc).__name__}', args=list(args),
-                    stderr=getattr(exc, 'stderr', None))
+                    stderr=getattr(exc, 'stderr', None) if input_text is None else None)
         raise
     LOG.info('command.done', args[0], args=list(args))
     return output

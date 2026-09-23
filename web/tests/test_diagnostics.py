@@ -75,6 +75,22 @@ class BundleTests(unittest.TestCase):
         self.assertIn('Журнал недоступен', files['journal-agios.jsonl'])
 
 
+class StorageHelperLogTests(unittest.TestCase):
+    def test_output_of_commands_fed_on_stdin_is_not_logged(self):
+        import storage_worker
+        records = []
+        with patch.object(journal, 'sink', records.append):
+            with self.assertRaises(Exception):
+                storage_worker.sh(['sh', '-c', 'cat >&2; exit 3'], input_text='stdin-secret-value')
+            with self.assertRaises(Exception):
+                storage_worker.sh(['sh', '-c', 'echo visible-detail >&2; exit 3'], input_text=None)
+        self.assertNotIn('stdin-secret-value', json.dumps(records))
+        self.assertEqual([r['AGIOS_EVENT'] for r in records], ['command.failed', 'command.failed'])
+
+    def test_sort_like_keys_are_not_masked(self):
+        self.assertEqual(journal.redact({'sort_key': 1, 'api_key': 'x'}), {'sort_key': 1, 'api_key': '***'})
+
+
 class DiagnosticsApiTests(AioHTTPTestCase):
     async def get_application(self):
         self.directory = tempfile.TemporaryDirectory()
