@@ -197,7 +197,8 @@ class Configuration:
 
 
 # The AGIOS standard system for users who do not want to choose (CMP-99): a light,
-# complete desktop that installs from core/extra only. Personal settings (disk,
+# complete desktop that installs from core/extra only. DejaVu is named explicitly:
+# otherwise Firefox's ttf-font dependency resolves to whichever provider comes first. Personal settings (disk,
 # user, language, time zone, layouts) still come from the dialogue.
 DEFAULT_SYSTEM = {
     "desktop": "XFCE — стандартная система AGIOS",
@@ -206,7 +207,7 @@ DEFAULT_SYSTEM = {
     "packages": ["xfce4-session", "xfce4-panel", "xfce4-settings", "xfdesktop", "xfwm4", "xfce4-terminal",
                  "thunar", "thunar-archive-plugin", "xfce4-whiskermenu-plugin", "xfce4-notifyd",
                  "xfce4-pulseaudio-plugin", "xfce4-screenshooter", "mousepad", "ristretto", "file-roller", "gvfs",
-                 "pavucontrol", "network-manager-applet", "firefox", "xorg-server", "xf86-input-libinput",
+                 "pavucontrol", "network-manager-applet", "firefox", "ttf-dejavu", "xorg-server", "xf86-input-libinput",
                  "lightdm", "lightdm-gtk-greeter"],
     "services": ["lightdm.service"],
     "home_files": [],

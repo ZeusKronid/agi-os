@@ -28,7 +28,7 @@ class DefaultSystemTests(unittest.TestCase):
         packages = set(worker.packages_for(config, demo_inventory()["hardware"]))
         # Session, greeter, terminal, file manager, browser, network and volume applets.
         for package in ("xfce4-session", "lightdm", "lightdm-gtk-greeter", "xfce4-terminal", "thunar", "firefox",
-                        "network-manager-applet", "xfce4-pulseaudio-plugin", "xorg-server"):
+                        "network-manager-applet", "xfce4-pulseaudio-plugin", "xorg-server", "ttf-dejavu"):
             self.assertIn(package, packages)
         self.assertEqual(config.services, ("lightdm.service",))
         self.assertIn("user-session=xfce", dict(config.system_files)["etc/lightdm/lightdm.conf.d/50-agios-default.conf"])
