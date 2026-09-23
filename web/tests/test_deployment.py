@@ -215,5 +215,39 @@ class HibernationTests(unittest.TestCase):
         self.assertEqual(record['hibernation']['size'], 16 * GIB)
 
 
+
+class CopyTableTests(unittest.TestCase):
+    """The partition table the copy finalization starts from."""
+
+    def calls(self, layout, disk, blank=True):
+        calls = []
+        class Runner:
+            def run(self, args, **kw):
+                calls.append(args)
+                return ''
+        with patch.object(finalize_worker.storage_worker, 'looks_blank', return_value=blank):
+            finalize_worker.prepare_table(Runner(), layout, disk)
+        return calls
+
+    def test_alongside_on_a_new_empty_disk_creates_a_table(self):
+        calls = self.calls('alongside', {'path': '/dev/vda', 'pttype': None, 'fstype': None})
+        self.assertEqual(calls[0], ['sgdisk', '--clear', '/dev/vda'])
+        self.assertTrue(calls[1][1].startswith('--backup='))
+
+    def test_alongside_keeps_an_existing_table(self):
+        calls = self.calls('alongside', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1].startswith('--backup='))
+
+    def test_alongside_refuses_data_without_a_table(self):
+        for disk, blank in (({'path': '/dev/vda', 'pttype': None, 'fstype': 'ntfs'}, True),
+                            ({'path': '/dev/vda', 'pttype': None, 'fstype': None}, False)):
+            with self.assertRaises(ValidationError):
+                self.calls('alongside', disk, blank)
+
+    def test_erase_always_starts_from_an_empty_table(self):
+        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual([c[1] for c in calls], ['--zap-all', '--clear'])
+
 if __name__ == '__main__':
     unittest.main()
