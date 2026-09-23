@@ -84,6 +84,10 @@ connect a provider.
 - `agi-guacd.service`: Guacamole gateway at `127.0.0.1:14822`.
 - `agi-guest.service`: the installer inside the inner VM only.
 - `agi-qa.service`: test instrumentation, active only with the fw_cfg marker.
+- ChatGPT sign-in: `openai-codex` is present only as the provider backend. The
+  site starts `codex app-server` inside bubblewrap with an ephemeral home, no
+  shell tool and a read-only sandbox. The Live image ships no Codex terminal
+  entry, Codex configuration or agent instructions for a terminal session.
 
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.
