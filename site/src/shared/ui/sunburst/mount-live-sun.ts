@@ -17,12 +17,14 @@ const VOICE_FULL = 0.22
 const STEP_DOTS = [1, 2, 3, 4] as const
 
 interface LiveRay {
+  /** Обёртка луча: полоску внутри ведут CSS-анимации, JS пишет только transform и opacity обёртки. */
   el: HTMLElement
   angle: number
-  length: number
   opacity: number
-  /** Длина и прозрачность из SSR-разметки: к ним луч возвращается в покое. */
-  restWidth: string
+  /** Сдвиги к основанию луча и обратно (CSS): вокруг основания луч вытягивается через scaleX. */
+  toBase: string
+  fromBase: string
+  /** Прозрачность из SSR-разметки: к ней луч возвращается в покое. */
   restOpacity: string
   /** Доля голоса у луча: у каждого своя, чтобы поле шелестело, а не пульсировало целиком. */
   voice: number
@@ -60,9 +62,9 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     return {
       el,
       angle: angle <= 0 ? angle + 2 * Math.PI : angle,
-      length: Number(el.dataset.length),
       opacity: Number(el.dataset.opacity),
-      restWidth: el.style.width,
+      toBase: `translateX(calc(${el.dataset.inner} * 100cqw / ${units}))`,
+      fromBase: `translateX(calc(${el.dataset.inner} * -100cqw / ${units}))`,
       restOpacity: el.style.opacity,
       voice: 0.4 + noise(index) * 0.9,
     }
@@ -103,7 +105,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
     raysAtRest = rest
     if (rest) {
       for (const ray of rays) {
-        ray.el.style.width = ray.restWidth
+        ray.el.style.transform = ''
         ray.el.style.opacity = ray.restOpacity
       }
       return
@@ -112,8 +114,9 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
       const delta = ray.angle - lens.angle
       const lit = Math.exp(-(delta * delta) / (LENS_SIGMA * LENS_SIGMA)) * strength
       const heard = voice * ray.voice * (0.65 + 0.35 * Math.sin(now * 0.011 + ray.angle * 9))
-      const length = ray.length * (1 + LENS_REACH * lit) * (1 + VOICE_REACH * heard)
-      ray.el.style.width = `calc(${length.toFixed(2)} * 100cqw / ${units})`
+      const stretch = (1 + LENS_REACH * lit) * (1 + VOICE_REACH * heard)
+      // Вытягиваем от основания луча: сдвиг к основанию, scaleX, сдвиг обратно — только композитор, без раскладки.
+      ray.el.style.transform = `${ray.toBase} scaleX(${stretch.toFixed(3)}) ${ray.fromBase}`
       ray.el.style.opacity = Math.min(1, ray.opacity + 0.4 * lit + 0.35 * heard).toFixed(2)
     }
   }
