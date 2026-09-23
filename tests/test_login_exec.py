@@ -32,7 +32,10 @@ class ProtectedPathTests(unittest.TestCase):
                      "etc/NetworkManager/dispatcher.d/10-x", "etc/X11/xinit/xinitrc.d/50-x.sh",
                      "etc/pacman.d/hooks/x.hook", "etc/default/grub", "etc/systemd/zram-generator.conf",
                      "usr/local/share/agi-os/verify.py", "usr/local/share/dbus-1/services/x.service",
-                     "etc//profile.d/./x.sh", "etc/systemd/system/getty@.service.d/x.conf"):
+                     "etc//profile.d/./x.sh", "etc/systemd/system/getty@.service.d/x.conf",
+                     "usr/local/share/systemd/user/pipewire.service.d/x.conf", "etc/xdg/xfce4/xinitrc",
+                     "etc/xdg/openbox/autostart", "etc/xdg/labwc/autostart", "etc/xdg/plasma-workspace/env/x.sh",
+                     "etc/gdm/PostLogin/Default", "etc/vconsole.conf"):
             with self.subTest(path=path), self.assertRaises(ValidationError):
                 config_with(system=[(path, "x")])
 
@@ -44,6 +47,7 @@ class ProtectedPathTests(unittest.TestCase):
                    ("etc/modprobe.d/audio.conf", "options snd_hda_intel power_save=1\n"),
                    ("etc/lightdm/lightdm-gtk-greeter.conf", "[greeter]\ntheme-name=Adwaita-dark\n"),
                    ("etc/systemd/logind.conf.d/lid.conf", "[Login]\nHandleLidSwitch=suspend\n"),
+                   ("etc/X11/xorg.conf.d/00-keyboard.conf", 'Section "InputClass"\nEndSection\n'),
                    ("etc/X11/xorg.conf.d/30-touchpad.conf", 'Section "InputClass"\nEndSection\n'),
                    ("etc/xdg/xfce4/helpers.rc", "TerminalEmulator=xfce4-terminal\n"),
                    ("etc/sddm.conf.d/theme.conf", "[Theme]\nCurrent=breeze\n[Users]\nMaximumUid=60000\n")]
@@ -63,7 +67,11 @@ class ProtectedPathTests(unittest.TestCase):
                  ("etc/greetd/config.toml", '[initial_session]\ncommand = "sway"\nuser = "u"\n'),
                  ("etc/lightdm/lightdm.conf.d/60.conf", "[Seat:*]\nautologin-user=u\n"),
                  ("etc/sddm.conf.d/autologin.conf", "[Autologin]\nSession=plasma\nUser=u\n"),
-                 ("etc/gdm/custom.conf", "[daemon]\nAutomaticLoginEnable=True\n")]
+                 ("etc/gdm/custom.conf", "[daemon]\nAutomaticLoginEnable=True\n"),
+                 ("etc/environment", "XDG_CONFIG_DIRS=/usr/local/share/x:/etc/xdg\n"),
+                 ("etc/environment.d/20.conf", "PATH=/usr/local/share/bin:/usr/bin\n"),
+                 ("etc/sddm.conf.d/10.conf", "[X11]\nDisplayCommand=/usr/local/share/x.sh\n"),
+                 ("etc/sddm.conf", "[General]\nHaltCommand=/bin/sh -c id\n")]
         for path, content in cases:
             with self.subTest(path=path), self.assertRaises(ValidationError):
                 config_with(system=[(path, content)])
@@ -98,8 +106,10 @@ class LoginReviewTests(unittest.TestCase):
                   (".config/hypr/hyprland.conf", "monitor=,preferred,auto,1\nexec-once = mako\n"),
                   (".config/systemd/user/x.service", "[Service]\nExecStart=/usr/bin/x --daemon\n"),
                   (".config/labwc/autostart", "# comment\nswaybg -i bg.png &\n"),
+                  (".config/xfce4/xinitrc", "xset s off\nexec startxfce4\n"),
                   (".config/foot/foot.ini", "[main]\nfont=monospace:size=11\n")],
-            system=[("etc/greetd/config.toml", '[default_session]\ncommand = "tuigreet --cmd sway"\n')])
+            system=[("etc/greetd/config.toml", '[default_session]\ncommand = "tuigreet --cmd sway"\n'),
+                    ("usr/local/share/wayland-sessions/my.desktop", "[Desktop Entry]\nName=My\nExec=sway --unsupported-gpu\n")])
         entries = {e["path"]: e["commands"] for e in config.login_entries()}
         self.assertEqual(entries["~/.config/autostart/sync.desktop"], ["Exec=syncthing serve"])
         self.assertEqual(entries["~/.config/sway/config"], ["exec waybar", "exec_always kanshi"])
@@ -107,6 +117,8 @@ class LoginReviewTests(unittest.TestCase):
         self.assertEqual(entries["~/.config/systemd/user/x.service"], ["ExecStart=/usr/bin/x --daemon"])
         self.assertEqual(entries["~/.config/labwc/autostart"], ["swaybg -i bg.png &"])
         self.assertEqual(entries["/etc/greetd/config.toml"], ['command = "tuigreet --cmd sway"'])
+        self.assertEqual(entries["~/.config/xfce4/xinitrc"], ["xset s off", "exec startxfce4"])
+        self.assertEqual(entries["/usr/local/share/wayland-sessions/my.desktop"], ["Exec=sway --unsupported-gpu"])
         self.assertNotIn("~/.config/foot/foot.ini", entries)
         summary = config.summary({"size": 2**34})
         self.assertIn("ЗАПУСКАЕТСЯ ПРИ ВХОДЕ", summary)
