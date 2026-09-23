@@ -61,6 +61,11 @@ jobs:
           # GitHub release assets must stay below 2 GiB.
           size=$(stat -c %s out/agi-os-*.iso)
           echo "ISO size: $size bytes"
+          {
+            echo "### Live ISO"
+            echo "- \`$(basename out/agi-os-*.iso)\`: $size bytes, $(( size * 100 / 2147483648 ))% of the 2 GiB release asset limit"
+            echo "- sha256 \`$(cut -d' ' -f1 out/agi-os-*.iso.sha256)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           (( size < 2147483648 )) || { echo '::error::ISO exceeds the 2 GiB release asset limit'; exit 1; }
       - name: Smoke boot (UEFI)
         run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware uefi --memory 6144 --expect-revision "$(git rev-parse HEAD)" --logs out/smoke-uefi

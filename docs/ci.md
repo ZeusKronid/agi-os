@@ -7,6 +7,12 @@ Two GitHub Actions workflows live in `.github/workflows/`.
 | `tests.yml` | every pull request, push to `main`, manual, called by `iso.yml` | Installer and website unit tests, `node --check` of the browser scripts, `bash -n` of the scripts and a Python syntax pass, inside the pinned Arch Linux container with packages from the pinned snapshot (the same Python and aiohttp as in the Live image). |
 | `iso.yml` | push to `main`, tag `v*`, manual, pull requests that touch `archiso/`, `web/`, `scripts/build-iso.sh`, `scripts/ci/`, `scripts/web/` or the workflow | Unit tests first (mandatory), then the ISO build, the sha256 file, a smoke boot in QEMU with UEFI and with BIOS, and artifacts. A `v*` tag also publishes a GitHub release. |
 
+Unit tests run as an ordinary user in the container, as on a developer machine.
+A pull request that changes the image runs the unit tests twice (`tests.yml`
+directly and through `iso.yml`); that costs about two minutes and keeps the ISO
+job gated by tests for every trigger. The ISO job's summary shows the ISO size
+against the 2 GiB release limit, so growth is visible before it breaks releases.
+
 Every third-party action is pinned to a commit; `tests/test_ci.py` fails when a
 new `uses:` line is not.
 
@@ -78,8 +84,10 @@ With KVM a boot takes about 40 s (BIOS) to 110 s (UEFI) locally.
 By default `iso.yml` uses GitHub-hosted `ubuntu-24.04`: it frees disk space, enables
 `/dev/kvm` through a udev rule and installs QEMU, OVMF and squashfs-tools. To use a
 self-hosted runner with KVM, set the repository variable `AGIOS_ISO_RUNNER` to its
-label; that runner needs Docker (privileged containers), QEMU, `qemu-img`, OVMF,
-Python 3, rsync and squashfs-tools, and ~15 GB free disk.
+label; that runner needs Docker (privileged containers, also used once to export
+the pinned guacd image), QEMU, `qemu-img`, OVMF, Python 3 as `python`, rsync,
+squashfs-tools 4.6 or newer (`sqfstar`), `/dev/kvm` and ~15 GB free disk. Such a
+runner must be a dedicated build machine, not someone's workstation.
 
 ## Releases
 
