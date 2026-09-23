@@ -107,7 +107,8 @@ class RequestSchemaTests(unittest.TestCase):
         for key, value in (('needed', True), ('needed', -1), ('needed', 0), ('needed', '8'), ('needed', 2**70),
                            ('needed', 1.5), ('vm_memory', None), ('target', '/etc/passwd'), ('target', '/dev/sda\n'),
                            ('target', '/dev/../etc'), ('compression', float('nan')), ('compression', float('inf')),
-                           ('compression', 0.1), ('compression', '1.3')):
+                           ('compression', 0.1), ('compression', '1.3'), ('sparse', -1), ('sparse', 9 * GIB),
+                           ('sparse', True)):
             with self.assertRaises(ValidationError, msg=(key, value)):
                 storage_worker.sizing({**base, key: value})
         self.assertEqual(storage_worker.sizing(base), (8 * GIB, '/dev/sda', 4 * GIB, storage_worker.COMPRESSION))
