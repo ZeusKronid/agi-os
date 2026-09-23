@@ -461,7 +461,10 @@ def gui():
 
     check_button.connect("clicked", lambda _: start(["check"]))
     apply_button.connect("clicked", lambda _: start(["apply", "--yes"]))
+    # Enter in the password field is the window's main action: update.
+    password.connect("activate", lambda _: start(["apply", "--yes"]))
     window.show_all()
+    password.grab_focus()
     Gtk.main()
 
 
