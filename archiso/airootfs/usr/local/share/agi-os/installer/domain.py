@@ -47,6 +47,8 @@ CYRILLIC = {"ru", "uk", "ua", "be", "by", "bg", "sr", "rs", "mk", "kk", "kz", "k
 # UTF-8 console keymaps that keep Latin input and switch to the national layout
 # (ru and mk with Alt+Shift, as on the desktop; ua with Ctrl; bg with Ctrl+Shift).
 CONSOLE_TOGGLE = {"ru": "ruwin_alt_sh-UTF-8", "mk": "mk-utf", "ua": "ua-utf", "bg": "bg_bds-utf8"}
+# XKB layouts whose kbd console keymap has another name.
+XKB_TO_KBD = {"gb": "uk", "se": "sv-latin1", "latam": "la-latin1", "br": "br-abnt2", "pt": "pt-latin1", "jp": "jp106"}
 CJK = {"zh", "ja", "ko"}
 REPLY_SCHEMA = obj({
     "message": STRING, "suggestions": STRINGS, "lookup": STRINGS,
@@ -225,7 +227,7 @@ class Configuration:
         for layout in self.keyboard_layouts:
             if layout in CONSOLE_TOGGLE:
                 return CONSOLE_TOGGLE[layout]
-        first = self.keyboard_layouts[0]
+        first = XKB_TO_KBD.get(self.keyboard_layouts[0], self.keyboard_layouts[0])
         return first if first != "us" and console_keymap_exists(first) else "us"
 
     def effective_console_font(self):
