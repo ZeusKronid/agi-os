@@ -102,6 +102,6 @@ preview is gone (nothing was on disk); file/partition previews are kept.
   F2FS is refused for hibernation. `agi-os-verify` checks the swap file,
   `/sys/power/resume*` and logind `CanHibernate`; `agi-os-verify --hibernate`
   (or the button in the GUI) hibernates once and passes only if the same session
-  comes back.
+  comes back; with hibernation chosen, acceptance is complete only after that test.
 - Physical hardware runs are still pending; QEMU/KVM (nested for the inner VM)
   is the verified environment.
