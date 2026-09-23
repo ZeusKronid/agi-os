@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import uuid
 
 from aiohttp import web
 
@@ -22,7 +23,8 @@ from guacamole import tunnel
 
 from provider import LiveProvider, connect_chatgpt
 from system import live_environment
-from deployment import consent as consent_binding, orphan_previews, target_inventory
+from deployment import consent as consent_binding, target_inventory
+import preview_record
 
 GIB = 2**30
 
@@ -60,6 +62,11 @@ class State:
         self.provider = LiveProvider()
         self.controller = Controller(target_inventory(), self.provider, notify=self.notify)
         self.record = DATA_ROOT / 'session.json'
+        self.found = []          # previews of earlier Live sessions found on the media
+        self.scan_error = None
+        self.scan_task = None
+        self.record_task = None  # background write of the preview record
+        self.record_dirty = False
         self.restore()
 
     def notify(self, kind, value):
@@ -69,6 +76,123 @@ class State:
     def refresh_inventory(self):
         self.controller.snapshot = target_inventory()
         return self.controller.snapshot
+
+    def new_record(self, config, consent, option, prepared, encrypted, hardware, memory, cpus):
+        if option['kind'] == 'ram':
+            return None  # Memory does not survive a restart; there is nothing to find again.
+        storage = {'kind': option['kind'], 'title': option['title'], 'revert': option['revert']}
+        if option['kind'] == 'shrink':
+            undo = prepared['revert']
+            storage.update(shrunk_start=undo['start'], original_end=undo['original_end'], fstype=undo['fstype'])
+        return {'version': preview_record.VERSION, 'id': uuid.uuid4().hex, 'status': 'installing',
+                'created': preview_record.now(), 'updated': preview_record.now(), 'error': None,
+                'configuration': config.as_dict(), 'encrypted': encrypted, 'firmware': consent['firmware'],
+                'target': preview_record.disk_identity(consent['disk']), 'hardware': hardware,
+                'vm': {'memory': memory, 'cpus': cpus}, 'storage': storage, 'journal': []}
+
+    def journal(self, text, status=None, error=None):
+        """Update the preview record kept in the preview storage (survives a Live restart)."""
+        record = self.preview and self.preview.get('record')
+        if not record:
+            return False
+        record['journal'] = [*record['journal'], {'time': preview_record.now(), 'text': text}][-preview_record.JOURNAL:]
+        record['updated'] = preview_record.now()
+        if status:
+            record['status'], record['error'] = status, error
+        self.record_dirty = True
+        return True
+
+    def journal_later(self, text):
+        """Progress entries are written in the background, one write at a time."""
+        if self.journal(text) and not (self.record_task and not self.record_task.done()):
+            self.record_task = asyncio.create_task(self.flush_record())
+
+    async def flush_record(self):
+        while self.record_dirty and self.preview and self.preview.get('record'):
+            self.record_dirty = False
+            try:
+                await privileged('storage_worker.py', {'op': 'mark', 'record': self.preview['record'],
+                                                       'revert': self.preview['revert']})
+            except (ValidationError, OSError) as exc:
+                warning = 'Запись превью не сохранена в хранилище: ' + str(exc) + '. После перезапуска Live продолжить это превью не получится.'
+                if not self.events or self.events[-1].get('text') != warning:
+                    self.events.append({'kind': 'warning', 'text': warning})
+
+    async def save_record(self, text, status=None, error=None):
+        """Write the record now (after any write in flight)."""
+        if self.record_task and not self.record_task.done():
+            await asyncio.gather(self.record_task, return_exceptions=True)
+        if self.journal(text, status, error):
+            await self.flush_record()
+
+    async def drop_record_task(self):
+        if self.record_task and not self.record_task.done():
+            self.record_task.cancel()
+            await asyncio.gather(self.record_task, return_exceptions=True)
+        self.record_dirty = False
+
+    async def scan(self):
+        """Look for previews of earlier Live sessions on this computer's media."""
+        try:
+            result = await privileged('storage_worker.py', {'op': 'scan'})
+            self.found, self.scan_error = result['found'], None
+        except (ValidationError, OSError) as exc:
+            self.found, self.scan_error = [], 'Поиск превью прошлых сеансов не выполнен: ' + str(exc)
+
+    def found_public(self):
+        current = self.preview['image']['path'] if self.preview else None
+        medium = self.preview['revert'].get('device') if self.preview else None
+        busy = self.controller.installing or self.final['phase'] == 'working' or bool(self.vm and self.vm.running)
+        result = []
+        for entry in self.found:
+            if entry['device'] in (current, medium):
+                continue
+            record = entry.get('record')
+            status = record['status'] if record else None
+            item = {k: entry.get(k) for k in ('id', 'kind', 'device', 'disk', 'size', 'medium', 'problem')}
+            item.update(status=status, can_continue=False, can_retry=False, can_remove=not busy)
+            if record:
+                config = record['configuration']
+                item['title'] = f"{config['hostname']} · {config['desktop']} · пользователь {config['username']}"
+                item['created'] = record['created']
+                item['storage'] = record['storage']['title']
+                item['target'] = record['target']['path']
+                item['encrypted'] = record['encrypted']
+                item['error'] = record['error']
+                item['journal'] = [e['text'] for e in record['journal'][-8:]]
+                free = not busy and not self.preview
+                item['can_continue'] = free and status in ('ready', 'finalizing')
+                item['can_retry'] = free and status in ('installing', 'failed')
+            result.append(item)
+        return result
+
+    def found_entry(self, found_id):
+        entry = next((e for e in self.found if e['id'] == found_id), None)
+        if entry is None:
+            raise ValidationError('Такого превью нет; обновите список')
+        return entry
+
+    def rebind(self, record):
+        """The record's configuration bound to this computer's current view of its target disk."""
+        snapshot = self.refresh_inventory()
+        if record['firmware'] != snapshot['firmware']:
+            raise ValidationError('Превью установлено для загрузки ' + record['firmware'].upper()
+                                  + ', а Live сейчас загружен в режиме ' + snapshot['firmware'].upper())
+        matches = [d for d in snapshot['disks'] if preview_record.same_disk(record['target'], d)]
+        if len(matches) > 1:
+            matches = [d for d in matches if d['path'] == record['target']['path']]
+        if len(matches) != 1:
+            raise ValidationError('Целевой диск этого превью (' + record['target']['path'] + ') не найден')
+        config = Configuration.parse({**record['configuration'], 'disk': matches[0]['path']})
+        return config, consent_binding(config, snapshot)
+
+    def restore_conversation(self, config, text):
+        """Give the agreed configuration back to the conversation (and to the model's context)."""
+        reply = {'message': text, 'suggestions': [], 'lookup': [], 'configuration': config.as_dict()}
+        self.controller.history.append({'role': 'user', 'content': 'Restored the configuration of an earlier preview (data).'})
+        self.controller.history.append({'role': 'assistant', 'content': json.dumps(reply, ensure_ascii=False)})
+        self.controller.configuration = config
+        self.messages.append({'role': 'assistant', 'content': text, 'suggestions': []})
 
     def persist(self):
         self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -105,6 +229,11 @@ class State:
             elif self.preview and self.preview.get('revert', {}).get('kind') == 'ram' and not Path(self.preview['image']['path']).exists():
                 # Memory does not survive a Live restart: the preview is gone, the disks were never touched.
                 self.preview, self.built, self.disk_ready, self.saved_vm = None, None, False, None
+            elif self.preview and not self.disk_ready:
+                # The site stopped during the installation into the preview: never a silent success.
+                self.phase = 'error'
+                self.status = 'Установка в превью не завершена'
+                self.error = 'Установка в превью была прервана. Уберите превью и соберите его заново.'
 
     def current_consent(self):
         config = self.controller.configuration
@@ -130,10 +259,10 @@ class State:
                      'on_target': bool(self.preview and self.preview['image']['format'] == 'raw'
                                        and self.preview['image']['path'].startswith(self.built['consent']['target'])),
                      'revert': self.preview['option']['revert'] if self.preview else None}
-        current = self.preview['image']['path'] if self.preview else None
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
                 'error': self.error, 'model': self.provider.model,
-                'firmware': snapshot['firmware'], 'orphans': orphan_previews(snapshot, current),
+                'firmware': snapshot['firmware'], 'found': self.found_public(),
+                'scanning': bool(self.scan_task and not self.scan_task.done()), 'scan_error': self.scan_error,
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
                 'summary': config.summary(consent['disk'], snapshot['hardware']) if config and consent and 'disk' in consent else None,
@@ -181,28 +310,37 @@ class State:
             prepared = await privileged('storage_worker.py', {'op': 'prepare', 'option': option, 'needed': self.plan['needed'],
                                                               'vm_memory': memory * 2**20, 'target': config.disk,
                                                               'compression': self.plan['compression']})
-            self.preview = {'option': option, **prepared}
+            hardware = profile(self.controller.snapshot['hardware'])
+            self.preview = {'option': option, **prepared,
+                            'record': self.new_record(config, consent, option, prepared, bool(passphrase), hardware, memory, cpus)}
             self.vm = VirtualMachine(prepared['image'], memory, cpus)
             self.persist()
+            await self.save_record('Хранилище превью подготовлено: ' + option['title'])
             self.status = 'Запускаю установочную VM'
             await self.vm.start()
             if prepared.get('monitor'):
                 watchdog = asyncio.create_task(self.monitor_memory())
             self.phase, self.status = 'installing', 'Ожидаю готовности установщика внутри VM'
+            stages = set()
             def event(value):
                 self.events.append(value)
                 self.status = value.get('text', self.status)
-            hardware = profile(self.controller.snapshot['hardware'])
+                if value.get('stage') not in stages and value.get('text'):
+                    stages.add(value.get('stage'))
+                    self.journal_later(value['text'])
             await self.vm.install(config, password, passphrase, event, hardware)
             self.phase, self.status = 'ready', 'Система установлена в превью и загружена'
             self.disk_ready = True
             self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase), 'hardware': hardware}
+            await self.save_record('Система установлена в превью', status='ready')
         except asyncio.CancelledError:
             self.phase, self.status = 'stopped', 'VM остановлена. Установка не завершена'
+            self.journal('Установка в превью остановлена', status='failed', error=self.status)
             raise
         except Exception as exc:
             self.phase, self.status = 'error', 'Установка не завершена'
             self.error = self.error or str(exc) or 'Превышено время ожидания VM'
+            await self.save_record('Установка в превью не завершена', status='failed', error=self.error)
         finally:
             password = passphrase = None
             if watchdog:
@@ -385,6 +523,8 @@ async def stop(request):
             await state.vm.stop()
         if state.disk_ready:
             state.phase, state.status = 'stopped', 'VM остановлена. Превью сохранено'
+        if state.record_dirty:
+            await state.save_record('VM превью остановлена')
         state.persist()
         return web.json_response(state.public())
 
@@ -406,6 +546,7 @@ async def resume(request):
 
 async def release_preview(state):
     """Undo the preview storage and forget the preview; disks return to their prior state."""
+    await state.drop_record_task()
     result = await privileged('storage_worker.py', {'op': 'revert', 'state': state.preview['revert']})
     state.preview, state.built, state.disk_ready, state.saved_vm, state.vm = None, None, False, None, None
     state.events = []
@@ -430,19 +571,91 @@ async def revert(request):
         return web.json_response(state.public())
 
 
-async def remove_orphan(request):
-    """Delete a preview partition left by an earlier session; other partitions stay untouched."""
+def found_request(state, data):
+    """A found preview of an earlier session, while no other preview or operation is active."""
+    entry = state.found_entry(data.get('id'))
+    if state.preview or (state.vm and state.vm.running):
+        raise ValidationError('Сначала уберите текущее превью')
+    return entry
+
+
+async def scan_previews(request):
+    state = request.app['state']
+    not_busy(state)
+    async with state.lock:
+        await state.scan()
+        return web.json_response(state.public())
+
+
+async def continue_preview(request):
+    """Reattach a completely installed preview from an earlier Live session."""
     state = request.app['state']
     not_busy(state)
     data = await request.json()
     async with state.lock:
-        snapshot = await asyncio.to_thread(state.refresh_inventory)
-        current = state.preview['image']['path'] if state.preview else None
-        orphan = next((o for o in orphan_previews(snapshot, current) if o['device'] == data.get('device')), None)
-        if orphan is None:
-            raise ValidationError('Такого раздела превью нет')
-        result = await privileged('storage_worker.py', {'op': 'revert', 'state': {'kind': 'partition', 'disk': orphan['disk'], 'device': orphan['device']}})
+        entry = found_request(state, data)
+        record = entry.get('record')
+        if not record or record['status'] not in ('ready', 'finalizing'):
+            raise ValidationError('Установка в это превью не была завершена: его можно только повторить или убрать')
+        await asyncio.to_thread(state.rebind, record)  # Refuse before touching the medium.
+        adopted = await privileged('storage_worker.py', {'op': 'adopt', 'id': entry['id']})
+        record = preview_record.clean(adopted['record'])
+        config, consent = await asyncio.to_thread(state.rebind, record)
+        storage = record['storage']
+        option = {'id': entry['id'], 'kind': storage['kind'], 'title': storage['title'] or entry['medium'],
+                  'revert': storage['revert'], 'destructive': False, 'confirm': None}
+        state.preview = {'option': option, 'image': adopted['image'], 'revert': adopted['revert'], 'record': record}
+        state.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': record['encrypted'],
+                       'hardware': record['hardware']}
+        state.disk_ready, state.plan, state.error, state.events = True, None, None, []
+        state.final = {'phase': 'idle', 'events': []}
+        state.vm = VirtualMachine(adopted['image'], record['vm']['memory'], record['vm']['cpus'], state.controller.snapshot['firmware'])
+        state.saved_vm = None
+        interrupted = record['status'] == 'finalizing'
+        state.restore_conversation(config, 'Продолжаем превью прошлого сеанса: ' + option['title'] + '. '
+                                   + ('Установка на диск компьютера тогда была прервана — её успех не подтверждён. ' if interrupted else '')
+                                   + 'Запустите превью снова или установите систему на компьютер.')
+        state.phase, state.status = 'stopped', 'Превью прошлого сеанса подключено'
+        state.found = [e for e in state.found if e['id'] != entry['id']]
+        await state.save_record('Превью продолжено после перезапуска Live', status='ready')
+        state.persist()
+        return web.json_response(state.public())
+
+
+async def retry_preview(request):
+    """An unfinished installation: undo its storage and return its configuration to the review."""
+    state = request.app['state']
+    not_busy(state)
+    data = await request.json()
+    async with state.lock:
+        entry = found_request(state, data)
+        record = entry.get('record')
+        if not record or record['status'] not in ('installing', 'failed'):
+            raise ValidationError('Повторить можно только незавершённую установку')
+        config, _ = await asyncio.to_thread(state.rebind, record)
+        result = await privileged('storage_worker.py', {'op': 'remove', 'id': entry['id']})
+        state.plan, state.error = None, None
+        state.restore_conversation(config, 'Установка в превью прошлого сеанса не была завершена. Временное хранилище убрано ('
+                                   + result['text'] + '). Конфигурация восстановлена: рассчитайте место и соберите превью заново.')
+        state.status = 'Конфигурация восстановлена: выберите, где сделать превью'
+        await state.scan()
+        state.persist()
+        return web.json_response(state.public())
+
+
+async def remove_found(request):
+    """Undo a preview left by an earlier session; other partitions and files stay untouched."""
+    state = request.app['state']
+    not_busy(state)
+    data = await request.json()
+    async with state.lock:
+        entry = state.found_entry(data.get('id'))
+        current = state.preview and (state.preview['image']['path'], state.preview['revert'].get('device'))
+        if current and entry['device'] in current:
+            raise ValidationError('Это текущее превью: уберите его кнопкой «вернуть всё как было»')
+        result = await privileged('storage_worker.py', {'op': 'remove', 'id': entry['id']})
         await asyncio.to_thread(state.refresh_inventory)
+        await state.scan()
         state.status = result['text']
         return web.json_response(state.public())
 
@@ -450,6 +663,7 @@ async def remove_orphan(request):
 async def finalize_task(state, payload):
     state.final = {'phase': 'working', 'target': payload['target'], 'layout': payload['layout'], 'events': []}
     state.persist()
+    await state.save_record('Начата установка на диск ' + payload['target'], status='finalizing')
     try:
         process = await asyncio.create_subprocess_exec(
             'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web/finalize_worker.py'),
@@ -483,6 +697,8 @@ async def finalize_task(state, payload):
     except Exception as exc:
         state.final.update(phase='error', error=str(exc))
         state.status = 'Завершение установки не выполнено'
+        if state.preview:
+            await state.save_record('Установка на диск не выполнена', status='ready', error=str(exc))
     finally:
         payload.pop('passphrase', None)
         state.controller.installing = False
@@ -536,8 +752,16 @@ async def power(request):
     return web.json_response({'scheduled': True, 'message': message})
 
 
+async def startup(app):
+    state = app['state']
+    if live_environment():
+        state.scan_task = asyncio.create_task(state.scan())
+
+
 async def cleanup(app):
     state = app['state']
+    if state.scan_task and not state.scan_task.done():
+        state.scan_task.cancel()
     if state.final_task and not state.final_task.done():
         await asyncio.shield(state.final_task)
     if state.build_task and not state.build_task.done():
@@ -560,13 +784,17 @@ def application(port=8787, guacd_port=14822):
     app.router.add_post('/api/stop', stop)
     app.router.add_post('/api/resume', resume)
     app.router.add_post('/api/revert', revert)
-    app.router.add_post('/api/orphans/remove', remove_orphan)
+    app.router.add_post('/api/previews/scan', scan_previews)
+    app.router.add_post('/api/previews/continue', continue_preview)
+    app.router.add_post('/api/previews/retry', retry_preview)
+    app.router.add_post('/api/previews/remove', remove_found)
     app.router.add_post('/api/final/finalize', finalize)
     app.router.add_post('/api/final/power', power)
     app.router.add_get('/tunnel', tunnel)
     app.router.add_get('/', index)
     app.router.add_static('/static', ROOT / 'web/static')
     app.router.add_get('/guacamole.js', guacamole_script)
+    app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app
 
