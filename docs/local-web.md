@@ -97,8 +97,31 @@ autologin of `agi` is the only login, there is no root autologin on a console.
 Because the site has no desktop session, the ChatGPT sign-in page is opened by
 the site's own browser tab (`login_url` in `/api/state`), not by `xdg-open`.
 
-Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
-preview is gone (nothing was on disk); file/partition previews are kept.
+Session state lives in `/var/lib/agi-os`, which is in RAM in the Live
+environment. After a Live restart an in-memory preview is gone (nothing was on
+disk); file and partition previews are kept and found again:
+
+- Every file or partition preview carries a secret-free *preview record*: the
+  agreed configuration, the identity of the target disk, the storage kind, the
+  status (`installing`, `ready`, `failed`, `finalizing`) and a short journal of
+  the operations. A file preview keeps it in `AGIOS-PREVIEW/preview.json` next to
+  `preview.qcow2`; a partition preview keeps it in the unused gap of its nested
+  GPT (sectors 64–2047 of the preview partition, before the first nested
+  partition), outside every filesystem and outside LUKS, so it is readable
+  without the encryption passphrase.
+- At start the site scans the computer's media (read-only mounts without journal
+  replay) for `AGIOS-PREVIEW` partitions and `AGIOS-PREVIEW/preview.qcow2` files.
+  A completely installed preview can be *continued*: it is reattached, bound to
+  the same target disk (found by size, model, serial and WWN even under another
+  device name) and can be started or installed. An unfinished installation is
+  never shown as a success: *retry* removes its storage and returns its
+  configuration to the size-and-place step. Any found preview can be *removed*.
+- A record read from a medium is untrusted: it is validated completely, a preview
+  file with a backing or external data file is refused, and the undo of the
+  storage (including the boundary of a shrunk partition) is derived from the
+  current partition layout, not taken from the record.
+- Promotion zeroes the nested table and the record; copy and undo remove the
+  storage together with its record.
 
 ## Logs and diagnostics
 

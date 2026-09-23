@@ -28,16 +28,6 @@ def restrict_test_targets(snapshot):
     return snapshot
 
 
-def orphan_previews(snapshot, current=None):
-    """Preview partitions left by an earlier Live session (label AGIOS-PREVIEW), never the active one."""
-    found = []
-    for disk in snapshot['disks']:
-        for part in disk.get('partitions', []):
-            if part.get('partlabel') == 'AGIOS-PREVIEW' and part['path'] != current and not part.get('mounted'):
-                found.append({'disk': disk['path'], 'device': part['path'], 'size': part['size']})
-    return found
-
-
 def consent(config, snapshot):
     """Bind the reviewed configuration to the exact disk identity and boot mode."""
     disk = selected_disk(snapshot, config.disk)
