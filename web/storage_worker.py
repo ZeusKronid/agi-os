@@ -26,6 +26,7 @@ import sys
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import ValidationError
+from journal import Logger, adopt
 from system import inventory, live_environment, read_command, selected_disk
 from worker import Runner, partition_path
 from deployment import restrict_test_targets
@@ -45,12 +46,21 @@ RESERVE = 3 * GIB  # Live desktop, browser, guacd and the site itself (measured 
 COMPRESSION = 1.3  # Conservative zram ratio for a freshly installed system (measured ≈ 1.35).
 MOUNT_SAFE = 'nosuid,nodev,noexec'  # Media are foreign data: never honour setuid files or device nodes on them.
 BLANK_PROBE = MIB  # A disk without any signature must also be zero here before it counts as empty.
+LOG = Logger('storage')
 
 
 def sh(args, timeout=120, input_text=None):
-    return read_command(args, timeout=timeout) if input_text is None else subprocess.run(
-        args, input=input_text, text=True, capture_output=True, timeout=timeout, check=True,
-        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}).stdout
+    try:
+        output = read_command(args, timeout=timeout) if input_text is None else subprocess.run(
+            args, input=input_text, text=True, capture_output=True, timeout=timeout, check=True,
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}).stdout
+    except Exception as exc:
+        # Output of a command fed on stdin is not logged: the input may be a secret.
+        LOG.warning('command.failed', f'{args[0]}: {type(exc).__name__}', args=list(args),
+                    stderr=getattr(exc, 'stderr', None) if input_text is None else None)
+        raise
+    LOG.info('command.done', args[0], args=list(args))
+    return output
 
 
 def mem_available():
@@ -622,13 +632,18 @@ def main():
     try:
         if os.geteuid() != 0 or not live_environment():
             raise ValidationError('Операции с носителями разрешены только внутри Live')
-        request = checked_request(json.loads(sys.stdin.readline(1_000_000)))
+        request = checked_request(adopt(json.loads(sys.stdin.readline(1_000_000))))
         handler = {'probe': probe, 'prepare': prepare, 'revert': revert}[request['op']]
-        print(json.dumps({'result': handler(request)}, ensure_ascii=False))
+        LOG.info('op.start', request['op'], op=request['op'])
+        result = handler(request)
+        LOG.info('op.done', request['op'], op=request['op'])
+        print(json.dumps({'result': result}, ensure_ascii=False))
     except Exception as exc:
         text = str(exc) if isinstance(exc, ValidationError) else 'Внутренняя ошибка операции с носителем'
         if isinstance(exc, subprocess.CalledProcessError):
             text = 'Команда завершилась ошибкой: ' + ' '.join(exc.cmd[:2])
+        known = isinstance(exc, ValidationError)
+        LOG.error('op.failed', text, exc=None if known else exc)
         print(json.dumps({'error': text}, ensure_ascii=False))
         return 1
     return 0

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 from aiohttp import web
 
@@ -19,28 +20,46 @@ from worker import packages_for
 from hardware import describe, driver_plan, profile, virtual
 from runtime import VirtualMachine
 from guacamole import tunnel
+from journal import Logger, new_operation, operation as current_operation
+import diagnostics
 
 from provider import LiveProvider, connect_chatgpt
 from system import live_environment
 from deployment import consent as consent_binding, orphan_previews, target_inventory
 
 GIB = 2**30
+log = Logger('web')
+
+
+def traced(request):
+    """Attach the current operation id so root helpers log under the same correlation id."""
+    trace = current_operation.get()
+    return {**request, 'trace': trace} if trace else request
 
 
 async def privileged(script, request):
     """Run a root helper of this site with one JSON request; secrets travel only over stdin."""
+    started = time.monotonic()
+    op = request.get('op')
+    log.info('helper.start', f'{script} {op}', helper=script, op=op)
     process = await asyncio.create_subprocess_exec(
         'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web' / script),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await process.communicate(json.dumps(request).encode() + b'\n')
+    out, err = await process.communicate(json.dumps(traced(request)).encode() + b'\n')
     try:
         answer = json.loads(out.decode() or '{}')
     except ValueError:
         answer = {}
+    elapsed = round(time.monotonic() - started, 2)
     if 'error' in answer:
+        log.warning('helper.error', f'{script} {op}: {answer["error"]}', helper=script, op=op, seconds=elapsed, code=process.returncode)
         raise ValidationError(answer['error'])
     if process.returncode or 'result' not in answer:
-        raise ValidationError('Операция с носителем не выполнена: ' + err.decode(errors='replace')[-800:])
+        detail = err.decode(errors='replace')[-800:]
+        log.error('helper.failed', f'{script} {op}: код {process.returncode}', helper=script, op=op, seconds=elapsed,
+                  code=process.returncode, stderr=detail)
+        raise ValidationError('Операция с носителем не выполнена: ' + detail)
+    log.info('helper.done', f'{script} {op}: готово за {elapsed} с', helper=script, op=op, seconds=elapsed)
     return answer['result']
 
 
@@ -173,6 +192,9 @@ class State:
 
     async def build(self, config, consent, option, password, passphrase, memory, cpus):
         watchdog = None
+        current_operation.set(new_operation('build'))
+        log.info('build.start', 'Сборка превью: ' + option['title'], option=option['id'], kind=option.get('kind'),
+                 memory=memory, cpus=cpus, encrypted=bool(passphrase), configuration=config.digest())
         try:
             self.phase, self.status = 'starting', 'Готовлю хранилище превью: ' + option['title']
             self.disk_ready = False
@@ -193,17 +215,22 @@ class State:
             def event(value):
                 self.events.append(value)
                 self.status = value.get('text', self.status)
+                log.log('error' if value.get('kind') == 'error' else 'info', 'build.event.' + str(value.get('kind')),
+                        str(value.get('text', '')), stage=value.get('stage'))
             hardware = profile(self.controller.snapshot['hardware'])
             await self.vm.install(config, password, passphrase, event, hardware)
             self.phase, self.status = 'ready', 'Система установлена в превью и загружена'
             self.disk_ready = True
             self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase), 'hardware': hardware}
+            log.info('build.ready', 'Превью установлено и загружено', vm=str(self.vm.directory))
         except asyncio.CancelledError:
             self.phase, self.status = 'stopped', 'VM остановлена. Установка не завершена'
+            log.warning('build.cancelled', 'Сборка превью остановлена')
             raise
         except Exception as exc:
             self.phase, self.status = 'error', 'Установка не завершена'
             self.error = self.error or str(exc) or 'Превышено время ожидания VM'
+            log.error('build.failed', self.error, exc=exc, vm=str(self.vm.directory) if self.vm else None)
         finally:
             password = passphrase = None
             if watchdog:
@@ -222,10 +249,22 @@ async def local_only(request, handler):
         raise web.HTTPForbidden(text='Invalid origin')
     if request.method == 'POST' and request.headers.get('X-AGIOS') != 'local':
         raise web.HTTPForbidden(text='Missing local request header')
+    started = time.monotonic()
     try:
-        return await handler(request)
+        response = await handler(request)
     except (ValidationError, ProviderError, ValueError, KeyError) as exc:
+        log.warning('api.rejected', f'{request.path}: {exc}', path=request.path, error=type(exc).__name__)
         return web.json_response({'error': str(exc)}, status=400)
+    except web.HTTPException as exc:
+        log.warning('api.refused', f'{request.path}: {exc.status} {exc.text}', path=request.path, status=exc.status)
+        raise
+    except Exception as exc:
+        log.error('api.crashed', f'{request.path}: внутренняя ошибка {type(exc).__name__}', exc=exc, path=request.path)
+        raise
+    if request.method == 'POST':
+        log.info('api.request', f'{request.path} → {response.status}', path=request.path, status=response.status,
+                 seconds=round(time.monotonic() - started, 2))
+    return response
 
 
 async def index(request):
@@ -267,6 +306,7 @@ async def chat(request):
         except Exception as exc:
             state.error = str(exc)
             state.status = 'Не удалось получить ответ агента'
+            log.warning('chat.failed', 'Ответ агента не получен: ' + str(exc), exc=exc, model=state.provider.model)
         state.persist()
     return web.json_response(state.public())
 
@@ -295,6 +335,7 @@ async def configure(request):
             provider = LiveProvider(provider)
         await asyncio.to_thread(state.provider.close)
         state.provider = state.controller.provider = provider
+        log.info('provider.connected', f'Модель подключена: {kind}', kind=kind, model=provider.model)
     return web.json_response(state.public())
 
 
@@ -334,6 +375,8 @@ async def plan(request):
                                             'options': [o['id'] for o in probe['options']]}, sort_keys=True).encode()).hexdigest()
         state.plan = {'digest': digest, 'estimate': estimate, 'needed': needed, 'memory': memory, 'encrypt': encrypt,
                       'compression': compression, 'options': probe['options'], 'consent': consent['digest']}
+        log.info('plan.ready', f'Нужно {needed / GIB:.1f} ГиБ, вариантов {len(probe["options"])}', estimate=estimate,
+                 needed=needed, options=[{'id': o['id'], 'fits': o['fits']} for o in probe['options']])
         state.status = 'Выберите, где сделать превью, и подтвердите'
         return web.json_response(state.public())
 
@@ -458,11 +501,15 @@ async def remove_orphan(request):
 async def finalize_task(state, payload):
     state.final = {'phase': 'working', 'target': payload['target'], 'layout': payload['layout'], 'events': []}
     state.persist()
+    current_operation.set(new_operation('finalize'))
+    log.info('finalize.start', f'Завершение установки на {payload["target"]}: {payload["layout"]}',
+             target=payload['target'], layout=payload['layout'], encrypted=bool(payload.get('passphrase')))
+    stderr = ''
     try:
         process = await asyncio.create_subprocess_exec(
             'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web/finalize_worker.py'),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        process.stdin.write(json.dumps(payload).encode() + b'\n')
+        process.stdin.write(json.dumps(traced(payload)).encode() + b'\n')
         await process.stdin.drain()
         process.stdin.close()
         payload.pop('passphrase', None)
@@ -472,6 +519,8 @@ async def finalize_task(state, payload):
             event = json.loads(line)
             state.final['events'].append(event)
             state.status = event.get('text', state.status)
+            log.log('error' if event.get('kind') == 'final-error' else 'warning' if event.get('kind') == 'final-warning' else 'info',
+                    'finalize.event.' + str(event.get('kind')), str(event.get('text', '')))
             if event['kind'] == 'final-warning':
                 state.final.setdefault('warnings', []).append(event['text'])
             if event['kind'] == 'finalized':
@@ -488,9 +537,11 @@ async def finalize_task(state, payload):
             state.final['events'].append({'kind': 'final-progress', 'text': 'Временное хранилище превью убрано: ' + result['text']})
         state.final['phase'] = 'complete'
         state.phase, state.status = 'finalized', 'Система готова к загрузке с диска компьютера'
+        log.info('finalize.done', 'Система установлена на диск компьютера', mode=mode)
     except Exception as exc:
         state.final.update(phase='error', error=str(exc))
         state.status = 'Завершение установки не выполнено'
+        log.error('finalize.failed', str(exc), exc=exc, stderr=stderr[-1500:])
     finally:
         payload.pop('passphrase', None)
         state.controller.installing = False
@@ -536,12 +587,24 @@ async def power(request):
     action = data.get('action')
     if action not in ('poweroff', 'reboot'):
         raise ValidationError('Неизвестное действие')
+    log.info('power.' + action, 'Запланировано: ' + action)
     proc = await asyncio.create_subprocess_exec('sudo', '-n', '/usr/bin/shutdown', '-h' if action == 'poweroff' else '-r', '+1')
     if await proc.wait():
         raise ValidationError('Не удалось запланировать выключение')
     message = ('Live выключится через минуту. Извлеките носитель и включите компьютер: он загрузится с установленного диска.'
                if action == 'poweroff' else 'Компьютер перезагрузится через минуту. Извлеките носитель AGIOS, чтобы загрузилась установленная система.')
     return web.json_response({'scheduled': True, 'message': message})
+
+
+async def export_diagnostics(request):
+    """A secret-free archive of logs, state, inventory and versions for a bug report."""
+    state = request.app['state']
+    public = {k: v for k, v in state.public().items() if k != 'messages'}
+    data = await asyncio.to_thread(diagnostics.bundle, public, state.controller.snapshot, DATA_ROOT, ROOT)
+    name = 'agios-diagnostics-' + time.strftime('%Y%m%d-%H%M%S') + '.tar.gz'
+    log.info('diagnostics.exported', f'Диагностика сохранена: {name}', size=len(data))
+    return web.Response(body=data, content_type='application/gzip',
+                        headers={'Content-Disposition': f'attachment; filename="{name}"', 'Cache-Control': 'no-store'})
 
 
 async def cleanup(app):
@@ -571,6 +634,7 @@ def application(port=8787, guacd_port=14822):
     app.router.add_post('/api/orphans/remove', remove_orphan)
     app.router.add_post('/api/final/finalize', finalize)
     app.router.add_post('/api/final/power', power)
+    app.router.add_post('/api/diagnostics', export_diagnostics)
     app.router.add_get('/tunnel', tunnel)
     app.router.add_get('/', index)
     app.router.add_static('/static', ROOT / 'web/static')
@@ -587,4 +651,6 @@ if __name__ == '__main__':
     if not live_environment():
         parser.error('Сайт AGIOS запускается внутри загруженной Live-среды. Для теста загрузите Live ISO в QEMU.')
     os.umask(0o077)
+    log.info('site.start', 'Сайт AGIOS запущен', port=args.port,
+             revision=((ROOT / 'source-revision').read_text().strip() if (ROOT / 'source-revision').exists() else None))
     web.run_app(application(args.port, args.guacd_port), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5)
