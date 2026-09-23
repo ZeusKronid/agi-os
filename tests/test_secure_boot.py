@@ -77,6 +77,11 @@ class WorkerSigningTests(unittest.TestCase):
         runner, events, record = Runner(), [], {}
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
+            # kbd is part of the base system; the worker checks the console files exist there (CMP-122).
+            for name in (f"keymaps/i386/qwerty/{config.effective_keymap()}.map.gz",
+                         f"consolefonts/{config.effective_console_font()}.psfu.gz"):
+                (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
+                (target / "usr/share/kbd" / name).touch()
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \

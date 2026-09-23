@@ -111,10 +111,11 @@ class ProviderTests(unittest.TestCase):
 
 
 class FakeRunner:
-    def __init__(self, fail_on=None):
+    def __init__(self, fail_on=None, config=None):
         self.cancel = threading.Event()
         self.calls = []
         self.fail_on = fail_on
+        self.config = config or Configuration.parse(specification())
 
     def run(self, args, input_text=None, timeout=1800):
         self.calls.append(args)
@@ -125,7 +126,7 @@ class FakeRunner:
         if args[0] == "genfstab":
             return "UUID=installed-uuid / ext4 defaults 0 1\n"
         if "-Qq" in args:
-            return "\n".join(worker.packages_for(Configuration.parse(specification()), demo_inventory()["hardware"]))
+            return "\n".join(worker.packages_for(self.config, demo_inventory()["hardware"]))
         return ""
 
 
@@ -152,17 +153,22 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 worker.preflight({})
 
-    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, files=None):
-        config = Configuration.parse(specification())
+    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, data=None, files=None):
+        config = Configuration.parse(data or specification())
         snapshot = demo_inventory()
         disk = snapshot["disks"][0]
         request = {"configuration": config.as_dict(), "fingerprint": disk["fingerprint"],
                    "consent_digest": config.digest(), "password": "private-password"}
         if passphrase:
             request["passphrase"] = passphrase
-        runner, events = FakeRunner(fail_on), []
+        runner, events = FakeRunner(fail_on, config), []
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
+            # kbd is part of the base system; the worker checks the console files exist there.
+            for name in (f"keymaps/i386/qwerty/{config.effective_keymap()}.map.gz",
+                         f"consolefonts/{config.effective_console_font()}.psfu.gz"):
+                (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
+                (target / "usr/share/kbd" / name).touch()
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
