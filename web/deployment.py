@@ -14,11 +14,17 @@ def target_inventory():
     snapshot = inventory()
     if not snapshot['live']:
         raise ValidationError('Установка доступна только в загруженной Live-среде')
-    test = TEST_MARKER.exists()
-    for disk in snapshot['disks']:
-        if test and (disk.get('serial') or '').strip() != 'AGIOS_TARGET':
-            disk['eligible'] = False
-            disk['reason'] = 'В тесте разрешён только отдельный диск AGIOS_TARGET'
+    return restrict_test_targets(snapshot)
+
+
+def restrict_test_targets(snapshot):
+    """In the marked test VM only the disk with serial AGIOS_TARGET may be a target.
+    The root helpers apply this too, so a test run never touches the host's other disks."""
+    if TEST_MARKER.exists():
+        for disk in snapshot['disks']:
+            if (disk.get('serial') or '').strip() != 'AGIOS_TARGET':
+                disk['eligible'] = False
+                disk['reason'] = 'В тесте разрешён только отдельный диск AGIOS_TARGET'
     return snapshot
 
 

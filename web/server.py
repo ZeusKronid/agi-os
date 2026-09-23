@@ -32,7 +32,7 @@ async def privileged(script, request):
     process = await asyncio.create_subprocess_exec(
         'sudo', '-n', '/usr/bin/python', '-B', str(ROOT / 'web' / script),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await process.communicate(json.dumps({**request, 'data_root': str(DATA_ROOT)}).encode() + b'\n')
+    out, err = await process.communicate(json.dumps(request).encode() + b'\n')
     try:
         answer = json.loads(out.decode() or '{}')
     except ValueError:

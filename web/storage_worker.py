@@ -8,21 +8,31 @@ Every prepared location is reversible except an explicitly chosen disk erase:
 - shrink:    an NTFS/ext4 partition is shrunk and the freed space holds the new
              partition; revert deletes it, restores the boundary and grows the filesystem.
 - erase:     the whole target disk becomes one preview partition (not reversible).
+
+The caller (the website, user agi) is not trusted: every request is checked
+against a strict schema and a fresh inventory, devices are re-derived from the
+option id instead of taken from the request, and only partitions this helper
+labelled AGIOS-PREVIEW are ever deleted. See docs/root-helpers-threat-model.md.
 """
 import json
+import math
 import os
 from pathlib import Path
-import shutil
+import re
+import stat as stat_module
 import subprocess
 import sys
 
-from settings import DATA_ROOT, ENGINE
+from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import ValidationError
-from system import inventory, live_environment, read_command
+from system import inventory, live_environment, read_command, selected_disk
 from worker import Runner, partition_path
+from deployment import restrict_test_targets
 
-PREVIEW = DATA_ROOT / 'preview'
+# Mount points and GPT backups live in a root-owned runtime directory, never in the
+# site's writable data directory: user agi must not be able to swap them for symlinks.
+PREVIEW = Path('/run/agi-os-preview')
 SECTOR = 512
 MIB = 2**20
 GIB = 2**30
@@ -30,8 +40,11 @@ ALIGN = MIB // SECTOR
 NAME = 'AGIOS-PREVIEW'
 FILE_FS = ('ext4', 'exfat', 'ntfs', 'btrfs', 'xfs', 'f2fs', 'vfat')
 SHRINK_FS = ('ntfs', 'ext4')
+TIB = 2**40
 RESERVE = 3 * GIB  # Live desktop, browser, guacd and the site itself (measured ≈ 2.5 GiB).
 COMPRESSION = 1.3  # Conservative zram ratio for a freshly installed system (measured ≈ 1.35).
+MOUNT_SAFE = 'nosuid,nodev,noexec'  # Media are foreign data: never honour setuid files or device nodes on them.
+BLANK_PROBE = MIB  # A disk without any signature must also be zero here before it counts as empty.
 
 
 def sh(args, timeout=120, input_text=None):
@@ -51,8 +64,8 @@ def free_regions(disk):
     """Unpartitioned, 1 MiB aligned regions of a disk as (start_sector, end_sector) inclusive."""
     total = disk['size'] // SECTOR
     if not disk.get('pttype'):
-        if disk.get('fstype'):
-            return []  # A filesystem written directly to the whole device is user data.
+        if disk.get('fstype') or not looks_blank(disk['path']):
+            return []  # A filesystem or signature-less data (e.g. a VeraCrypt disk) is user data.
         return [(2048, total - 34)]
     try:
         table = json.loads(sh(['sfdisk', '--json', disk['path']]))['partitiontable']
@@ -78,12 +91,21 @@ def free_regions(disk):
     return aligned
 
 
+def looks_blank(path):
+    """True only when the start of a device holds nothing but zeros."""
+    try:
+        with open(path, 'rb') as device:
+            head = device.read(BLANK_PROBE)
+    except OSError:
+        return False
+    return bool(head) and not head.strip(b'\0')
+
+
 def mounted_free(device, fstype):
     """Free bytes inside a filesystem, read through a temporary read-only mount."""
-    point = PREVIEW / 'probe'
-    point.mkdir(parents=True, exist_ok=True)
+    point = private_dir(PREVIEW / 'probe')
     kind = ['-t', 'ntfs3'] if fstype == 'ntfs' else []
-    result = subprocess.run(['mount', '-o', 'ro', *kind, device, str(point)], capture_output=True, timeout=60)
+    result = subprocess.run(['mount', '-o', 'ro,' + MOUNT_SAFE, *kind, device, str(point)], capture_output=True, timeout=60)
     if result.returncode:
         return None
     try:
@@ -122,13 +144,227 @@ def shrink_room(partition):
         return None
 
 
+# ---- Input validation: the request comes from an unprivileged process ----
+
+REQUEST_KEYS = {
+    'probe': ({'op', 'needed', 'target', 'vm_memory'}, {'compression'}),
+    'prepare': ({'op', 'option', 'needed', 'target', 'vm_memory'}, {'compression'}),
+    'revert': ({'op', 'state'}, set()),
+}
+STATE_KEYS = {
+    'ram': {'kind', 'device', 'mount'},
+    'file': {'kind', 'device', 'mount', 'folder'},
+    'partition': {'kind', 'disk', 'device', 'backup'},
+    'shrink': {'kind', 'disk', 'device', 'shrunk', 'fstype', 'number', 'original_end', 'backup'},
+    'erase': {'kind', 'disk', 'device'},
+}
+DEVICE = re.compile(r'/dev/[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}')
+
+
+def whole(value, name, low, high):
+    """An integer from JSON (bool is not a number here) within [low, high]."""
+    if type(value) is not int or not low <= value <= high:
+        raise ValidationError(f'Некорректное значение {name}')
+    return value
+
+
+def text(value, name, pattern=DEVICE):
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise ValidationError(f'Некорректное значение {name}')
+    return value
+
+
+def checked_request(request):
+    if not isinstance(request, dict) or not isinstance(request.get('op'), str) or request['op'] not in REQUEST_KEYS:
+        raise ValidationError('Неизвестная операция с носителем')
+    required, optional = REQUEST_KEYS[request['op']]
+    keys = set(request) - {'data_root'}  # Sent by older sites; ignored, the helper never uses the caller's paths.
+    if not required <= keys <= required | optional:
+        raise ValidationError('Некорректный запрос операции с носителем')
+    return {k: v for k, v in request.items() if k in keys}
+
+
+def sizing(request):
+    needed = whole(request['needed'], 'needed', 1, 64 * TIB)
+    target = text(request['target'], 'target')
+    vm_memory = whole(request['vm_memory'], 'vm_memory', 0, 4 * TIB)
+    compression = request.get('compression', COMPRESSION)
+    if type(compression) not in (int, float) or not math.isfinite(compression) or not 1 <= compression <= 4:
+        raise ValidationError('Некорректное значение compression')
+    return needed, target, vm_memory, float(compression)
+
+
+def private_dir(path):
+    """A root-owned directory (0755) that nobody else can replace or write into."""
+    path.mkdir(mode=0o755, parents=True, exist_ok=True)
+    info = os.lstat(path)
+    if stat_module.S_ISDIR(info.st_mode) and os.path.ismount(path):
+        return path  # A medium mounted on our own mount point: its root belongs to the medium.
+    if not stat_module.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise ValidationError(f'Небезопасный служебный каталог {path}')
+    if info.st_mode & 0o777 != 0o755:
+        os.chmod(path, 0o755)
+    return path
+
+
+def live_source():
+    try:
+        return read_command(['findmnt', '-n', '-o', 'SOURCE', '/run/archiso/bootmnt']).strip()
+    except ValidationError:
+        return ''
+
+
+def live_medium_disk(snapshot):
+    """The disk Live booted from (a USB stick is a 'disk' too); never a preview location."""
+    source = live_source()
+    for disk in snapshot['disks']:
+        if source and (disk['path'] == source or any(p['path'] == source for p in disk['partitions'])):
+            return disk['path']
+    return None
+
+
+def mount_source(point):
+    result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', '--mountpoint', str(point)],
+                            capture_output=True, text=True, timeout=30)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def partition_number(disk, device):
+    suffix = device[len(disk):] if device.startswith(disk) else ''
+    match = re.fullmatch(r'p?([1-9][0-9]{0,2})', suffix)
+    if not match or (suffix.startswith('p') != disk[-1].isdigit()):
+        raise ValidationError(f'{device} не является разделом {disk}')
+    return int(match.group(1))
+
+
+def find_partition(snapshot, device):
+    """(disk, partition) of a partition path in the current inventory."""
+    for disk in snapshot['disks']:
+        for part in disk['partitions']:
+            if part['path'] == device:
+                partition_number(disk['path'], device)
+                return disk, part
+    raise ValidationError(f'Раздел {device} не найден')
+
+
+def usable_disk(snapshot, path):
+    """A writable disk that is not the Live medium."""
+    disk = next((d for d in snapshot['disks'] if d['path'] == path), None)
+    if disk is None:
+        raise ValidationError(f'Диск {path} не найден')
+    if disk.get('ro') or path == live_medium_disk(snapshot):
+        raise ValidationError(f'Диск {path} нельзя использовать для превью')
+    return disk
+
+
+def resolve_option(option, target, snapshot):
+    """Rebuild the chosen option from its id and the current inventory.
+
+    Only the id is taken from the request: the device, disk and filesystem the
+    helper touches come from lsblk, so a forged option cannot point elsewhere."""
+    if not isinstance(option, dict) or not isinstance(option.get('id'), str):
+        raise ValidationError('Некорректный вариант хранилища превью')
+    kind, _, rest = option['id'].partition(':')
+    if option.get('kind') not in (None, {'part': 'partition'}.get(kind, kind)):
+        raise ValidationError('Вариант хранилища превью не соответствует своему идентификатору')
+    if kind == 'ram' and not rest:
+        return {'kind': 'ram'}
+    if kind == 'file':
+        disk, part = find_partition(snapshot, text(rest, 'device'))
+        usable_disk(snapshot, disk['path'])
+        if disk['path'] == target or part['path'] == live_source():
+            raise ValidationError('Файл превью размещается только на другом носителе')
+        if part.get('fstype') not in FILE_FS or part['mounted']:
+            raise ValidationError(f'На {part["path"]} нельзя разместить файл превью')
+        return {'kind': 'file', 'device': part['path'], 'fstype': part['fstype']}
+    if kind == 'part':
+        disk_path, _, start = rest.rpartition(':')
+        disk = usable_disk(snapshot, text(disk_path, 'disk'))
+        if not start.isdigit():
+            raise ValidationError('Некорректное начало раздела превью')
+        if disk['path'] == target:
+            selected_disk(snapshot, target)
+        return {'kind': 'partition', 'disk': disk['path'], 'start': int(start)}
+    if kind == 'shrink':
+        disk, part = find_partition(snapshot, text(rest, 'device'))
+        if disk['path'] != target:
+            raise ValidationError('Ужимать можно только раздел целевого диска')
+        selected_disk(snapshot, target)
+        if disk.get('pttype') != 'gpt' or part.get('fstype') not in SHRINK_FS or part['mounted']:
+            raise ValidationError(f'Раздел {part["path"]} нельзя ужать')
+        return {'kind': 'shrink', 'disk': disk['path'], 'device': part['path'], 'fstype': part['fstype']}
+    if kind == 'erase':
+        if rest != target:
+            raise ValidationError('Стереть можно только выбранный целевой диск')
+        selected_disk(snapshot, target)
+        usable_disk(snapshot, target)
+        return {'kind': 'erase', 'disk': target}
+    raise ValidationError('Неизвестный вид хранилища превью')
+
+
+def preview_partition(snapshot, disk_path, device):
+    """A partition of that disk created by this helper (GPT name AGIOS-PREVIEW), not in use."""
+    disk, part = find_partition(snapshot, text(device, 'device'))
+    if disk['path'] != disk_path:
+        raise ValidationError(f'{device} не является разделом {disk_path}')
+    if part.get('partlabel') != NAME or part['mounted']:
+        raise ValidationError(f'{device} не является свободным разделом превью {NAME}; он не удаляется')
+    usable_disk(snapshot, disk_path)
+    return disk, part
+
+
+def checked_state(state, snapshot):
+    """Check a revert record kept by the site (and therefore writable by user agi)."""
+    if not isinstance(state, dict) or not isinstance(state.get('kind'), str) or state['kind'] not in STATE_KEYS:
+        raise ValidationError('Неизвестный вид хранилища превью')
+    kind = state['kind']
+    required = STATE_KEYS[kind] - {'backup', 'folder'}
+    if not required <= set(state) <= STATE_KEYS[kind]:
+        raise ValidationError('Некорректная запись хранилища превью')
+    if kind == 'ram':
+        text(state['device'], 'device', re.compile(r'/dev/zram[0-9]{1,3}'))
+        if state['mount'] != str(PREVIEW / 'ram'):
+            raise ValidationError('Некорректная точка монтирования превью')
+        return state
+    if kind == 'file':
+        if state['mount'] != str(PREVIEW / 'media') or state.get('folder', str(PREVIEW / 'media' / NAME)) != str(PREVIEW / 'media' / NAME):
+            raise ValidationError('Некорректная точка монтирования превью')
+        disk, part = find_partition(snapshot, text(state['device'], 'device'))
+        usable_disk(snapshot, disk['path'])
+        if part.get('fstype') not in FILE_FS or (part['mounted'] and mount_source(PREVIEW / 'media') != part['path']):
+            raise ValidationError(f'На {part["path"]} нет файла превью, который можно удалить')
+        return {**state, 'fstype': part['fstype']}
+    if kind == 'erase':
+        return state
+    disk_path = text(state['disk'], 'disk')
+    disk, part = preview_partition(snapshot, disk_path, state['device'])
+    if kind == 'partition':
+        return state
+    # shrink: the shrunk partition directly precedes the preview partition, which gives its space back.
+    shrunk_disk, shrunk = find_partition(snapshot, text(state['shrunk'], 'shrunk'))
+    number = whole(state['number'], 'number', 1, 999)
+    original_end = whole(state['original_end'], 'original_end', 1, 2**48)
+    if shrunk_disk['path'] != disk_path or partition_number(disk_path, shrunk['path']) != number or shrunk['mounted']:
+        raise ValidationError('Некорректная запись ужатого раздела')
+    if shrunk.get('fstype') not in SHRINK_FS or state['fstype'] != shrunk['fstype']:
+        raise ValidationError('Файловая система ужатого раздела изменилась')
+    # Growing back to original_end must only reclaim the preview partition's space.
+    shrunk_start, preview_start = int(shrunk['start']), int(part['start'])
+    between = [p for p in disk['partitions'] if p['path'] not in (part['path'], shrunk['path'])
+               and shrunk_start <= int(p['start'] or 0) <= original_end]
+    if not shrunk_start < preview_start <= original_end <= disk['size'] // SECTOR - 34 or between:
+        raise ValidationError('Граница ужатого раздела не соответствует разделу превью; откат не выполняется')
+    return state
+
+
 def probe(request):
-    needed, target, vm_memory = int(request['needed']), request['target'], int(request['vm_memory'])
-    compression = float(request.get('compression', COMPRESSION))
-    snapshot = inventory()
+    needed, target, vm_memory, compression = sizing(request)
+    snapshot = restrict_test_targets(inventory())
     disks = {d['path']: d for d in snapshot['disks']}
     if target not in disks:
         raise ValidationError('Целевой диск не найден')
+    selected_disk(snapshot, target)
+    live_disk = live_medium_disk(snapshot)
     options = []
     budget = mem_available() - vm_memory - RESERVE
     options.append({'id': 'ram', 'kind': 'ram', 'title': 'В оперативной памяти',
@@ -137,8 +373,10 @@ def probe(request):
                     'revert': 'Диски не затрагиваются: выключить VM — и всё',
                     'destructive': False, 'confirm': None, 'available': max(0, budget),
                     'fits': needed / compression <= budget, 'order': 0})
-    live_medium = read_command(['findmnt', '-n', '-o', 'SOURCE', '/run/archiso/bootmnt']).strip()
+    live_medium = live_source()
     for disk in snapshot['disks']:
+        if disk['path'] == live_disk or disk.get('ro'):
+            continue
         tran = disk.get('tran') or ('usb' if disk.get('rm') else 'disk')
         if disk['path'] != target:
             for part in disk['partitions']:
@@ -187,8 +425,7 @@ def probe(request):
 
 
 def gpt_backup(disk):
-    PREVIEW.mkdir(parents=True, exist_ok=True)
-    backup = PREVIEW / (Path(disk).name + '.gpt')
+    backup = private_dir(PREVIEW) / (Path(disk).name + '.gpt')
     sh(['sgdisk', f'--backup={backup}', disk])
     return str(backup)
 
@@ -216,41 +453,50 @@ def release_mount(point):
 
 
 def image_file(directory, size):
-    directory.mkdir(parents=True, exist_ok=True)
+    """Create the preview image for QEMU (user agi) without following planted symlinks."""
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise ValidationError(f'{directory} не является обычным каталогом; превью здесь не создаётся')
+    directory.mkdir(exist_ok=True)
     path = directory / 'preview.qcow2'
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValidationError(f'{path} не является обычным файлом; превью здесь не создаётся')
     sh(['qemu-img', 'create', '-q', '-f', 'qcow2', str(path), str(size)])
-    shutil.chown(directory, 'agi', 'agi')
-    shutil.chown(path, 'agi', 'agi')
+    for item in (directory, path):
+        os.chown(item, *agi_ids(), follow_symlinks=False)
     return {'format': 'qcow2', 'path': str(path)}
 
 
+def agi_ids():
+    import pwd
+    entry = pwd.getpwnam('agi')
+    return entry.pw_uid, entry.pw_gid
+
+
 def prepare(request):
-    option, needed = request['option'], int(request['needed'])
+    needed, target, vm_memory, compression = sizing(request)
+    option = resolve_option(request['option'], target, restrict_test_targets(inventory()))
     virtual = min(max(needed * 2, 16 * GIB), 64 * GIB)  # Sparse capacity of an image-backed preview.
     kind = option['kind']
-    PREVIEW.mkdir(parents=True, exist_ok=True)
-    PREVIEW.chmod(0o755)  # QEMU runs as agi and must reach the image inside.
+    private_dir(PREVIEW)  # 0755: QEMU runs as agi and must reach the image inside.
     if kind == 'ram':
-        budget = mem_available() - int(request['vm_memory']) - RESERVE
-        if needed / float(request.get('compression', COMPRESSION)) > budget:
+        budget = mem_available() - vm_memory - RESERVE
+        if needed / compression > budget:
             raise ValidationError('Для превью в памяти недостаточно свободной RAM')
         subprocess.run(['modprobe', 'zram'], capture_output=True, timeout=30)
         device = sh(['zramctl', '--find', '--size', str(virtual), '--algorithm', 'zstd']).strip()
         Path('/sys/block', Path(device).name, 'mem_limit').write_text(str(int(budget)))
         sh(['mkfs.ext4', '-q', '-O', '^has_journal', device])
-        point = PREVIEW / 'ram'
-        point.mkdir(exist_ok=True)
+        point = private_dir(PREVIEW / 'ram')
         release_mount(point)
-        sh(['mount', '-o', 'discard,noatime', device, str(point)])
-        shutil.chown(point, 'agi', 'agi')
+        sh(['mount', '-o', 'discard,noatime,' + MOUNT_SAFE, device, str(point)])
+        os.chown(point, *agi_ids(), follow_symlinks=False)
         return {'image': image_file(point, virtual), 'revert': {'kind': 'ram', 'device': device, 'mount': str(point)},
                 'monitor': f'/sys/block/{Path(device).name}/mm_stat', 'budget': int(budget)}
     if kind == 'file':
-        point = PREVIEW / 'media'
-        point.mkdir(exist_ok=True)
+        point = private_dir(PREVIEW / 'media')
         release_mount(point)
         fstype = option['fstype']
-        options = 'noatime'
+        options = 'noatime,' + MOUNT_SAFE
         if fstype in ('ntfs', 'exfat', 'vfat'):
             options += ',uid=agi,gid=agi'
         sh(['mount', '-o', options, *(['-t', 'ntfs3'] if fstype == 'ntfs' else []), option['device'], str(point)])
@@ -266,15 +512,15 @@ def prepare(request):
         disk = option['disk']
         current = inventory_disk(disk)
         if not current.get('pttype'):
-            if current.get('fstype'):
-                raise ValidationError('На носителе есть файловая система без таблицы разделов')
+            if current.get('fstype') or not looks_blank(disk):
+                raise ValidationError('На носителе есть данные без таблицы разделов; он не размечается')
             sh(['sgdisk', '--clear', disk])
         backup = gpt_backup(disk)
         regions = dict((s, e) for s, e in free_regions(inventory_disk(disk)))
         start = int(option['start'])
         if start not in regions:
             raise ValidationError('Свободное место на носителе изменилось; обновите варианты')
-        end = min(regions[start], start + max(needed * 2, 16 * GIB) // SECTOR - 1) if disk != request['target'] else regions[start]
+        end = min(regions[start], start + max(needed * 2, 16 * GIB) // SECTOR - 1) if disk != target else regions[start]
         end = (end + 1) // ALIGN * ALIGN - 1
         device = new_partition(disk, start, end)
         return {'image': {'format': 'raw', 'path': device},
@@ -285,6 +531,8 @@ def prepare(request):
         if part['mounted']:
             raise ValidationError('Раздел смонтирован')
         new_size = (part['size'] - needed) // MIB * MIB
+        if new_size < GIB:
+            raise ValidationError('Раздел слишком мал, чтобы освободить нужное место')
         if fstype == 'ntfs':
             sh(['ntfsresize', '--no-action', '--force', '--size', str(new_size), device], timeout=1800)
             sh(['ntfsresize', '--force', '--size', str(new_size), device], timeout=7200, input_text='y\n')
@@ -292,7 +540,7 @@ def prepare(request):
             sh(['e2fsck', '-f', '-y', device], timeout=1800)
             sh(['resize2fs', device, f'{new_size // MIB}M'], timeout=7200)
         backup = gpt_backup(disk)
-        number = int(''.join(c for c in device[len(disk):] if c.isdigit()))
+        number = partition_number(disk, device)
         start = int(part['start'])
         new_end = start + new_size // SECTOR - 1
         sh(['parted', '--script', disk, 'resizepart', str(number), f'{new_end}s'])
@@ -317,7 +565,7 @@ def prepare(request):
 
 
 def delete_partition(disk, device):
-    number = int(''.join(c for c in device[len(disk):] if c.isdigit()))
+    number = partition_number(disk, device)
     sh(['wipefs', '--all', device])
     sh(['sgdisk', f'--delete={number}', disk])
     sh(['partprobe', disk])
@@ -325,17 +573,32 @@ def delete_partition(disk, device):
 
 
 def revert(request):
-    state = request['state']
+    state = checked_state(request['state'], inventory())
     kind = state['kind']
     if kind == 'ram':
         subprocess.run(['umount', state['mount']], capture_output=True, timeout=60)
         sh(['zramctl', '--reset', state['device']])
         return {'reverted': True, 'text': 'Память освобождена; диски не менялись'}
     if kind == 'file':
-        if Path(state['folder']).is_dir():
-            shutil.rmtree(state['folder'])
+        point = Path(state['mount'])
+        if mount_source(point) != state['device']:
+            # After a Live restart the medium is no longer mounted: mount it again to remove the file.
+            release_mount(private_dir(point))
+            options = 'noatime,' + MOUNT_SAFE
+            sh(['mount', '-o', options, *(['-t', 'ntfs3'] if state['fstype'] == 'ntfs' else []), state['device'], str(point)])
+        # Only what prepare created goes: the image, then the folder if nothing else is in it.
+        folder, image = point / NAME, point / NAME / 'preview.qcow2'
+        if folder.is_symlink():
+            folder.unlink()
+        elif folder.is_dir():
+            if image.is_symlink() or image.is_file():
+                image.unlink()
+            try:
+                folder.rmdir()
+            except OSError:
+                pass  # The user put something else there; it stays.
         sh(['sync'])
-        subprocess.run(['umount', state['mount']], capture_output=True, timeout=120)
+        subprocess.run(['umount', str(point)], capture_output=True, timeout=120)
         return {'reverted': True, 'text': 'Файл превью удалён; носитель в исходном состоянии'}
     if kind == 'partition':
         delete_partition(state['disk'], state['device'])
@@ -360,16 +623,11 @@ def main():
     try:
         if os.geteuid() != 0 or not live_environment():
             raise ValidationError('Операции с носителями разрешены только внутри Live')
-        request = json.loads(sys.stdin.readline(1_000_000))
-        global PREVIEW
-        data_root = Path(request.get('data_root', DATA_ROOT))
-        if not data_root.is_absolute():
-            raise ValidationError('Некорректный каталог данных')
-        PREVIEW = data_root / 'preview'
+        request = checked_request(json.loads(sys.stdin.readline(1_000_000)))
         handler = {'probe': probe, 'prepare': prepare, 'revert': revert}[request['op']]
         print(json.dumps({'result': handler(request)}, ensure_ascii=False))
     except Exception as exc:
-        text = str(exc) if isinstance(exc, (ValidationError, KeyError)) else 'Внутренняя ошибка операции с носителем'
+        text = str(exc) if isinstance(exc, ValidationError) else 'Внутренняя ошибка операции с носителем'
         if isinstance(exc, subprocess.CalledProcessError):
             text = 'Команда завершилась ошибкой: ' + ' '.join(exc.cmd[:2])
         print(json.dumps({'error': text}, ensure_ascii=False))
