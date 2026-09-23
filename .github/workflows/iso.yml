@@ -1,0 +1,142 @@
+name: Live ISO
+
+# Reproducible Live ISO: unit tests, mkarchiso in the pinned Arch container
+# (scripts/ci/build-iso.sh), sha256, smoke boot in QEMU (UEFI and BIOS), artifacts.
+# A tag v* additionally publishes a GitHub release with the ISO and the changelog.
+# Runs on GitHub-hosted runners (KVM is enabled there) or, when the repository
+# variable AGIOS_ISO_RUNNER names a label, on a self-hosted runner with KVM,
+# Docker, QEMU and OVMF. See docs/ci.md.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - archiso/**
+      - web/**
+      - scripts/build-iso.sh
+      - scripts/ci/**
+      - scripts/web/**
+      - .github/workflows/iso.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iso-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: tests
+    runs-on: ${{ vars.AGIOS_ISO_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare the GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          # Room for the mkarchiso work tree (~8 GB) and the ISO; the toolchains are unused.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo mkdir -p /mnt/agios-work && sudo chown "$(id -u):$(id -g)" /mnt/agios-work
+          echo AGIOS_WORK_DIR=/mnt/agios-work >> "$GITHUB_ENV"
+          # KVM for the smoke boot.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends qemu-system-x86 qemu-utils ovmf squashfs-tools rsync python-is-python3
+          df -h / /mnt
+      - name: Build the ISO
+        run: scripts/ci/build-iso.sh
+      - name: Check the release size limit
+        run: |
+          # GitHub release assets must stay below 2 GiB.
+          size=$(stat -c %s out/agi-os-*.iso)
+          echo "ISO size: $size bytes"
+          {
+            echo "### Live ISO"
+            echo "- \`$(basename out/agi-os-*.iso)\`: $size bytes, $(( size * 100 / 2147483648 ))% of the 2 GiB release asset limit"
+            echo "- sha256 \`$(cut -d' ' -f1 out/agi-os-*.iso.sha256)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          (( size < 2147483648 )) || { echo '::error::ISO exceeds the 2 GiB release asset limit'; exit 1; }
+      - name: Smoke boot (UEFI)
+        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware uefi --memory 6144 --expect-revision "$(git rev-parse HEAD)" --logs out/smoke-uefi
+      - name: Smoke boot (BIOS)
+        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware bios --memory 6144 --expect-revision "$(git rev-parse HEAD)" --logs out/smoke-bios
+      - name: Upload the ISO
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agi-os-iso
+          path: |
+            out/agi-os-*.iso
+            out/agi-os-*.iso.sha256
+            out/build-info.json
+          compression-level: 0
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
+          if-no-files-found: error
+      - name: Upload smoke-boot logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-boot-logs
+          path: out/smoke-*
+          retention-days: 7
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agi-os-iso
+          path: out
+      - name: Changelog
+        run: scripts/ci/changelog.sh "$GITHUB_REF_NAME" out/build-info.json > out/CHANGELOG.md
+      - name: Verify the checksum
+        run: cd out && sha256sum --check agi-os-*.iso.sha256
+      - name: Sign the release
+        # SHA256SUMS and detached OpenPGP signatures (docs/download.md). The private key
+        # lives only in the secret and in a throwaway GNUPGHOME of this job.
+        env:
+          AGIOS_SIGNING_KEY: ${{ secrets.AGIOS_SIGNING_KEY }}
+          AGIOS_SIGNING_PASSPHRASE: ${{ secrets.AGIOS_SIGNING_PASSPHRASE }}
+          AGIOS_SIGNING_FINGERPRINT: ${{ vars.AGIOS_SIGNING_FINGERPRINT }}
+          AGIOS_ALLOW_UNSIGNED_RELEASE: ${{ vars.AGIOS_ALLOW_UNSIGNED_RELEASE }}
+        run: |
+          if [[ -z $AGIOS_SIGNING_KEY || -z $AGIOS_SIGNING_FINGERPRINT ]]; then
+            if [[ $AGIOS_ALLOW_UNSIGNED_RELEASE == 1 ]]; then
+              echo '::warning::Release published WITHOUT signatures: no signing key is configured'
+              exit 0
+            fi
+            echo '::error::No signing key: set the secret AGIOS_SIGNING_KEY and the variable AGIOS_SIGNING_FINGERPRINT (docs/download.md)'
+            exit 1
+          fi
+          GNUPGHOME=$(mktemp -d); export GNUPGHOME
+          trap 'gpgconf --kill all; rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$AGIOS_SIGNING_KEY" | gpg --batch --quiet --import
+          python3 -B scripts/release/sign-iso.py out --export-key
+          # The published files must pass the same check users run.
+          python3 -B scripts/release/verify-iso.py out/agi-os-*.iso --fingerprint "$AGIOS_SIGNING_FINGERPRINT"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(out/agi-os-*.iso out/agi-os-*.iso.sha256 out/build-info.json)
+          if [[ -f out/SHA256SUMS ]]; then files+=(out/SHA256SUMS out/*.sig out/agios-release-key.asc); fi
+          gh release create "$GITHUB_REF_NAME" --title "AGIOS $GITHUB_REF_NAME" --notes-file out/CHANGELOG.md --verify-tag \
+            "${files[@]}"

@@ -1,0 +1,46 @@
+name: Tests
+
+# Unit tests in the same Arch Linux userland the Live image is built from
+# (pinned container image + Arch Linux Archive snapshot from scripts/ci/arch-snapshot).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel-20260920.0.596911@sha256:8745817f349ed24373341ddb92776209eeec3f0364ea48f7f645ac5800d30a50
+    steps:
+      # The image has no git yet, so checkout downloads the tree through the REST API.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tools from the pinned Arch snapshot
+        run: |
+          snapshot=$(tr -d '[:space:]' < scripts/ci/arch-snapshot)
+          [[ $snapshot =~ ^[0-9]{4}/[0-9]{2}/[0-9]{2}$ ]]
+          echo "Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+          pacman -Syuu --noconfirm --needed python python-aiohttp nodejs git
+          # Tests run as an ordinary user, like on a developer machine (root changes geteuid branches).
+          useradd --create-home tester
+          chown -R tester: .
+      - name: Installer tests
+        run: runuser -u tester -- python -B -m unittest discover -s tests -v
+      - name: Website tests
+        run: runuser -u tester -- python -B -m unittest discover -s web/tests -v
+      - name: JavaScript syntax
+        run: for file in web/static/*.js; do node --check "$file"; done
+      - name: Shell and Python syntax
+        run: |
+          for file in scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
+          python -B -c 'import ast, pathlib, sys; [ast.parse(p.read_text(), str(p)) for p in pathlib.Path(".").rglob("*.py") if ".local" not in p.parts]'

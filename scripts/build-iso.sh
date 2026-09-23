@@ -6,6 +6,10 @@
 # the pinned guacd runtime (a squashfs made from the official Docker image).
 # mkarchiso itself needs root; run the whole script as root or pass --prepare-only
 # and then run the printed mkarchiso command yourself.
+#
+# Reproducible builds (CI, see docs/ci.md): AGIOS_ARCH_SNAPSHOT=YYYY/MM/DD takes every
+# package from that day of the Arch Linux Archive instead of the host mirrorlist, and
+# SOURCE_DATE_EPOCH fixes timestamps and the ISO version.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
@@ -13,7 +17,14 @@ prepare_only=false
 [[ ${1:-} == --prepare-only ]] && prepare_only=true
 build=.local/build
 profile=$build/profile
-for tool in mkarchiso docker curl tar sqfstar python; do
+snapshot=${AGIOS_ARCH_SNAPSHOT:-}
+if [[ -n $snapshot && ! $snapshot =~ ^[0-9]{4}/[0-9]{2}/[0-9]{2}$ ]]; then
+    echo "AGIOS_ARCH_SNAPSHOT must look like 2026/09/20" >&2; exit 1
+fi
+tools=(curl tar python rsync sha256sum)
+$prepare_only || tools+=(mkarchiso)
+[[ -f $build/guacd.sqfs ]] || tools+=(docker sqfstar)
+for tool in "${tools[@]}"; do
     command -v "$tool" >/dev/null || { echo "Missing dependency: $tool" >&2; exit 1; }
 done
 mkdir -p "$build" .local out
@@ -23,12 +34,15 @@ if [[ ! -f "$archive" ]]; then
     curl -fL --retry 2 https://archive.apache.org/dist/guacamole/1.6.0/source/guacamole-client-1.6.0.tar.gz -o "$archive.tmp"
     mv "$archive.tmp" "$archive"
 fi
+# Checksum published by Apache next to the release (guacamole-client-1.6.0.tar.gz.sha256).
+echo "81f9fd5a7b4377fb0ee295d0d4fec92e9667f2aafaa3d0ed8937f535deabdee4  $archive" | sha256sum --check --quiet
 tar -xzf "$archive" -C .local guacamole-client-1.6.0/guacamole-common-js guacamole-client-1.6.0/LICENSE guacamole-client-1.6.0/NOTICE
 python scripts/web/prepare-assets.py
 # guacd runtime: the official pinned image exported once into a read-only squashfs.
+guacd_image=guacamole/guacd:1.6.0@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f
 if [[ ! -f "$build/guacd.sqfs" ]]; then
-    docker pull guacamole/guacd:1.6.0
-    container=$(docker create guacamole/guacd:1.6.0)
+    docker pull "$guacd_image"
+    container=$(docker create "$guacd_image")
     docker export "$container" | sqfstar -quiet -no-progress -comp zstd "$build/guacd.sqfs.tmp"
     docker rm "$container" >/dev/null
     mv "$build/guacd.sqfs.tmp" "$build/guacd.sqfs"
@@ -44,6 +58,11 @@ cp scripts/web/qa-guest.py "$share/qa-guest.py"
 mkdir -p "$profile/airootfs/usr/share/licenses/agi-guacamole"
 cp .local/guacamole-client-1.6.0/LICENSE .local/guacamole-client-1.6.0/NOTICE "$profile/airootfs/usr/share/licenses/agi-guacamole/"
 git -C "$repo" rev-parse HEAD > "$share/source-revision" 2>/dev/null || true
+if [[ -n $snapshot ]]; then
+    # Build-time only: mkarchiso resolves packages with this file; the Live keeps its own pacman.conf.
+    sed -i "s|^Include = /etc/pacman.d/mirrorlist\$|Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch|" "$profile/pacman.conf"
+    grep -q "^Server = https://archive.archlinux.org/repos/$snapshot/" "$profile/pacman.conf" || { echo 'Snapshot not applied' >&2; exit 1; }
+fi
 work=$build/work
 command=(mkarchiso -v -w "$repo/$work" -o "$repo/out" "$repo/$profile")
 if $prepare_only || [[ $EUID -ne 0 ]]; then
