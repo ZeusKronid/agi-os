@@ -5,9 +5,7 @@ import { sectionIds, siteConfig } from '@/shared/config'
 import { ButtonLink, buttonStyles } from '@/shared/ui/button'
 import { Container } from '@/shared/ui/container'
 import { ArrowDownIcon } from '@/shared/ui/icon'
-import { Sunburst } from '@/shared/ui/sunburst'
-
-import { mountLiveSun } from '../lib/mount-live-sun'
+import { mountLiveSun, Sunburst } from '@/shared/ui/sunburst'
 
 // Одна вертикальная ось: лого в шапке → луч восхода → заголовок → подстрочник → кнопки → окно демо.
 // Вступление — CSS с первой отрисовки, только transform и opacity (гидрация его не замораживает).

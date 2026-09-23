@@ -44,11 +44,6 @@
 
   --color-ok: #5fe3a1;
 
-  /* Светлый statement-футер. */
-  --color-cream: #f2e8da;
-  --color-cream-ink: #0f0d0b;
-  --color-cream-muted: #7a6a55;
-
   --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-serif: 'Newsreader', Georgia, 'Times New Roman', serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
