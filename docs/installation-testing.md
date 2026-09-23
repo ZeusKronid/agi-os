@@ -38,8 +38,8 @@ boot; shut down and use `--mode disk` for acceptance. Graphical compatibility wi
 GPUs/Wi-Fi hardware still needs hardware testing.
 
 Record the source revision and uncommitted changes, ISO SHA256, QEMU version,
-firmware mode and VM parameters. Verify the built ISO contains the native app and
-its autostart entry. Images from 2026-09-09 predate this application.
+firmware mode and VM parameters. Verify the built ISO contains the Live website
+launcher (`agi-installer`) and its autostart entry.
 
 ## Provider and UI checks
 
