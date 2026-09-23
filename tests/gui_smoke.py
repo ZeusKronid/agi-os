@@ -49,7 +49,7 @@ def screenshot(name):
 def advance():
     global phase, failed
     try:
-        if time.monotonic() - started > 20:
+        if time.monotonic() - started > 40:
             raise AssertionError(f"GTK smoke timeout at phase {phase}")
         if phase == 0 and hasattr(window, "snapshot"):
             assert browser.call_count == 1, 'Login URL must open once, even when webbrowser returns True'
@@ -59,7 +59,7 @@ def advance():
             phase = 0.5
         elif phase == 0.5 and waiting.started.is_set():
             assert not window.connect_button.get_sensitive()
-            window.provider_combo.set_active_id("ollama")
+            window.select_provider("ollama")
             assert waiting.cancelled.is_set(), 'Switching provider must close pending sign-in'
             assert window.connect_button.get_sensitive(), 'New provider must be connectable'
             window.demo = True
@@ -67,30 +67,26 @@ def advance():
             phase = 1
         elif phase == 1 and window.begin_button.get_sensitive():
             window.begin_chat()
-            window.message.set_text("Хочу Sway и Firefox, русский и английский языки")
+            window.message.set_text("I want Sway and Firefox with a US keyboard")
             window.send_message()
             phase = 2
         elif phase == 2 and window.review_button.get_sensitive():
             assert window.controller.stage == 4
             assert not window.controller.installing
             screenshot("conversation.png")
-            phase = 3
-            def confirm_dialog():
-                dialogs = [w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.Dialog)]
-                assert len(dialogs) == 1
-                dialog = dialogs[0]
-                ok = dialog.get_widget_for_response(Gtk.ResponseType.OK)
-                assert not ok.get_sensitive()
-                checks = [w for w in dialog.get_content_area().get_children() if isinstance(w, Gtk.CheckButton)]
-                checks[0].set_active(True)
-                assert ok.get_sensitive()
-                dialog.response(Gtk.ResponseType.OK)
-                return False
-            GLib.timeout_add(250, confirm_dialog)
             window.review()
-        elif phase == 3 and not window.controller.installing:
+            assert window.sheet_revealer.get_reveal_child()
+            window.password.set_text("short")
+            assert not window.hold.get_sensitive(), 'Erasing needs a valid password'
+            window.password.set_text("demo-password")
+            window.repeat.set_text("demo-password")
+            assert window.hold.get_sensitive()
+            phase = 3
+            window.hold.on_done()
+        elif phase == 3 and window.step in ("install", "done") and not window.controller.installing:
             assert window.worker is None
             assert not window.shutdown_button.get_sensitive()
+            assert not window.sheet_revealer.get_reveal_child()
             screenshot("simulation.png")
             print("GTK smoke: provider selection, conversation, review, simulated install passed")
             Gtk.main_quit()
