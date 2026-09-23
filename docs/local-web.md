@@ -78,12 +78,24 @@ connect a provider.
 
 ## Live runtime
 
-- `agi-web.service`: website/controller at `127.0.0.1:8787` (user `agi`, groups
-  `kvm disk optical`). Root helpers via `sudo -n`: `storage_worker.py`
+- `agi-web.service`: website/controller at `127.0.0.1:8787` (system user
+  `agi-web`, groups `kvm render video disk optical`, state in `/var/lib/agi-os`
+  with mode 0700). Root helpers via `sudo -n`: `storage_worker.py`
   (probe/prepare/revert), `finalize_worker.py`.
-- `agi-guacd.service`: Guacamole gateway at `127.0.0.1:14822`.
+- `agi-guacd.service`: Guacamole gateway at `127.0.0.1:14822` (user `agi-web`).
 - `agi-guest.service`: the installer inside the inner VM only.
-- `agi-qa.service`: test instrumentation, active only with the fw_cfg marker.
+- `agi-qa.service`: test instrumentation, active only with the fw_cfg marker
+  (runs as root there; it never starts on real hardware).
+
+Privileges in Live (`etc/sudoers.d/10-agi-live`): only `agi-web` may use sudo,
+and only for the exact command lines the site runs — the two root helpers,
+`pacman -Sy --noconfirm` (package catalog), `shutdown -h|-r +1` and, on test
+stands, reading the fw_cfg mirror value. The desktop user `agi` (browser,
+terminal) has no sudo, no `wheel` membership and no disk group; the ChatGPT
+sign-in adapter runs under `agi-web` inside bubblewrap. All passwords (`root`, `agi`, `agi-web`) are locked; LightDM
+autologin of `agi` is the only login, there is no root autologin on a console.
+Because the site has no desktop session, the ChatGPT sign-in page is opened by
+the site's own browser tab (`login_url` in `/api/state`), not by `xdg-open`.
 
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.

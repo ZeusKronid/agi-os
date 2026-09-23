@@ -445,6 +445,11 @@ def inventory_disk(disk):
     return next(d for d in inventory()['disks'] if d['path'] == disk)
 
 
+def site_owner():
+    """The unprivileged website that called this helper through sudo (it runs QEMU)."""
+    return int(os.environ.get('SUDO_UID', 0)), int(os.environ.get('SUDO_GID', 0))
+
+
 def release_mount(point):
     """Never stack a new preview mount over a stale one left by an interrupted attempt."""
     while os.path.ismount(point):
@@ -453,7 +458,7 @@ def release_mount(point):
 
 
 def image_file(directory, size):
-    """Create the preview image for QEMU (user agi) without following planted symlinks."""
+    """Create the preview image for QEMU (the site's user) without following planted symlinks."""
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise ValidationError(f'{directory} не является обычным каталогом; превью здесь не создаётся')
     directory.mkdir(exist_ok=True)
@@ -462,14 +467,8 @@ def image_file(directory, size):
         raise ValidationError(f'{path} не является обычным файлом; превью здесь не создаётся')
     sh(['qemu-img', 'create', '-q', '-f', 'qcow2', str(path), str(size)])
     for item in (directory, path):
-        os.chown(item, *agi_ids(), follow_symlinks=False)
+        os.chown(item, *site_owner(), follow_symlinks=False)
     return {'format': 'qcow2', 'path': str(path)}
-
-
-def agi_ids():
-    import pwd
-    entry = pwd.getpwnam('agi')
-    return entry.pw_uid, entry.pw_gid
 
 
 def prepare(request):
@@ -477,7 +476,7 @@ def prepare(request):
     option = resolve_option(request['option'], target, restrict_test_targets(inventory()))
     virtual = min(max(needed * 2, 16 * GIB), 64 * GIB)  # Sparse capacity of an image-backed preview.
     kind = option['kind']
-    private_dir(PREVIEW)  # 0755: QEMU runs as agi and must reach the image inside.
+    private_dir(PREVIEW)  # 0755: QEMU runs as the website's user and must reach the image inside.
     if kind == 'ram':
         budget = mem_available() - vm_memory - RESERVE
         if needed / compression > budget:
@@ -489,7 +488,7 @@ def prepare(request):
         point = private_dir(PREVIEW / 'ram')
         release_mount(point)
         sh(['mount', '-o', 'discard,noatime,' + MOUNT_SAFE, device, str(point)])
-        os.chown(point, *agi_ids(), follow_symlinks=False)
+        os.chown(point, *site_owner(), follow_symlinks=False)
         return {'image': image_file(point, virtual), 'revert': {'kind': 'ram', 'device': device, 'mount': str(point)},
                 'monitor': f'/sys/block/{Path(device).name}/mm_stat', 'budget': int(budget)}
     if kind == 'file':
@@ -498,7 +497,7 @@ def prepare(request):
         fstype = option['fstype']
         options = 'noatime,' + MOUNT_SAFE
         if fstype in ('ntfs', 'exfat', 'vfat'):
-            options += ',uid=agi,gid=agi'
+            options += ',uid=%d,gid=%d' % site_owner()
         sh(['mount', '-o', options, *(['-t', 'ntfs3'] if fstype == 'ntfs' else []), option['device'], str(point)])
         folder = point / NAME
         stat = os.statvfs(point)

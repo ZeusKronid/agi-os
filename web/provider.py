@@ -1,5 +1,4 @@
 """Providers run in the Live environment. The serial bridge is test-only."""
-import subprocess
 from bridge import BridgeProvider, PORT
 from chatgpt import ChatGPTProvider
 from providers import ProviderError
@@ -39,7 +38,9 @@ class LiveProvider:
             self.backend.close()
 
 
-def connect_chatgpt(model=None):
+def connect_chatgpt(model=None, show_login=lambda url: None):
+    """Sign in to ChatGPT. The site runs as a system user without the Live desktop,
+    so the sign-in page is opened by the browser tab of the site (show_login)."""
     if PORT.exists():
         provider = LiveProvider()
         if model:
@@ -47,8 +48,7 @@ def connect_chatgpt(model=None):
         return provider
     backend = ChatGPTProvider()
     try:
-        models = backend.login(lambda url: subprocess.Popen(
-            ['xdg-open', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        models = backend.login(show_login)
         backend.model = model or models[0]
         return LiveProvider(backend)
     except Exception:
