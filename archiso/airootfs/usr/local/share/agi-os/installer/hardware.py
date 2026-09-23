@@ -338,17 +338,20 @@ def driver_plan(hardware, packages=(), session=""):
             "notes": notes, "unverified": unverified}
 
 
-def initramfs_config(plan, encrypted):
+def initramfs_config(plan, encrypted, hibernate=False):
     """mkinitcpio drop-in for this plan, or '' when the stock configuration is right.
 
     NVIDIA's own modules replace the generic kms hook (it would pull nouveau, which
-    nvidia-utils blacklists); the encrypt hook goes before filesystems.
+    nvidia-utils blacklists); the encrypt hook goes before filesystems. resume must
+    follow encrypt (the swap file lives inside the opened root) and precede
+    filesystems, so the saved image is restored before anything is mounted read-write.
     """
     modules = list(plan.get("modules", []))
-    if not modules and not encrypted:
+    if not modules and not encrypted and not hibernate:
         return ""
     hooks = ["base", "udev", "autodetect", "microcode", "modconf", *([] if modules else ["kms"]),
-             "keyboard", "keymap", "consolefont", "block", *(["encrypt"] if encrypted else []), "filesystems", "fsck"]
+             "keyboard", "keymap", "consolefont", "block", *(["encrypt"] if encrypted else []),
+             *(["resume"] if hibernate else []), "filesystems", "fsck"]
     return ("MODULES=(" + " ".join(modules) + ")\n" if modules else "") + "HOOKS=(" + " ".join(hooks) + ")\n"
 
 

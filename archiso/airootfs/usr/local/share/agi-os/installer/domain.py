@@ -26,7 +26,7 @@ CONFIG_SCHEMA = obj({
     "disk": STRING, "filesystem": STRING, "bootloader": STRING,
     "hostname": STRING, "username": STRING, "locale": STRING,
     "timezone": STRING, "keyboard_layouts": STRINGS,
-    "desktop": STRING, "session": STRING, "packages": STRINGS,
+    "desktop": STRING, "swap": {"type": "string", "enum": ["zram", "hibernate"]}, "session": STRING, "packages": STRINGS,
     "services": STRINGS, "home_files": {"type": "array", "items": obj({
         "path": STRING, "content": STRING})},
     "system_files": {"type": "array", "items": obj({"path": STRING, "content": STRING})},
@@ -40,6 +40,23 @@ REPLY_SCHEMA = obj({
 
 class ValidationError(ValueError):
     pass
+
+
+GIB = 2**30
+SWAP_MODES = ("zram", "hibernate")
+SWAPFILE = "swap/swapfile"  # Relative to the installed root.
+HIBERNATION_FILESYSTEMS = ("ext4", "btrfs", "xfs")
+
+
+def hibernation_swap_size(memory):
+    """Swap file size for hibernation: all of the real computer's RAM, rounded up to GiB.
+
+    MemTotal is the memory the kernel manages (a 16 GiB machine reports ~15.3 GiB), so
+    rounding up gives room for a full image even when the compressor gains nothing."""
+    if type(memory) is not int or memory <= 0:
+        raise ValidationError("Не удалось определить объём оперативной памяти компьютера — "
+                              "без него размер swap для гибернации не рассчитать")
+    return -(-memory // GIB) * GIB
 
 
 def bounded_text(value, name, limit=200):
@@ -76,6 +93,7 @@ class Configuration:
     timezone: str
     keyboard_layouts: tuple
     desktop: str
+    swap: str
     session: str
     packages: tuple
     services: tuple
@@ -85,6 +103,9 @@ class Configuration:
 
     @classmethod
     def parse(cls, data):
+        if isinstance(data, dict) and "swap" not in data:
+            # Configurations and records made before the swap choice keep the old behaviour.
+            data = {**data, "swap": "zram"}
         if not isinstance(data, dict) or set(data) != set(CONFIG_SCHEMA["properties"]):
             raise ValidationError("Конфигурация неполна или содержит неизвестные поля")
         for name in ("disk", "filesystem", "bootloader", "hostname", "username", "locale",
@@ -98,6 +119,11 @@ class Configuration:
             raise ValidationError("Для этой файловой системы пока нет проверенного обработчика")
         if data["bootloader"] not in ("grub", "systemd-boot"):
             raise ValidationError("Для этого загрузчика пока нет обработчика")
+        if data["swap"] not in SWAP_MODES:
+            raise ValidationError("swap: допустимо zram (без гибернации) или hibernate (zram + swap-файл для гибернации)")
+        if data["swap"] == "hibernate" and data["filesystem"] not in HIBERNATION_FILESYSTEMS:
+            raise ValidationError("Гибернация со swap-файлом поддерживается на ext4, btrfs и xfs; "
+                                  "для f2fs выберите другую файловую систему или swap без гибернации")
         if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", data["username"]) or data["username"] in (
                 "root", "agi", "nobody", "daemon", "systemd-network"):
             raise ValidationError("Выберите имя обычного пользователя, отличное от системных аккаунтов")
@@ -164,12 +190,23 @@ class Configuration:
     def digest(self):
         return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True).encode()).hexdigest()
 
+    def swap_summary(self, hardware=None):
+        if self.swap != "hibernate":
+            return "Swap: zram в памяти; гибернация (hibernate) не настраивается"
+        size = ""
+        if hardware and hardware.get("memory"):
+            size = f" {hibernation_swap_size(hardware['memory']) // GIB} ГиБ (объём RAM)"
+        return ("Swap: zram в памяти + swap-файл /" + SWAPFILE + size + " внутри корня"
+                + " (при шифровании — зашифрован вместе с ним)"
+                + " для гибернации; resume и resume_offset в параметрах ядра")
+
     def summary(self, disk, hardware=None):
         fields = [
             f"Удалить ВСЕ данные: {self.disk} · {disk['size'] / 2**30:.1f} ГиБ · {disk.get('model') or 'модель не указана'}"
             + (f" · {disk.get('tran') or 'диск'} {'HDD' if disk.get('rota') else 'SSD'}" if disk.get('rota') is not None else ""),
             f"Серийный номер: {disk.get('serial') or 'не указан'}",
-            "Разметка: весь диск, GPT, отдельный загрузочный раздел и корень; swap — zram в памяти",
+            "Разметка: весь диск, GPT, отдельный загрузочный раздел и корень",
+            self.swap_summary(hardware),
             "Шифрование корня (LUKS2): по выбору в форме подтверждения, пароль вводится отдельно",
             f"Файловая система: {self.filesystem}; загрузчик: {self.bootloader}",
             f"Окружение: {self.desktop}; сессия: {self.session or 'консоль'}",
@@ -217,7 +254,11 @@ system services or boot configuration. session is the installed desktop-file bas
 or an empty string for console. Do not add autologin or passwordless sudo.
 The current executable storage handlers support whole-disk erase with GPT;
 ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
-device by default (no swap partition, no hibernation). Full-root LUKS2 encryption
+device by default (swap="zram": no hibernation). swap="hibernate" adds, next to zram,
+a swap file as large as the computer's RAM inside the root filesystem (encrypted with
+it when LUKS is chosen) and configures resume for hibernation; it costs that much disk
+space (hibernation_swap_file_gib in the hardware data) and works on ext4, btrfs and xfs only (not f2fs). Choose hibernate only when the
+user wants hibernation; laptop users often do, so ask them. Full-root LUKS2 encryption
 is available: the user enables it and enters its passphrase privately in the app's
 confirmation form, never in this dialogue; just tell them it is offered there.
 No dual boot or partition preservation handler exists yet. Explain if these are

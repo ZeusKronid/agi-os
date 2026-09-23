@@ -122,6 +122,15 @@ def shrink_room(partition):
         return None
 
 
+def in_memory(request):
+    """Bytes an in-memory preview really stores: a reserved but never written area (the
+    hibernation swap file) takes room on the image's filesystem, not in zram."""
+    needed, sparse = int(request['needed']), int(request.get('sparse', 0))
+    if not 0 <= sparse <= needed:
+        raise ValidationError('Некорректный размер зарезервированного места')
+    return needed - sparse
+
+
 def probe(request):
     needed, target, vm_memory = int(request['needed']), request['target'], int(request['vm_memory'])
     compression = float(request.get('compression', COMPRESSION))
@@ -136,7 +145,7 @@ def probe(request):
                               + (' — зашифрованные данные не сжимаются' if compression <= 1 else ''),
                     'revert': 'Диски не затрагиваются: выключить VM — и всё',
                     'destructive': False, 'confirm': None, 'available': max(0, budget),
-                    'fits': needed / compression <= budget, 'order': 0})
+                    'fits': in_memory(request) / compression <= budget, 'order': 0})
     live_medium = read_command(['findmnt', '-n', '-o', 'SOURCE', '/run/archiso/bootmnt']).strip()
     for disk in snapshot['disks']:
         tran = disk.get('tran') or ('usb' if disk.get('rm') else 'disk')
@@ -226,13 +235,14 @@ def image_file(directory, size):
 
 def prepare(request):
     option, needed = request['option'], int(request['needed'])
-    virtual = min(max(needed * 2, 16 * GIB), 64 * GIB)  # Sparse capacity of an image-backed preview.
+    # Sparse capacity of an image-backed preview; never below what the system needs.
+    virtual = max(min(max(needed * 2, 16 * GIB), 64 * GIB), needed)
     kind = option['kind']
     PREVIEW.mkdir(parents=True, exist_ok=True)
     PREVIEW.chmod(0o755)  # QEMU runs as agi and must reach the image inside.
     if kind == 'ram':
         budget = mem_available() - int(request['vm_memory']) - RESERVE
-        if needed / float(request.get('compression', COMPRESSION)) > budget:
+        if in_memory(request) / float(request.get('compression', COMPRESSION)) > budget:
             raise ValidationError('Для превью в памяти недостаточно свободной RAM')
         subprocess.run(['modprobe', 'zram'], capture_output=True, timeout=30)
         device = sh(['zramctl', '--find', '--size', str(virtual), '--algorithm', 'zstd']).strip()
