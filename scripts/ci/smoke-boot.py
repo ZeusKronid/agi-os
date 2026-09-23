@@ -165,7 +165,14 @@ def check(qa, expect_revision, deadline):
     system = qa.run('systemctl', 'is-system-running')['stdout'].strip()
     failed = qa.run('systemctl', 'list-units', '--failed', '--plain', '--no-legend')['stdout'].strip()
     log(f'system state: {system}; failed units: {failed or "none"}')
-    return failures, {'system': system, 'failed_units': failed.splitlines(), 'source_revision': revision}
+    journals = {}
+    for line in failed.splitlines():
+        unit = line.split()[0]
+        # Diagnostics only: the QA agent may lack the rights to read the system journal.
+        answer = qa.run('journalctl', '--boot', '--unit', unit, '--no-pager', '--lines', '40')
+        journals[unit] = (answer['stdout'] + answer['stderr']).strip()
+    return failures, {'system': system, 'failed_units': failed.splitlines(), 'source_revision': revision,
+                      'failed_unit_journals': journals}
 
 
 def main():

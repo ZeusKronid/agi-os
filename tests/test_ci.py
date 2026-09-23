@@ -113,6 +113,14 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertTrue(any('agi-web.service is failed' in failure for failure in failures))
         self.assertTrue(any('source revision' in failure for failure in failures))
 
+    def test_failed_units_are_reported_with_their_journal(self):
+        answers = self.healthy()
+        answers['systemctl list-units --failed --plain --no-legend'] = {'code': 0, 'stdout': 'x.service loaded failed failed X\n'}
+        answers['journalctl --boot --unit x.service --no-pager --lines 40'] = {'code': 0, 'stdout': 'x: boom\n', 'stderr': ''}
+        failures, details = self.run_check(answers)
+        self.assertEqual(failures, [])  # informational: a degraded Live still passes
+        self.assertEqual(details['failed_unit_journals'], {'x.service': 'x: boom'})
+
     def test_website_errors_fail_after_the_deadline(self):
         answers = self.healthy()
         answers['http'] = {'error': 'Connection refused'}
