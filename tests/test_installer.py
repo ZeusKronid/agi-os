@@ -125,7 +125,7 @@ class FakeRunner:
         if args[0] == "genfstab":
             return "UUID=installed-uuid / ext4 defaults 0 1\n"
         if "-Qq" in args:
-            return "\n".join(worker.packages_for(Configuration.parse(specification())))
+            return "\n".join(worker.packages_for(Configuration.parse(specification()), demo_inventory()["hardware"]))
         return ""
 
 

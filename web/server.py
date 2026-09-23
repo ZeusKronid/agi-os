@@ -16,6 +16,7 @@ from controller import Controller
 from domain import Configuration, ValidationError
 from providers import APIProvider, ProviderError, PROVIDERS
 from worker import packages_for
+from hardware import describe, driver_plan, profile, virtual
 from runtime import VirtualMachine
 from guacamole import tunnel
 
@@ -123,7 +124,7 @@ class State:
         built = None
         if self.built:
             built_config = Configuration.parse(self.built['configuration'])
-            built = {'summary': built_config.summary(self.built['consent']['disk']), 'target': self.built['consent']['target'],
+            built = {'summary': built_config.summary(self.built['consent']['disk'], self.built.get('hardware')), 'target': self.built['consent']['target'],
                      'encrypted': self.built['encrypted'], 'digest': self.built['consent']['digest'],
                      'storage': self.preview['option']['title'] if self.preview else None,
                      'on_target': bool(self.preview and self.preview['image']['format'] == 'raw'
@@ -135,7 +136,8 @@ class State:
                 'firmware': snapshot['firmware'], 'orphans': orphan_previews(snapshot, current),
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
-                'summary': config.summary(consent['disk']) if config and consent and 'disk' in consent else None,
+                'summary': config.summary(consent['disk'], snapshot['hardware']) if config and consent and 'disk' in consent else None,
+                'hardware': self.hardware_public(config),
                 'consent': consent, 'plan': self.plan, 'events': self.events[-100:], 'running': running,
                 'console_id': self.vm.process.pid if running else None,
                 'vm': self.vm.describe() if self.vm else self.saved_vm,
@@ -145,6 +147,14 @@ class State:
                 'built': built,
                 'can_finalize': bool(self.disk_ready and self.built and self.preview and not running and not busy and self.final['phase'] != 'complete'),
                 'final': self.final}
+
+    def hardware_public(self, config):
+        """The real computer for the page: inventory lines, the drivers the engine adds,
+        and what the preview on virtual devices cannot check."""
+        hardware = profile(self.controller.snapshot['hardware'])
+        plan = driver_plan(hardware, config.packages if config else (), config.session if config else '')
+        return {'lines': describe(hardware), 'packages': plan['packages'], 'services': plan['services'],
+                'notes': plan['notes'], 'unverified': plan['unverified'], 'configured': bool(config), 'virtual': virtual(hardware)}
 
     async def monitor_memory(self):
         """Stop an in-memory preview before the zram budget is exhausted."""
@@ -182,10 +192,11 @@ class State:
             def event(value):
                 self.events.append(value)
                 self.status = value.get('text', self.status)
-            await self.vm.install(config, password, passphrase, event)
+            hardware = profile(self.controller.snapshot['hardware'])
+            await self.vm.install(config, password, passphrase, event, hardware)
             self.phase, self.status = 'ready', 'Система установлена в превью и загружена'
             self.disk_ready = True
-            self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase)}
+            self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase), 'hardware': hardware}
         except asyncio.CancelledError:
             self.phase, self.status = 'stopped', 'VM остановлена. Установка не завершена'
             raise
@@ -300,7 +311,12 @@ async def plan(request):
         state.status = 'Считаю размер системы и ищу место для превью…'
         await asyncio.to_thread(state.refresh_inventory)
         consent = consent_binding(config, state.controller.snapshot)
-        estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config))
+        hardware = state.controller.snapshot['hardware']
+        try:
+            await asyncio.to_thread(state.controller.catalog.validate, driver_plan(hardware, config.packages, config.session)['packages'])
+        except ValidationError as exc:
+            raise ValidationError('Ошибка установщика, не вашего выбора — драйверы по железу отсутствуют в репозиториях: ' + str(exc))
+        estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config, hardware))
         needed = int(estimate['installed'] * 1.2) + 2 * GIB
         # LUKS output is incompressible: an encrypted in-memory preview needs its full size.
         compression = 1.0 if encrypt else 1.3
@@ -335,7 +351,7 @@ async def build(request):
         await asyncio.to_thread(state.refresh_inventory)
         consent = consent_binding(config, state.controller.snapshot)
         if data.get('digest') != state.plan['digest'] or state.plan['consent'] != consent['digest']:
-            raise ValidationError('Конфигурация, диск или варианты хранилища изменились. Рассчитайте место заново')
+            raise ValidationError('Конфигурация, диск, оборудование или варианты хранилища изменились. Рассчитайте место заново')
         option = next((o for o in state.plan['options'] if o['id'] == data.get('option')), None)
         if not option or not option['fits']:
             raise ValidationError('Выберите подходящий вариант хранилища превью')
@@ -448,6 +464,8 @@ async def finalize_task(state, payload):
             event = json.loads(line)
             state.final['events'].append(event)
             state.status = event.get('text', state.status)
+            if event['kind'] == 'final-warning':
+                state.final.setdefault('warnings', []).append(event['text'])
             if event['kind'] == 'finalized':
                 complete, mode = True, event.get('mode')
             if event['kind'] == 'final-error':

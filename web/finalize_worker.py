@@ -11,8 +11,10 @@ the destination is verified:
   another disk) is copied file by file into fresh partitions on the target disk,
   then verified with a checksum pass.
 
-Afterwards the initramfs is rebuilt for this computer's hardware, the boot
-loader is registered with the firmware and a new acceptance ID is recorded.
+Afterwards the drivers derived from this computer's real hardware are completed
+(the preview was installed for the same inventory, so normally nothing is
+missing), the initramfs is rebuilt, the boot loader is registered with the
+firmware and a new acceptance ID is recorded.
 """
 import fcntl
 import json
@@ -26,8 +28,9 @@ import uuid
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import Configuration, ValidationError
+from hardware import driver_plan, initramfs_config, profile
 from system import inventory, live_environment, selected_disk
-from worker import CRYPT_NAME, Runner, emit, partition_path
+from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path
 
 SECTOR = 512
 GIB = 2**30
@@ -266,6 +269,64 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     return boot, root_partition, root, encrypted, dst
 
 
+def missing_drivers(hardware, config, installed):
+    """Driver plan for the real hardware and the part of it absent from the installed system."""
+    plan = driver_plan(hardware, config.packages, config.session)
+    return plan, [p for p in plan['packages'] if p not in installed]
+
+
+def fit_drivers(runner, chroot, dst, config, record, encrypted):
+    """Complete the drivers for the computer Live runs on. The disk is already written
+    here, so nothing in this step may fail the finalization: every problem becomes a
+    warning that the page, the record and agi-os-verify show. The system still boots
+    with the kernel's own drivers."""
+    warnings, plan, missing = [], None, []
+    try:
+        hardware = profile(inventory()['hardware'])
+        installed = set(runner.run([*chroot, 'pacman', '-Qq']).splitlines())
+        plan, missing = missing_drivers(hardware, config, installed)
+        # Recorded before installing: agi-os-verify then checks the real computer's plan,
+        # so a failed top-up stays visible until the user installs the drivers.
+        record['hardware'], record['drivers'] = hardware, plan
+        if missing:
+            emit('final-progress', text='Доустанавливаю драйверы под железо этого компьютера: ' + ', '.join(missing))
+            free = int(runner.run(['df', '--output=avail', '-B1', str(dst)]).split()[-1])
+            if free < 2 * GIB:
+                raise ValidationError('на диске меньше 2 ГиБ свободно')
+            # The target has no sync database (the preview dropped its cache); a plain
+            # -Sy would be a partial upgrade, so the whole system is brought to one repository state.
+            runner.run([*chroot, 'pacman', '-Syu', '--noconfirm', '--needed', '--', *missing], timeout=3600)
+            runner.run([*chroot, 'pacman', '-Scc', '--noconfirm'])
+            record['packages'] = list(dict.fromkeys([*record.get('packages', []), *missing]))
+        else:
+            emit('final-progress', text='Драйверы для железа этого компьютера уже установлены в превью: '
+                 + (', '.join(plan['packages']) or 'дополнительных не требуется'))
+        # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
+        dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
+        if initramfs := initramfs_config(plan, encrypted):
+            dropin.parent.mkdir(exist_ok=True)
+            dropin.write_text(initramfs)
+        elif dropin.exists():
+            dropin.unlink()
+        for service in plan['services']:
+            try:
+                runner.run([*chroot, 'systemctl', 'enable', service])
+            except ValidationError:
+                warnings.append(f'Служба {service} не включена. После входа выполните: sudo systemctl enable --now {service}')
+    except Cancelled:
+        raise
+    except Exception as exc:
+        lines = [l for l in str(exc).splitlines() if l.strip()]
+        reason = next((l for l in reversed(lines) if l.startswith('error:')), lines[0] if lines else type(exc).__name__)
+        warnings.append('Не удалось доустановить драйверы' + (' ' + ', '.join(missing) if missing else '') + ' — ' + reason[:300]
+                        + '. Система загрузится с базовыми драйверами ядра'
+                        + ('; после входа выполните: sudo pacman -Syu ' + ' '.join(missing) if missing else ''))
+    for warning in warnings:
+        emit('final-warning', text=warning)
+    record['warnings'] = record.get('warnings', []) + warnings
+    return plan, missing
+
+
 def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
@@ -320,6 +381,7 @@ def finalize(request, runner):
                 text = '\n'.join(('options ' + options) if line.startswith('options ') else line for line in entry.read_text().splitlines())
                 entry.write_text(text + '\n')
             record['root_uuid'] = root_uuid
+        fit_drivers(runner, chroot, dst, config, record, encrypted)
         emit('final-progress', text='Пересобираю initramfs под оборудование этого компьютера')
         runner.run([*chroot, 'mkinitcpio', '-P'])
         emit('final-progress', text='Регистрирую загрузку установленной системы')

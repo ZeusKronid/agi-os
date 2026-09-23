@@ -87,6 +87,7 @@ function render(state) {
     if (!state.running && client) disconnect();
     $('stop').disabled = finalizing;
     $('resume').disabled = finalizing;
+    renderHardware(state.hardware);
     $('orphans').hidden = !state.orphans || !state.orphans.length;
     if (state.orphans && state.orphans.length && $('orphanList').dataset.key !== JSON.stringify(state.orphans)) {
         $('orphanList').dataset.key = JSON.stringify(state.orphans); $('orphanList').replaceChildren();
@@ -115,9 +116,29 @@ function render(state) {
     if (state.final.error) $('finalError').textContent = state.final.error;
     $('finalProgress').hidden = state.final.phase === 'idle';
     $('finalPhase').textContent = ({working:'Установка на диск компьютера…',error:'Установка не завершена',complete:'Установка завершена'})[state.final.phase] || '';
-    $('finalEvents').textContent = state.final.events.map(e=>e.text).join('\n');
+    $('finalEvents').textContent = state.final.events.filter(e => e.kind !== 'final-warning').map(e=>e.text).join('\n');
+    const warnings = state.final.warnings || [];
+    $('finalWarnings').hidden = !warnings.length;
+    $('finalWarnings').textContent = warnings.length ? 'Замечания: ' + warnings.join(' ') : '';
     $('finalDone').hidden = state.final.phase !== 'complete';
+    $('finalDoneTitle').textContent = warnings.length ? 'Система установлена на диск компьютера — с замечаниями (см. выше)' : 'Система установлена на диск компьютера';
     updateLayoutWarning();
+}
+let lastHardware = '';
+function renderHardware(hardware) {
+    $('hardware').hidden = !hardware;
+    if (!hardware) return;
+    const key = JSON.stringify(hardware) + (current && current.final ? current.final.phase : ''); if (key === lastHardware) return; lastHardware = key;
+    $('hardwareLines').replaceChildren(...hardware.lines.map(line => { const li = document.createElement('li'); li.textContent = line; return li; }));
+    $('hardwareDrivers').textContent = (hardware.configured ? 'Установщик добавит драйверы и прошивки под это железо: ' : 'Пока выбрано по железу (список дополнится после выбора окружения): ')
+        + (hardware.packages.join(', ') || 'дополнительных не требуется')
+        + (hardware.services.length ? '; службы: ' + hardware.services.join(', ') : '') + '.' + (hardware.notes.length ? ' ' + hardware.notes.join('. ') + '.' : '');
+    const done = current && current.final && current.final.phase === 'complete';
+    $('hardwareUnverified').className = hardware.unverified.length ? 'notice' : 'hint';
+    $('hardwareUnverified').textContent = !hardware.unverified.length
+        ? (hardware.virtual ? 'Оборудование виртуальное: превью проверяет его полностью.' : 'Оборудования, которое превью не может проверить, не найдено.')
+        : done ? 'Теперь проверьте на самом компьютере: ' + hardware.unverified.join(', ') + ' — в превью это проверить было нельзя.'
+        : 'Превью работает на виртуальных устройствах и не проверяет: ' + hardware.unverified.join(', ') + '. Это проверяется только после установки на компьютер.';
 }
 function updateLayoutWarning() {
     if (!current || !current.built) return;

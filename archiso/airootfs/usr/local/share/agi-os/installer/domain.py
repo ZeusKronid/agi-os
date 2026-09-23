@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from hardware import describe, driver_plan, virtual
+
 
 STAGES = (
     "Подготовка", "Ваша система", "Диск и разделы", "Подтверждение",
@@ -162,9 +164,10 @@ class Configuration:
     def digest(self):
         return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True).encode()).hexdigest()
 
-    def summary(self, disk):
+    def summary(self, disk, hardware=None):
         fields = [
-            f"Удалить ВСЕ данные: {self.disk} · {disk['size'] / 2**30:.1f} ГиБ · {disk.get('model', '')}",
+            f"Удалить ВСЕ данные: {self.disk} · {disk['size'] / 2**30:.1f} ГиБ · {disk.get('model') or 'модель не указана'}"
+            + (f" · {disk.get('tran') or 'диск'} {'HDD' if disk.get('rota') else 'SSD'}" if disk.get('rota') is not None else ""),
             f"Серийный номер: {disk.get('serial') or 'не указан'}",
             "Разметка: весь диск, GPT, отдельный загрузочный раздел и корень; swap — zram в памяти",
             "Шифрование корня (LUKS2): по выбору в форме подтверждения, пароль вводится отдельно",
@@ -176,6 +179,16 @@ class Configuration:
             f"Службы: {', '.join(self.services) or 'только базовые'}",
             "Требования:\n" + "\n".join(f"• {r}" for r in self.requirements),
         ]
+        if hardware:
+            plan = driver_plan(hardware, self.packages, self.session)
+            fields.append("Оборудование компьютера:\n" + "\n".join(f"• {line}" for line in describe(hardware)))
+            fields.append("Драйверы и прошивки по железу (добавляет установщик): "
+                          + (", ".join(plan["packages"]) or "только базовые")
+                          + (";\nслужбы: " + ", ".join(plan["services"]) if plan["services"] else "")
+                          + ("".join("\n• " + n for n in plan["notes"])))
+            fields.append("Превью работает на виртуальном железе и НЕ проверяет: "
+                          + (", ".join(plan["unverified"]) or ("ничего особенного — оборудование виртуальное" if virtual(hardware)
+                                                               else "особого оборудования не найдено")))
         for path, content in self.home_files:
             fields.append(f"Настройки ~/{path}:\n{content}")
         for path, content in self.system_files:
@@ -211,7 +224,15 @@ No dual boot or partition preservation handler exists yet. Explain if these are
 requested; never misrepresent or silently omit them. User must agree to a supported
 alternative before you propose a configuration. Applications and environments
 are open choices from official core/extra repositories, not a fixed catalog.
-Use detected hardware/firmware and eligible disks supplied by the app. Ask what
+Use detected hardware/firmware and eligible disks supplied by the app: the real GPU,
+Wi-Fi, sound, Bluetooth and chassis are listed there. The app itself adds the driver,
+firmware and microcode packages for that hardware (driver_packages_added_by_app, for a
+console system and for a graphical session);
+do not look them up or add them, and do not add power/audio daemons unless the user
+asks for a specific one. If the user names a specific driver or power/audio daemon
+(nvidia, tlp, pulseaudio…), put it in packages: the app then does not add its own
+counterpart. Tell the user plainly that the preview runs on virtual devices and
+cannot verify the items in preview_cannot_verify. Ask what
 data to preserve; the app obtains destructive consent separately. Never ask for
 passwords or API keys in conversation. User credentials use a private app dialog.
 Return configuration=null while clarifying/searching. Only return a complete

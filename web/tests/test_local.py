@@ -135,7 +135,8 @@ class LocalApiTests(AioHTTPTestCase):
             async def start(self, install=True):
                 if fail: raise RuntimeError('QEMU failed')
                 self.running = True
-            async def install(self, config, password, passphrase, notify):
+            async def install(self, config, password, passphrase, notify, hardware=None):
+                assert hardware is not None and 'gpus' in hardware  # the real computer's inventory reaches the guest
                 notify({'kind': 'progress', 'text': 'Installing'})
                 notify({'kind': 'installed', 'text': 'Installed'})
             async def stop(self): self.running = False

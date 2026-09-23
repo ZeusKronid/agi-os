@@ -37,8 +37,12 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
     checks["Имя компьютера"] = socket.gethostname() == config["hostname"]
     checks["Часовой пояс"] = (system_root / "etc/localtime").resolve() == (system_root / "usr/share/zoneinfo" / config["timezone"]).resolve()
     checks["Язык системы"] = "LANG=" + config["locale"] in (system_root / "etc/locale.conf").read_text().splitlines()
-    checks["Все выбранные пакеты"] = set(record["packages"]) <= set(command(["pacman", "-Qq"])[1].splitlines())
-    for service in dict.fromkeys(["NetworkManager.service", *config["services"]]):
+    installed = set(command(["pacman", "-Qq"])[1].splitlines())
+    checks["Все выбранные пакеты"] = set(record["packages"]) <= installed
+    drivers = record.get("drivers") or {}
+    if drivers.get("packages"):
+        checks["Драйверы под железо компьютера"] = set(drivers["packages"]) <= installed
+    for service in dict.fromkeys(["NetworkManager.service", *drivers.get("services", []), *config["services"]]):
         checks["Автозапуск: " + service] = command(["systemctl", "is-enabled", service])[0] == 0
     checks["Сеть: NetworkManager"] = command(["systemctl", "is-active", "NetworkManager.service"])[0] == 0
     try:
@@ -62,7 +66,7 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
         state["complete"] = all(checks.values()) and state.get("user_checked_requirements", False)
         state_path.write_text(json.dumps(state, indent=2))
         state_path.chmod(0o600)
-    return {"checks": checks, "requirements": config["requirements"],
+    return {"checks": checks, "requirements": config["requirements"], "warnings": record.get("warnings", []),
             "user_checked_requirements": bool(state.get("user_checked_requirements")),
             "complete": correct_system and all(checks.values()) and bool(state.get("user_checked_requirements")),
             "report": str(state_path)}
@@ -100,6 +104,8 @@ def gui(record):
             output.get_buffer().set_text(result)
             return
         text = "\n".join(("✓ " if passed else "○ Не подтверждено: ") + name for name, passed in result["checks"].items())
+        if result.get("warnings"):
+            text += "\n\nЗамечания установки:\n" + "\n".join("• " + item for item in result["warnings"])
         text += "\n\nПроверьте вручную:\n" + "\n".join("• " + item for item in result["requirements"])
         text += "\n\n" + ("Установка проверена." if result["complete"] else "Проверка ещё не завершена.")
         output.get_buffer().set_text(text)
