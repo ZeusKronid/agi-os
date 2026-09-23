@@ -421,7 +421,7 @@ class FinalizeImageTests(unittest.TestCase):
         config = DemoProvider().reply('', [])['configuration']
         config['disk'] = '/dev/sda'
         return {'target': '/dev/sda', 'fingerprint': 'fp-sda', 'configuration': config, 'passphrase': '',
-                'image': image, 'layout': 'alongside', 'confirmation': '/dev/sda'}
+                'image': image, 'layout': 'alongside', 'confirmation': '/dev/sda', 'enroll_keys': False}
 
     def check(self, image):
         with Environment(), patch.object(finalize_worker.os, 'geteuid', return_value=0), \
@@ -600,7 +600,7 @@ class FuzzTests(unittest.TestCase):
         config = DemoProvider().reply('', [])['configuration']
         config['disk'] = '/dev/sda'
         base = {'target': '/dev/sda', 'fingerprint': 'fp-sda', 'configuration': config, 'passphrase': '',
-                'image': {'format': 'raw', 'path': '/dev/sda2'}, 'layout': 'alongside', 'confirmation': '/dev/sda'}
+                'image': {'format': 'raw', 'path': '/dev/sda2'}, 'layout': 'alongside', 'confirmation': '/dev/sda', 'enroll_keys': False}
         with Environment(), patch.object(finalize_worker.os, 'geteuid', return_value=0), \
                 patch.object(finalize_worker, 'live_environment', return_value=True):
             for _ in range(self.ROUNDS):

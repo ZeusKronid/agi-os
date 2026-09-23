@@ -18,11 +18,16 @@ while (($#)); do
         --target-size) target_size=$2; shift 2;;
         --iso) iso=$2; shift 2;;
         --fresh) fresh=true; shift;;
-        *) echo 'Usage: run-live-web-vm.sh [--mode live|disk] [--firmware uefi|bios] [--memory MiB] [--target-size 20G] [--iso PATH] [--fresh]' >&2; exit 1;;
+        *) echo 'Usage: run-live-web-vm.sh [--mode live|disk] [--firmware uefi|uefi-sb|bios] [--memory MiB] [--target-size 20G] [--iso PATH] [--fresh]' >&2; exit 1;;
     esac
 done
 [[ $mode == live || $mode == disk ]] || { echo 'Invalid mode' >&2; exit 1; }
-[[ $firmware == uefi || $firmware == bios ]] || { echo 'Invalid firmware' >&2; exit 1; }
+[[ $firmware == uefi || $firmware == uefi-sb || $firmware == bios ]] || { echo 'Invalid firmware' >&2; exit 1; }
+# uefi-sb: Secure Boot capable OVMF (SMM) whose fresh variable store has no keys, i.e.
+# Setup Mode, as on a computer whose keys were cleared. Enrolled keys persist in
+# .local/live-test/OVMF_VARS-uefi-sb.fd, so --mode disk then boots with Secure Boot on.
+machine=q35
+[[ $firmware == uefi-sb ]] && machine=q35,smm=on
 if [[ -z $iso ]]; then
     shopt -s nullglob; images=(out/agi-os-20*-x86_64.iso); ((${#images[@]})) || { echo 'Build an ISO first: scripts/build-iso.sh' >&2; exit 1; }
     iso=${images[${#images[@]}-1]}
@@ -68,17 +73,22 @@ if [[ $mode == live ]]; then
 fi
 # No KVM async page faults for the outer guest: with nested virtualization and host
 # memory pressure they left guest tasks stuck in kvm_async_pf_task_wait forever.
-args=(-name "AGIOS Live boot — test computer ($firmware)" -machine q35 -accel kvm -cpu host,kvm-asyncpf=off,kvm-asyncpf-int=off
+args=(-name "AGIOS Live boot — test computer ($firmware)" -machine "$machine" -accel kvm -cpu host,kvm-asyncpf=off,kvm-asyncpf-int=off
       -m "$memory" -smp "$cpus" -display none -vga std -vnc 127.0.0.1:97
       -device qemu-xhci -device usb-tablet
       -device virtio-balloon-pci,free-page-reporting=on
       -drive "file=$repo/$target,format=qcow2,if=none,id=target,discard=unmap,detect-zeroes=unmap"
       -device virtio-blk-pci,drive=target,serial=AGIOS_TARGET,bootindex=3
       -qmp "unix:$repo/.local/live-test/qmp.sock,server=on,wait=off")
-if [[ $firmware == uefi ]]; then
-    [[ -f .local/live-test/OVMF_VARS-uefi.fd ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd .local/live-test/OVMF_VARS-uefi.fd
-    args+=(-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd
-           -drive "if=pflash,format=raw,file=$repo/.local/live-test/OVMF_VARS-uefi.fd")
+if [[ $firmware == uefi || $firmware == uefi-sb ]]; then
+    vars=.local/live-test/OVMF_VARS-$firmware.fd code=/usr/share/edk2/x64/OVMF_CODE.4m.fd
+    [[ -f $vars ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"
+    if [[ $firmware == uefi-sb ]]; then
+        code=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd
+        args+=(-global driver=cfi.pflash01,property=secure,value=on)
+    fi
+    args+=(-drive "if=pflash,format=raw,readonly=on,file=$code"
+           -drive "if=pflash,format=raw,file=$repo/$vars")
 fi
 if [[ $mode == live ]]; then
     args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"

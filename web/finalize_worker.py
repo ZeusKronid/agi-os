@@ -28,10 +28,10 @@ import uuid
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import Configuration, ValidationError
-from hardware import driver_plan, initramfs_config, profile
+from hardware import SETUP_MODE_VAR, driver_plan, efi_flag, initramfs_config, profile
 from journal import Logger, adopt
 from system import inventory, live_environment, selected_disk
-from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path
+from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path, sbctl_unsigned
 from deployment import restrict_test_targets
 import storage_worker
 
@@ -54,7 +54,7 @@ def run_json(runner, args):
 def checked_request(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError('Завершение установки разрешено только внутри Live')
-    if not isinstance(request, dict) or set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation'}:
+    if not isinstance(request, dict) or set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation', 'enroll_keys'}:
         raise ValidationError('Неизвестный запрос завершения')
     if not isinstance(request['configuration'], dict) or not all(isinstance(request[k], str) for k in ('target', 'fingerprint', 'confirmation')):
         raise ValidationError('Некорректный запрос завершения')
@@ -70,6 +70,12 @@ def checked_request(request):
     passphrase = request['passphrase']
     if not isinstance(passphrase, str) or len(passphrase) > 1024 or any(c in passphrase for c in '\n\r\x00'):
         raise ValidationError('Некорректный пароль шифрования')
+    if type(request['enroll_keys']) is not bool:
+        raise ValidationError('Некорректный выбор записи ключей Secure Boot')
+    if request['enroll_keys'] and (config.bootloader != 'systemd-boot' or efi_flag(SETUP_MODE_VAR) is not True):
+        # Checked before any disk change: the firmware must accept new keys right now.
+        raise ValidationError('Прошивка не в режиме Setup Mode: ключи Secure Boot записать нельзя. '
+                              'Сотрите ключи в настройках UEFI или снимите отметку записи ключей')
     request['image'] = checked_image(request['image'], snapshot, disk)
     return config, disk
 
@@ -356,6 +362,36 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
     return plan, missing
 
 
+def enroll_keys(runner, chroot, record):
+    """Write this system's own Secure Boot keys into the firmware, keeping Microsoft's
+    certificates: option ROMs of graphics cards and other systems still need them."""
+    if not (record.get('secure_boot') or {}).get('signed'):
+        raise ValidationError('Система в превью не подписана для Secure Boot; ключи не записаны')
+    emit('final-progress', text='Проверяю подписи загрузчика и ядра перед записью ключей Secure Boot')
+    unsigned = sbctl_unsigned(runner.run([*chroot, 'sbctl', 'verify']))
+    if unsigned:
+        raise ValidationError('Не подписаны для Secure Boot: ' + ', '.join(unsigned) + '. Ключи не записаны')
+    emit('final-progress', text='Записываю ключи Secure Boot этой системы в прошивку (вместе с ключами Microsoft)')
+    runner.run([*chroot, 'sbctl', 'enroll-keys', '--microsoft'])
+    record['secure_boot']['enrolled'] = True
+
+
+def enroll_or_warn(runner, chroot, record):
+    """The system is already on the disk and boots (Setup Mode enforces nothing): a
+    failed enrollment is a warning with the command to finish it later, not a failure."""
+    try:
+        enroll_keys(runner, chroot, record)
+    except Cancelled:
+        raise
+    except Exception as exc:
+        lines = [l for l in str(exc).splitlines() if l.strip()]
+        warning = ('Ключи Secure Boot не записаны — ' + (lines[-1] if lines else type(exc).__name__)[:300]
+                   + '. Система подписана и загрузится; чтобы включить Secure Boot, после входа выполните: '
+                   'sudo sbctl enroll-keys --microsoft, затем включите Secure Boot в настройках UEFI')
+        record['warnings'] = record.get('warnings', []) + [warning]
+        emit('final-warning', text=warning)
+
+
 def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
@@ -422,6 +458,8 @@ def finalize(request, runner):
         else:
             runner.run([*chroot, 'grub-install', '--target=i386-pc', target])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
+        if request['enroll_keys']:
+            enroll_or_warn(runner, chroot, record)
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
         record['finalization'] = {'preview_id': record['id'], 'target': target, 'mode': 'copy' if moved else 'promote',
                                   'layout': request['layout'], 'target_fingerprint': disk['fingerprint'], 'live_firmware': firmware}
