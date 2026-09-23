@@ -2,7 +2,7 @@
 
 ## Purpose and current status
 
-Test the [installation flow](../archiso/airootfs/usr/local/share/agi-os/installation-flow.md)
+Test the [installation flow](local-web.md#flow)
 from a user's natural-language request to a usable installed system. The live
 agent must perform the installation through conversation. Record any unexpected
 manual repair, skipped stage, or mismatch with the agreed requirements.
@@ -38,8 +38,8 @@ boot; shut down and use `--mode disk` for acceptance. Graphical compatibility wi
 GPUs/Wi-Fi hardware still needs hardware testing.
 
 Record the source revision and uncommitted changes, ISO SHA256, QEMU version,
-firmware mode and VM parameters. Verify the built ISO contains the native app and
-its autostart entry. Images from 2026-09-09 predate this application.
+firmware mode and VM parameters. Verify the built ISO contains the Live website
+launcher (`agi-installer`) and its autostart entry.
 
 ## Provider and UI checks
 
@@ -49,8 +49,8 @@ accepted. API keys never enter conversation history or installation reports.
 ChatGPT starts in an isolated ephemeral home, without importing a host login.
 Claude/Gemini consumer subscription sign-in is not currently implemented.
 
-Use `./scripts/run-installer.sh --demo` for a labelled offline UI preview only.
-The GTK demo and fake-worker tests must never be reported as real installations.
+Unit tests with the demo provider and fake workers must never be reported as real
+installations.
 Outside Archiso, actual disk execution must be refused even if a provider proposal
 and a review confirmation are present.
 
