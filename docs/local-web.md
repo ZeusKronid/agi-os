@@ -12,6 +12,11 @@ until the user explicitly confirms a specific, described change.
    computer's hardware (CPU, chassis, GPU, network, sound, Bluetooth, TPM,
    Secure Boot), the driver packages the engine will add for it and what the
    preview on virtual devices cannot verify; the model receives the same data.
+   A user who does not want to choose («Выберите за меня») gets the AGIOS
+   standard system (`domain.DEFAULT_SYSTEM`: XFCE with LightDM, Firefox,
+   NetworkManager and volume applets, ext4, systemd-boot on UEFI or GRUB on
+   BIOS); the agent then asks only for personal settings — user name, language,
+   layouts, time zone and the disk.
 2. **Size and place.** The app computes the exact installed size from package
    metadata (`pacman -Sp`/`-Si`, including dependencies) and lists where the
    preview can live, each option with its undo:
