@@ -42,6 +42,137 @@ class ValidationError(ValueError):
     pass
 
 
+# System files the model may never write. Grouped by why: they grant access, belong
+# to the engine, or run code as root or inside every process and login shell. The
+# text-only content (no NUL) rules out binaries, so the danger is scripts, command
+# lines and loader/interpreter settings.
+PROTECTED_SYSTEM = (
+    # accounts, authentication and privileges
+    "etc/passwd", "etc/shadow", "etc/group", "etc/gshadow", "etc/subuid", "etc/subgid",
+    "etc/sudoers", "etc/sudoers.d", "etc/doas.conf", "etc/polkit-1", "etc/pam.d", "etc/security",
+    "etc/login.defs", "etc/shells", "etc/securetty", "etc/nsswitch.conf", "etc/dbus-1",
+    # storage, boot, base system and files the engine writes itself
+    "etc/fstab", "etc/crypttab", "etc/locale.conf", "etc/locale.gen", "etc/hostname", "etc/hosts",
+    "etc/localtime", "etc/mkinitcpio.conf", "etc/mkinitcpio.conf.d", "etc/mkinitcpio.d",
+    "etc/initcpio", "etc/default/grub", "etc/grub.d", "etc/kernel",
+    "etc/systemd/zram-generator.conf", "usr/local/share/agi-os",
+    # package manager: hooks and build scripts run as root or as the user
+    "etc/pacman.conf", "etc/pacman.d", "etc/makepkg.conf", "etc/makepkg.conf.d",
+    # loaded into every process
+    "etc/ld.so.preload", "etc/ld.so.conf", "etc/ld.so.conf.d", "etc/ld.so.cache",
+    # services, generators, timers and hooks that run as root
+    "etc/systemd/system", "etc/systemd/user", "etc/systemd/system.conf", "etc/systemd/system.conf.d",
+    "etc/systemd/user.conf", "etc/systemd/user.conf.d", "etc/systemd/system-generators",
+    "etc/systemd/user-generators", "etc/systemd/system-environment-generators",
+    "etc/systemd/user-environment-generators", "etc/systemd/system-preset", "etc/systemd/user-preset",
+    "etc/systemd/system-shutdown", "etc/systemd/system-sleep", "etc/tmpfiles.d", "etc/sysusers.d",
+    "etc/binfmt.d", "etc/crontab", "etc/cron.d", "etc/cron.hourly", "etc/cron.daily",
+    "etc/cron.weekly", "etc/cron.monthly", "etc/anacrontab", "etc/NetworkManager/dispatcher.d",
+    "etc/acpi", "etc/rc.local", "usr/local/share/dbus-1",
+    # shell and session start-up code for every user; per-user autostart goes to
+    # ~/.config and is shown in the separate login review instead
+    "etc/xdg/autostart", "etc/profile", "etc/profile.d", "etc/bash.bashrc", "etc/bash.bash_logout",
+    "etc/zsh", "etc/fish", "etc/X11/xinit", "etc/X11/Xsession", "etc/X11/Xsession.d",
+    "etc/lightdm/Xsession",
+)
+
+# Settings inside otherwise allowed files that would run a program as root or
+# inject code into every process started with that environment.
+INJECTED_ENVIRONMENT = re.compile(
+    r"^\s*(?:export\s+)?(LD_[A-Z_]+|GCONV_PATH|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP|PYTHONPATH|"
+    r"PERL5OPT|PERL5LIB|RUBYOPT|NODE_OPTIONS|GTK3?_MODULES|GIO_EXTRA_MODULES|QT_PLUGIN_PATH)\s*=", re.M)
+DANGEROUS_CONTENT = (
+    (("etc/environment", "etc/environment.d", "~/.config/environment.d"), INJECTED_ENVIRONMENT,
+     "Переменные окружения не могут подгружать код в каждую программу"),
+    (("etc/udev/rules.d",), re.compile(r"\b(?:RUN|PROGRAM)\b|\bIMPORT\{program\}|\bENV\{SYSTEMD_(?:USER_)?WANTS\}"),
+     "Правила udev не могут запускать программы: они выполняются от root"),
+    (("etc/modprobe.d",), re.compile(r"^\s*(install|remove)\s", re.M),
+     "Команды install/remove в modprobe.d выполняются от root"),
+    (("etc/lightdm",), re.compile(r"^\s*[\w-]+-(script|wrapper)\s*=", re.M),
+     "Сценарии LightDM выполняются от root и не настраиваются агентом"),
+    (("etc/greetd",), re.compile(r"^\s*\[\s*initial_session\s*\]", re.M),
+     "Автоматический вход без пароля не настраивается"),
+    (("etc/lightdm",), re.compile(r"^\s*autologin-user\s*=\s*\S", re.M),
+     "Автоматический вход без пароля не настраивается"),
+    (("etc/sddm.conf", "etc/sddm.conf.d"), re.compile(r"^\s*\[\s*Autologin\s*\][^\[]*^\s*User\s*=\s*\S", re.M),
+     "Автоматический вход без пароля не настраивается"),
+    (("etc/gdm",), re.compile(r"^\s*(?:Automatic|Timed)LoginEnable\s*=\s*true", re.M | re.I),
+     "Автоматический вход без пароля не настраивается"),
+    (("etc/sysctl.d", "etc/sysctl.conf"),
+     re.compile(r"^\s*-?\s*kernel[./](core_pattern|modprobe|poweroff_cmd|hotplug)\s*=", re.M),
+     "Эти параметры ядра запускают программы от root"),
+)
+
+
+def under(path, prefixes):
+    return any(path == p or path.startswith(p.rstrip("/") + "/") for p in prefixes)
+
+
+def system_path_allowed(path):
+    return (path.startswith("etc/") or path.startswith("usr/local/share/")) and not under(path, PROTECTED_SYSTEM)
+
+
+def dangerous_content(path, content):
+    """The reason this content may not be written, or None. `path` is relative to /
+    for system files and starts with ~/ for home files."""
+    for prefixes, pattern, reason in DANGEROUS_CONTENT:
+        if under(path, prefixes) and pattern.search(content):
+            return reason
+    return None
+
+
+def exec_lines(pattern):
+    compiled = re.compile(pattern, re.M | re.I)
+    return lambda content: [m.group(1).strip() for m in compiled.finditer(content)]
+
+
+def program_lines(content):
+    """Every meaningful line of a file that is itself a program."""
+    return [line.strip() for line in content.splitlines()
+            if line.strip() and not line.lstrip().startswith(("#", "--", "//"))]
+
+
+def ini_section(section):
+    def extract(content):
+        lines, inside = [], False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                inside = stripped.lower() == f"[{section}]"
+            elif inside and stripped and not stripped.startswith(("#", ";")):
+                lines.append(stripped)
+        return lines
+    return extract
+
+
+# What runs when the user logs in (or the greeter starts). Such files are allowed,
+# but the app lists them in a separate review with the exact commands and requires
+# an explicit confirmation before the preview is built.
+LOGIN_RULES = (
+    (("~/.config/autostart",), "Автозапуск при входе в графический сеанс (XDG autostart)",
+     exec_lines(r"^\s*(Exec\s*=\s*.+)$")),
+    (("~/.config/systemd/user",), "Служба systemd пользователя: запускается от вашего имени",
+     exec_lines(r"^\s*(Exec[A-Za-z]*\s*=\s*.+)$")),
+    (("~/.config/hypr",), "Hyprland выполняет эти команды при входе",
+     exec_lines(r"^\s*(exec(?:-once|-shutdown)?\s*=\s*.+)$")),
+    (("~/.config/sway", "etc/sway", "~/.config/i3", "etc/i3"),
+     "Оконный менеджер выполняет эти команды при входе", exec_lines(r"^\s*(exec(?:_always)?\s+.+)$")),
+    (("~/.config/niri", "etc/niri"), "niri выполняет эти команды при входе",
+     exec_lines(r"^\s*(spawn-at-startup\s+.+)$")),
+    (("~/.config/wayfire.ini",), "Wayfire выполняет раздел [autostart] при входе", ini_section("autostart")),
+    (("~/.config/labwc/autostart", "~/.config/openbox/autostart", "~/.config/river/init",
+      "~/.config/bspwm/bspwmrc", "~/.config/plasma-workspace/env", "~/.config/plasma-workspace/shutdown",
+      "~/.config/autostart-scripts"), "Сценарий оболочки, выполняемый при входе целиком", program_lines),
+    (("~/.config/awesome", "~/.config/qtile"), "Конфигурация — программа (Lua/Python), выполняется при входе",
+     program_lines),
+    (("~/.config/fish",), "Код оболочки fish: выполняется при каждом запуске терминала", program_lines),
+    (("etc/greetd",), "Экран входа greetd запускает эту команду при загрузке",
+     exec_lines(r"^\s*(command\s*=\s*.+)$")),
+    (("usr/local/share/gnome-shell/extensions", "usr/local/share/plasma", "usr/local/share/kwin"),
+     "Код расширения рабочего стола, выполняется в сеансе", program_lines),
+)
+
+
 def bounded_text(value, name, limit=200):
     if not isinstance(value, str) or not value.strip() or len(value) > limit or "\x00" in value:
         raise ValidationError(f"Некорректное поле: {name}")
@@ -122,6 +253,8 @@ class Configuration:
         for service in data["services"]:
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@_.-]{0,120}\.service", service):
                 raise ValidationError("Некорректное имя службы")
+            if service in ("debug-shell.service", "emergency.service", "rescue.service"):
+                raise ValidationError("Эта служба даёт оболочку root без пароля: " + service)
         values = dict(data)
         for name in ("home_files", "system_files"):
             if not isinstance(data[name], list) or len(data[name]) > 30:
@@ -135,16 +268,14 @@ class Configuration:
                     raise ValidationError("Нужен относительный путь без ..")
                 if name == "home_files" and path.parts[0] != ".config":
                     raise ValidationError("Настройки пользователя должны находиться в .config")
-                if name == "system_files":
-                    protected = ("etc/passwd", "etc/shadow", "etc/group", "etc/gshadow", "etc/sudoers", "etc/sudoers.d",
-                                 "etc/fstab", "etc/crypttab", "etc/pacman.conf", "etc/pacman.d", "etc/locale.conf",
-                                 "etc/locale.gen", "etc/hostname", "etc/hosts", "etc/localtime", "etc/mkinitcpio.conf",
-                                 "etc/mkinitcpio.conf.d", "etc/systemd/system", "etc/polkit-1", "etc/pam.d")
-                    if not (str(path).startswith("etc/") or str(path).startswith("usr/local/share/")) or any(
-                            str(path) == p or str(path).startswith(p + "/") for p in protected):
-                        raise ValidationError("Этот системный файл управляется установочным движком")
+                if name == "system_files" and not system_path_allowed(str(path)):
+                    raise ValidationError("Этот системный файл управляется установочным движком "
+                                          "или выполняется с правами root: /" + str(path))
                 if not isinstance(item["content"], str) or len(item["content"]) > 50000 or "\x00" in item["content"]:
                     raise ValidationError("Некорректное содержимое файла настроек")
+                shown = ("~/" if name == "home_files" else "") + str(path)
+                if reason := dangerous_content(shown, item["content"]):
+                    raise ValidationError(f"{reason}: {'' if name == 'home_files' else '/'}{shown}")
                 files.append((str(path), item["content"]))
             if len({p for p, _ in files}) != len(files):
                 raise ValidationError("Повторяющиеся файлы настроек")
@@ -160,6 +291,21 @@ class Configuration:
         result["home_files"] = [{"path": p, "content": c} for p, c in self.home_files]
         result["system_files"] = [{"path": p, "content": c} for p, c in self.system_files]
         return result
+
+    def login_entries(self):
+        """Files that make something run at login or at the greeter, with the exact
+        lines that run. They need a separate, explicit review before the build."""
+        entries = []
+        files = [("~/" + p, c) for p, c in self.home_files] + list(self.system_files)
+        for path, content in files:
+            for prefixes, why, extract in LOGIN_RULES:
+                if under(path, prefixes):
+                    commands = extract(content)
+                    if commands:
+                        entries.append({"path": path if path.startswith("~/") else "/" + path,
+                                        "why": why, "commands": commands})
+                    break
+        return entries
 
     def digest(self):
         return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True).encode()).hexdigest()
@@ -189,6 +335,9 @@ class Configuration:
             fields.append("Превью работает на виртуальном железе и НЕ проверяет: "
                           + (", ".join(plan["unverified"]) or ("ничего особенного — оборудование виртуальное" if virtual(hardware)
                                                                else "особого оборудования не найдено")))
+        if login := self.login_entries():
+            fields.append("ЗАПУСКАЕТСЯ ПРИ ВХОДЕ (проверьте отдельно):\n" + "\n".join(
+                f"• {e['path']} — {e['why']}:\n" + "\n".join(f"    {c}" for c in e["commands"]) for e in login))
         for path, content in self.home_files:
             fields.append(f"Настройки ~/{path}:\n{content}")
         for path, content in self.system_files:
@@ -213,7 +362,12 @@ use home_files for required user .config files, including Wayland keyboard setti
 when needed. Use system_files for environment/greeter configuration (relative etc/
 or usr/local/share/ paths); e.g. greetd needs a command to launch a greeter/session.
 Do not overwrite engine-managed accounts, permissions, storage, package manager,
-system services or boot configuration. session is the installed desktop-file basename without .desktop,
+system services or boot configuration. The app rejects files that run code as root
+or in every process (profile.d, ld.so.*, systemd system/user units, cron, udev RUN,
+etc/xdg/autostart, LD_PRELOAD-style environment). Anything that runs at login
+(~/.config/autostart, ~/.config/systemd/user, exec lines in compositor/WM configs,
+greeter commands) is shown to the user in a separate review they must confirm:
+keep it to what the user asked for and explain each command in your message. session is the installed desktop-file basename without .desktop,
 or an empty string for console. Do not add autologin or passwordless sudo.
 The current executable storage handlers support whole-disk erase with GPT;
 ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram

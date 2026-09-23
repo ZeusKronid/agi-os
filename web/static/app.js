@@ -66,6 +66,13 @@ function render(state) {
     const installing = ['starting','installing'].includes(state.phase) || finalizing;
     $('review').hidden = !state.configuration || !!state.built || installing || state.running;
     $('summary').textContent = state.summary || '';
+    const login = state.login || [];
+    $('login').hidden = !login.length; $('loginReviewedField').hidden = !login.length; $('loginReviewed').required = !!login.length;
+    $('loginList').replaceChildren(...login.map(entry => {
+        const li = document.createElement('li'), head = document.createElement('b'), why = document.createElement('span'), code = document.createElement('pre');
+        head.textContent = entry.path; why.textContent = ' — ' + entry.why; code.textContent = entry.commands.join('\n');
+        li.append(head, why, code); return li;
+    }));
     $('reviewDisk').textContent = state.consent && state.consent.disk ? state.consent.disk.path + ' · ' + gib(state.consent.disk.size) + ' · ' + (state.consent.disk.model || 'Диск') : (state.consent && state.consent.error ? 'Диск недоступен' : '');
     $('consentError').hidden = !(state.consent && state.consent.error);
     if (state.consent && state.consent.error) $('consentError').textContent = state.consent.error;
@@ -163,9 +170,9 @@ $('buildForm').onsubmit = async event => {
     event.preventDefault(); const option = selectedOption(); if (!option) return; $('build').disabled = true;
     const password = $('password').value, passphrase = $('passphrase').value; $('password').value = ''; $('passphrase').value = '';
     try {
-        await api('build', {digest: current.plan.digest, option: option.id, accepted: $('optionAccepted').checked, confirmation: $('optionPath').value.trim(),
+        await api('build', {digest: current.plan.digest, option: option.id, accepted: $('optionAccepted').checked, login_reviewed: $('loginReviewed').checked, confirmation: $('optionPath').value.trim(),
                             password, passphrase, memory: +$('memory').value, cpus: +$('cpus').value});
-        $('optionAccepted').checked = false; $('optionPath').value = ''; await refresh();
+        $('optionAccepted').checked = false; $('loginReviewed').checked = false; $('optionPath').value = ''; await refresh();
     } catch (error) {showError(error);} finally {$('build').disabled = false;}
 };
 $('stop').onclick = async () => {try {render(await api('stop', {}));} catch (error) {showError(error);}};
