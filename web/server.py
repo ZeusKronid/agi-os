@@ -109,6 +109,7 @@ class State:
         return {'version': preview_record.VERSION, 'id': uuid.uuid4().hex, 'status': 'installing',
                 'created': preview_record.now(), 'updated': preview_record.now(), 'error': None,
                 'configuration': config.as_dict(), 'encrypted': encrypted, 'firmware': consent['firmware'],
+                'secure_boot': bool(self.plan and self.plan.get('secure_boot')),
                 'target': preview_record.disk_identity(consent['disk']), 'hardware': hardware,
                 'vm': {'memory': memory, 'cpus': cpus}, 'storage': storage, 'journal': []}
 
@@ -679,7 +680,7 @@ async def continue_preview(request):
                   'revert': storage['revert'], 'destructive': False, 'confirm': None}
         state.preview = {'option': option, 'image': adopted['image'], 'revert': adopted['revert'], 'record': record}
         state.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': record['encrypted'],
-                       'hardware': record['hardware']}
+                       'hardware': record['hardware'], 'secure_boot': record['secure_boot']}
         state.disk_ready, state.plan, state.error, state.events = True, None, None, []
         state.final = {'phase': 'idle', 'events': []}
         state.vm = VirtualMachine(adopted['image'], record['vm']['memory'], record['vm']['cpus'], state.controller.snapshot['firmware'])
