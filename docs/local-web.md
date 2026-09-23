@@ -42,6 +42,11 @@ until the user explicitly confirms a specific, described change.
    batches (`fstrim` + `discard=unmap` keep an in-memory image small). Then it
    restarts from the installed image; Guacamole shows it in the browser.
    LUKS2 root encryption and zram swap are configured here when chosen.
+   *Secure Boot* (UEFI with systemd-boot, a checkbox before the size
+   calculation): `sbctl` creates the system's own keys right after the base
+   system, signs `systemd-bootx64.efi` into the `.signed` copy that `bootctl`
+   installs and the kernel, and `sbctl verify` must report no unsigned file.
+   sbctl's pacman and mkinitcpio hooks re-sign them on every update.
 4. **Decision.** *Not right* → "return everything as it was" undoes the storage.
    *Install* → the user chooses *alongside existing systems* or *erase the
    disk*, types the disk path and confirms:
@@ -52,7 +57,12 @@ until the user explicitly confirms a specific, described change.
    Finally missing hardware drivers are completed for the real computer (a
    failure is reported, never hidden), the initramfs is rebuilt, the boot loader is
    registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new
-   acceptance ID is written for `agi-os-verify`.
+   acceptance ID is written for `agi-os-verify`. For a signed system the user may
+   also enroll its keys: only when the firmware is in Setup Mode (checked before
+   any disk change), with `sbctl enroll-keys --microsoft` so Microsoft-signed
+   option ROMs and Windows keep booting. Otherwise the page explains how to
+   enroll later. `agi-os-verify` checks the signatures and, after enrollment,
+   that Secure Boot is on.
 
 ## Build
 
@@ -77,6 +87,10 @@ AGIOS_TEST_MIRROR=https://geo.mirror.pkgbuild.com ./scripts/run-live-web-vm.sh [
 The outer VM is the "computer": it boots the ISO from an optical drive with a
 blank 20 GiB target disk (serial `AGIOS_TARGET`) and, when
 `.local/live-test-media.img` exists, an exFAT USB stick.
+`--firmware uefi-sb` uses the Secure Boot OVMF build (SMM) with an empty
+variable store, i.e. Setup Mode; enrolled keys persist in
+`.local/live-test/OVMF_VARS-uefi-sb.fd`, so `--mode disk --firmware uefi-sb`
+then boots with Secure Boot enforced.
 `AGIOS_TEST_HARDWARE=laptop` adds a Notebook SMBIOS chassis and an Intel HD Audio
 controller (they drive the driver plan and the "preview cannot verify" list) and
 swaps the NIC for an Intel e1000e so the inventory names a real card. Only that serial is an
@@ -210,5 +224,13 @@ What Live keeps, all in RAM (lost at power-off):
 - Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
   hibernation) is refused by `ntfsresize` — shut Windows down fully first.
 - Swap is zram; hibernation is not configured.
+- Secure Boot: the Live ISO itself is not signed and boots only with Secure Boot
+  off or in Setup Mode. Booting it with Secure Boot on would need Arch's
+  unsigned kernel behind a Microsoft-signed `shim` plus a MOK the user enrolls
+  by hand in MokManager at the first boot; the kernel, systemd-boot and
+  initramfs of the ISO would have to be signed with that MOK at build time.
+  That is a separate, human decision about key custody (like ISO signing).
+  GRUB installs are not signed; Secure Boot is offered with systemd-boot only.
+  Enrolling own keys may make BitLocker ask for its recovery key once.
 - Physical hardware runs are still pending; QEMU/KVM (nested for the inner VM)
   is the verified environment.

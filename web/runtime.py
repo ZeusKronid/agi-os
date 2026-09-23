@@ -176,7 +176,7 @@ class VirtualMachine:
         if not self.running:
             raise RuntimeError('QEMU не запустился: ' + (self.directory / 'qemu.log').read_text()[-1500:])
 
-    async def install(self, config, password, passphrase, notify, hardware=None):
+    async def install(self, config, password, passphrase, notify, hardware=None, secure_boot=False):
         await asyncio.wait_for(self.connection, 180)
         ready = json.loads(await asyncio.wait_for(self.reader.readline(), 240))
         if ready.get('kind') != 'ready':
@@ -191,7 +191,8 @@ class VirtualMachine:
         # The guest sees virtual devices; drivers must follow the real computer's inventory.
         request = {'configuration': translated.as_dict(), 'consent_digest': translated.digest(),
                    'fingerprint': inner['fingerprint'], 'password': password, 'passphrase': passphrase,
-                   'hardware': hardware if hardware is not None else ready['inventory']['hardware']}
+                   'hardware': hardware if hardware is not None else ready['inventory']['hardware'],
+                   'secure_boot': secure_boot is True}
         self.writer.write(json.dumps(request).encode() + b'\n')
         await self.writer.drain()
         del request, password, passphrase
