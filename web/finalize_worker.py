@@ -399,13 +399,21 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
     return plan, missing
 
 
+def check_signatures(runner, chroot, record):
+    """Root `sbctl verify` of the final disk, kept in the record: after a copy the ESP may be
+    unreadable to the user, and agi-os-verify then relies on this result."""
+    emit('final-progress', text='Проверяю подписи загрузчика и ядра (Secure Boot)')
+    unsigned = sbctl_unsigned(runner.run([*chroot, 'sbctl', 'verify']))
+    record['secure_boot']['verified'] = not unsigned
+    return unsigned
+
+
 def enroll_keys(runner, chroot, record):
     """Write this system's own Secure Boot keys into the firmware, keeping Microsoft's
     certificates: option ROMs of graphics cards and other systems still need them."""
     if not (record.get('secure_boot') or {}).get('signed'):
         raise ValidationError('Система в превью не подписана для Secure Boot; ключи не записаны')
-    emit('final-progress', text='Проверяю подписи загрузчика и ядра перед записью ключей Secure Boot')
-    unsigned = sbctl_unsigned(runner.run([*chroot, 'sbctl', 'verify']))
+    unsigned = check_signatures(runner, chroot, record)
     if unsigned:
         raise ValidationError('Не подписаны для Secure Boot: ' + ', '.join(unsigned) + '. Ключи не записаны')
     emit('final-progress', text='Записываю ключи Secure Boot этой системы в прошивку (вместе с ключами Microsoft)')
@@ -501,6 +509,18 @@ def finalize(request, runner):
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         if request['enroll_keys']:
             enroll_or_warn(runner, chroot, record)
+        elif (record.get('secure_boot') or {}).get('signed'):
+            try:
+                unsigned = check_signatures(runner, chroot, record)
+            except Cancelled:
+                raise
+            except Exception as exc:
+                record['secure_boot']['verified'] = False
+                unsigned = [type(exc).__name__]
+            if unsigned:
+                warning = 'Подписи Secure Boot не подтверждены: ' + ', '.join(unsigned)[:300] + '. Выполните sudo sbctl verify'
+                record['warnings'] = record.get('warnings', []) + [warning]
+                emit('final-warning', text=warning)
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
         record['finalization'] = {'preview_id': record['id'], 'target': target, 'mode': 'copy' if moved else 'promote',
                                   'layout': request['layout'], 'target_fingerprint': disk['fingerprint'], 'live_firmware': firmware}

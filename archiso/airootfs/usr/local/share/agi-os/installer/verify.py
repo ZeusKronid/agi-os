@@ -35,9 +35,12 @@ SIGNED_BOOT_FILES = ("boot/EFI/BOOT/BOOTX64.EFI", "boot/EFI/systemd/systemd-boot
 
 
 def pe_signed(path):
-    """True when a PE/EFI image carries an Authenticode certificate table (data directory 4)."""
+    """True when a PE/EFI image carries an Authenticode certificate table (data directory 4);
+    None when the user may not read it (an ESP mounted fmask=0077 after a copy finalization)."""
     try:
         data = Path(path).read_bytes()
+    except PermissionError:
+        return None
     except OSError:
         return False
     if data[:2] != b"MZ":
@@ -48,6 +51,18 @@ def pe_signed(path):
     optional = pe + 24
     directories = optional + (112 if int.from_bytes(data[optional:optional + 2], "little") == 0x20B else 96)
     return int.from_bytes(data[directories + 36:directories + 40], "little") > 0
+
+
+def boot_chain_signed(secure_boot, system_root=Path("/")):
+    """Signatures read directly when /boot is readable. Otherwise the proof is the firmware
+    itself (Secure Boot on: it booted only a chain signed with enrolled keys) or the root
+    `sbctl verify` done at the final installation."""
+    states = [pe_signed(system_root / f) for f in SIGNED_BOOT_FILES]
+    if False in states:
+        return False
+    if None not in states:
+        return True
+    return secure_boot_enabled(system_root) or secure_boot.get("verified") is True
 
 
 def secure_boot_enabled(system_root=Path("/")):
@@ -250,7 +265,7 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
         checks["Сеть: DNS"] = False
     secure_boot = record.get("secure_boot") or {}
     if secure_boot.get("signed"):
-        checks["Secure Boot: загрузчик и ядро подписаны"] = all(pe_signed(system_root / f) for f in SIGNED_BOOT_FILES)
+        checks["Secure Boot: загрузчик и ядро подписаны"] = boot_chain_signed(secure_boot, system_root)
         if secure_boot.get("enrolled"):
             checks["Secure Boot включён в прошивке"] = secure_boot_enabled(system_root)
     if config["session"]:
