@@ -59,12 +59,24 @@ def guest_kernel():
     return boot / 'vmlinuz-linux', boot / 'initramfs-linux.img'
 
 
+def prune_vm_directories(keep=1):
+    """Live keeps /var/lib in RAM: before a new preview VM, drop the directories of all
+    but the newest `keep` earlier ones (their previews were discarded; the newest stays
+    for diagnostics). The guest console log itself is truncated by QEMU on every start."""
+    earlier = sorted((d for d in (DATA_ROOT / 'vm').glob('web-*') if d.is_dir() and not d.is_symlink()),
+                     key=lambda d: d.stat().st_mtime)
+    for directory in earlier[:max(0, len(earlier) - keep)]:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 class VirtualMachine:
     def __init__(self, image, memory=4096, cpus=4, firmware=None, directory=None):
         if image.get('format') not in ('qcow2', 'raw') or not isinstance(image.get('path'), str):
             raise ValueError('Некорректное описание образа превью')
         self.image = image
         self.firmware = firmware or live_firmware()
+        if directory is None:
+            prune_vm_directories()
         self.directory = directory or DATA_ROOT / 'vm' / ('web-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
         self.directory.mkdir(parents=True, mode=0o700, exist_ok=directory is not None)
         self.memory, self.cpus = memory, cpus

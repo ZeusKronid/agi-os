@@ -103,9 +103,10 @@ What Live keeps, all in RAM (lost at power-off):
 - `/var/lib/agi-os/session.json`: the conversation, configuration and preview
   state — no secrets, but whatever the user typed into the chat.
 - `/var/lib/agi-os/vm/web-*/`: `qemu.log`, `guest-console.log` (the installer
-  VM's serial console), UEFI variables and sockets of each preview VM. Kept
-  while the preview exists and after any failure (diagnostics); removed after a
-  successful finalization.
+  VM's serial console, truncated by QEMU on every installer start), UEFI
+  variables and sockets of each preview VM. Kept while the preview exists and
+  after any failure (diagnostics); a new preview VM keeps only the newest
+  earlier directory; all are removed after a successful finalization.
 - The journal (`Storage=volatile`), bounded to 128 MiB (`agi-os-size.conf`).
 
 ## Limits
