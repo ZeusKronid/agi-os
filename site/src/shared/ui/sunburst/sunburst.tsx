@@ -214,7 +214,9 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
                   style={{ rotate: `${angle.toFixed(4)}rad`, opacity: ray.opacity }}
                 >
                   <i
-                    className="absolute top-0 block origin-left motion-safe:animate-sun-ray"
+                    // Пауза только второй анимации — сияния; рост луча (первая) доигрывает как есть.
+                    // `!`: иначе шорткат `animation` из `animate-sun-ray` (он в CSS позже) сбрасывает play-state.
+                    className="absolute top-0 block origin-left motion-safe:animate-sun-ray in-data-[paused=true]:[animation-play-state:running,paused]!"
                     style={{
                       left: unit(inner),
                       width: unit(length),
