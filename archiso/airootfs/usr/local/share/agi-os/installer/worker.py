@@ -156,7 +156,7 @@ def preflight(request):
         raise ValidationError("Диск изменился после подтверждения; запись отменена")
     if snapshot["firmware"] == "bios" and config.bootloader != "grub":
         raise ValidationError("Для BIOS требуется загрузчик GRUB")
-    if request.setdefault("secure_boot", False) not in (True, False):
+    if type(request.setdefault("secure_boot", False)) is not bool:
         raise ValidationError("Некорректный выбор Secure Boot")
     if request["secure_boot"] and (snapshot["firmware"] != "uefi" or config.bootloader != "systemd-boot"):
         raise ValidationError("Подпись для Secure Boot поддерживается для UEFI с загрузчиком systemd-boot")
