@@ -330,6 +330,14 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         self.assertIsNone(state.preview)
         self.assertEqual(json.loads(state.controller.history[-1]['content'])['configuration']['disk'], '/dev/vda')
 
+    async def test_restored_configuration_keeps_roles_alternating(self):
+        state = self.app['state']
+        state.controller.history = [{'role': 'user', 'content': 'unanswered'}]
+        state.restore_conversation(demo_configuration(), 'restored')
+        self.assertEqual([m['role'] for m in state.controller.history], ['user', 'assistant'])
+        state.restore_conversation(demo_configuration(), 'again')
+        self.assertEqual([m['role'] for m in state.controller.history], ['user', 'assistant', 'user', 'assistant'])
+
     async def test_remove_found_preview(self):
         state = self.app['state']
         state.found = [self.found('ready')]

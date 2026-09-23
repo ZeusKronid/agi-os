@@ -187,6 +187,19 @@ class UndoTests(unittest.TestCase):
         self.assertEqual(Path(state['folder']), storage_worker.PREVIEW / 'media' / 'AGIOS-PREVIEW')
 
 
+class MountTests(unittest.TestCase):
+    def test_looking_at_a_medium_is_read_only_without_setuid_or_devices(self):
+        calls = []
+        def run(args, **kw):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+        with tempfile.TemporaryDirectory() as directory, patch.object(storage_worker.subprocess, 'run', run):
+            self.assertTrue(storage_worker.read_only_mount('/dev/sdb1', 'ext4', Path(directory) / 'scan'))
+        options = calls[-1][calls[-1].index('-o') + 1].split(',')
+        for option in ('ro', 'noload', 'nosuid', 'nodev', 'noexec'):
+            self.assertIn(option, options)
+
+
 @unittest.skipUnless(shutil.which('qemu-img'), 'qemu-img is not installed')
 class ImageTests(unittest.TestCase):
     def test_backing_file_and_data_file_are_refused(self):
