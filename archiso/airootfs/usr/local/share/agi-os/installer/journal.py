@@ -34,7 +34,8 @@ operation = contextvars.ContextVar("agios_operation", default=None)
 
 SECRET_KEYS = re.compile(
     r"^(pass(word|phrase)?|secret|token|key|api[_-]?key|apikey|authorization|cookie|credentials?|"
-    r".*_(password|passphrase|token|secret|key)|(access|refresh|id|session)[_-]?token|client[_-]?secret)$",
+    r".*_(password|passphrase|token|secret)|(api|private|secret|access|ssh|encryption|luks)[_-]?key|"
+    r"(access|refresh|id|session)[_-]?token|client[_-]?secret)$",
     re.IGNORECASE)
 PATTERNS = (
     # key: value / key=value / "key": "value" for secret-looking names.
