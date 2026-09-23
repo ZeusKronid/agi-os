@@ -177,6 +177,23 @@ def check_record(record, config, firmware, encrypted):
         raise ValidationError('Состояние шифрования не совпадает с записью установки')
 
 
+def prepare_table(runner, layout, disk):
+    """The target's partition table before the copy: a fresh GPT for "erase"; for
+    "alongside" the existing GPT (backed up first). A brand-new disk has no table at
+    all: with nothing on it to keep, it gets an empty GPT instead of an error."""
+    target = disk['path']
+    if layout == 'erase':
+        runner.run(['sgdisk', '--zap-all', target])
+        runner.run(['sgdisk', '--clear', target])
+        return
+    if not disk.get('pttype'):
+        if disk.get('fstype') or not storage_worker.looks_blank(target):
+            raise ValidationError('На диске нет таблицы разделов, но есть данные: установка рядом с ними невозможна. '
+                                  'Выберите «стереть диск», если эти данные не нужны.')
+        runner.run(['sgdisk', '--clear', target])
+    runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+
+
 def free_regions(runner, disk_path, size):
     table = run_json(runner, ['sfdisk', '--json', disk_path])['partitiontable']
     if table.get('label') != 'gpt':
@@ -258,11 +275,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     used = int(runner.run(['du', '-sxB1', *skipped, str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
     needed = used + used // 5 + 2 * GIB + reserve
     emit('final-progress', text=f'Создаю разделы на {target} для {used / GIB:.1f} ГиБ данных')
-    if request['layout'] == 'erase':
-        runner.run(['sgdisk', '--zap-all', target])
-        runner.run(['sgdisk', '--clear', target])
-    else:
-        runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    prepare_table(runner, request['layout'], disk)
     regions = [r for r in free_regions(runner, target, disk['size']) if (r[1] - r[0] + 1) * SECTOR >= needed]
     if not regions:
         raise ValidationError(f'На диске нет свободного места для системы ({needed / GIB:.1f} ГиБ)')
