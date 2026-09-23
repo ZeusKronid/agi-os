@@ -57,6 +57,7 @@ class State:
         self.final_task = None
         self.plan = None
         self.lock = asyncio.Lock()
+        self.login_url = None
         self.provider = LiveProvider()
         self.controller = Controller(target_inventory(), self.provider, notify=self.notify)
         self.record = DATA_ROOT / 'session.json'
@@ -132,7 +133,7 @@ class State:
                      'revert': self.preview['option']['revert'] if self.preview else None}
         current = self.preview['image']['path'] if self.preview else None
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
-                'error': self.error, 'model': self.provider.model,
+                'error': self.error, 'model': self.provider.model, 'login_url': self.login_url,
                 'firmware': snapshot['firmware'], 'orphans': orphan_previews(snapshot, current),
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
@@ -278,7 +279,14 @@ async def configure(request):
         kind = data.get('kind', 'chatgpt')
         if kind == 'chatgpt':
             state.status = 'Завершите вход в открывшейся вкладке браузера'
-            provider = await asyncio.to_thread(connect_chatgpt, data.get('model') or None)
+            def show_login(url):
+                # Only the official sign-in page is handed to the browser tab.
+                if url.startswith('https://'):
+                    state.login_url = url
+            try:
+                provider = await asyncio.to_thread(connect_chatgpt, data.get('model') or None, show_login)
+            finally:
+                state.login_url = None
         else:
             provider = APIProvider(kind, data.get('endpoint') or PROVIDERS[kind][1], data.get('key', ''))
             provider.model = data.get('model', '').strip()
@@ -528,7 +536,7 @@ async def power(request):
     action = data.get('action')
     if action not in ('poweroff', 'reboot'):
         raise ValidationError('Неизвестное действие')
-    proc = await asyncio.create_subprocess_exec('sudo', '-n', 'shutdown', '-h' if action == 'poweroff' else '-r', '+1')
+    proc = await asyncio.create_subprocess_exec('sudo', '-n', '/usr/bin/shutdown', '-h' if action == 'poweroff' else '-r', '+1')
     if await proc.wait():
         raise ValidationError('Не удалось запланировать выключение')
     message = ('Live выключится через минуту. Извлеките носитель и включите компьютер: он загрузится с установленного диска.'

@@ -180,8 +180,22 @@ $('closeSettings').onclick = () => $('settings').close();
 $('providerForm').onsubmit = async event => {
     event.preventDefault();
     $('providerError').textContent = 'Подключаю модель. Если открылась вкладка входа, завершите вход в ней.';
+    // The site runs as a system user without the desktop: this tab opens the sign-in page.
+    // The tab is opened right in the click so the browser does not block it as a pop-up.
+    const chatgpt = $('provider').value === 'chatgpt';
+    let tab = chatgpt ? window.open('about:blank', '_blank') : null, shown = false;
+    const watch = chatgpt ? setInterval(async () => {
+        let url; try { url = (await api('state')).login_url; } catch { return; }
+        if (!url || shown || !url.startsWith('https://')) return;
+        shown = true;
+        if (tab && !tab.closed) { tab.opener = null; tab.location.href = url; }
+        const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        link.textContent = 'Открыть страницу входа ChatGPT';
+        $('providerError').replaceChildren('Завершите вход на странице ChatGPT. Если вкладка не открылась: ', link);
+    }, 700) : null;
     try {render(await api('provider', {kind:$('provider').value, model:$('providerModel').value, endpoint:$('endpoint').value, key:$('key').value})); $('key').value=''; $('settings').close();}
     catch (error) {$('providerError').textContent = error.message;}
+    finally { clearInterval(watch); if (tab && !shown && !tab.closed) tab.close(); }
 };
 function disconnect() {
     if (keyboard) keyboard.reset();
