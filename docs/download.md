@@ -36,7 +36,7 @@ the Git repository and (when published) the key server agree.
 With the repository at hand:
 
 ```sh
-python scripts/release/verify-iso.py agi-os-2026.10.01-x86_64.iso --fingerprint <FINGERPRINT>
+python3 scripts/release/verify-iso.py agi-os-2026.10.01-x86_64.iso --fingerprint <FINGERPRINT>
 ```
 
 It imports `agios-release-key.asc` into a temporary keyring (yours is not
@@ -62,7 +62,10 @@ yourself; the fingerprint check is what matters.
 2. *File → Import* `agios-release-key.asc`; in the key's details compare the
    fingerprint with the published one.
 3. *File → Decrypt/Verify* `agi-os-…iso.sig` (the ISO must be in the same folder):
-   Kleopatra reports a valid signature by the AGIOS release key.
+   Kleopatra reports a valid signature by the AGIOS release key. A note that the
+   key is *not certified* only means you have not certified it yourself; the
+   fingerprint comparison in step 2 is what matters. An *expired* or *revoked*
+   key is a failure: do not use the image.
 4. Optionally the checksum in PowerShell:
    `Get-FileHash .\agi-os-…-x86_64.iso -Algorithm SHA256` and compare with the line
    in `SHA256SUMS`.
@@ -89,10 +92,24 @@ CI signs in the `release` job of `.github/workflows/iso.yml`:
 Signing by hand (key in your own keyring, e.g. on a hardware token):
 
 ```sh
-python scripts/release/sign-iso.py out --key <FINGERPRINT> --export-key
+python3 scripts/release/sign-iso.py out --key <FINGERPRINT> --export-key
 ```
 
 The script never creates or picks a key.
+
+### What the project owner must provide
+
+Nothing is signed until these exist (the build scripts never create a key):
+
+1. A decision on how the key is kept (options below).
+2. The key: an OpenPGP key whose primary fingerprint is published; for CI, its
+   ASCII-armored **signing subkey** (`gpg --armor --export-secret-subkeys FPR`)
+   as the secret `AGIOS_SIGNING_KEY`, plus `AGIOS_SIGNING_PASSPHRASE` if it has one.
+3. The repository variable `AGIOS_SIGNING_FINGERPRINT` (40 hex, primary key).
+4. The fingerprint in this page (section *Release signing key*), in
+   `RELEASE_FINGERPRINT` of `scripts/release/verify-iso.py`, in the README and on
+   keys.openpgp.org.
+5. A revocation certificate stored offline.
 
 ### Decisions left to the project owner
 

@@ -60,13 +60,17 @@ def gpg(args, passphrase=None, secret=False):
     return result
 
 
+REJECT = {"EXPSIG", "EXPKEYSIG", "REVKEYSIG", "BADSIG", "ERRSIG"}
+
+
 def signer_fingerprint(status):
-    """The primary-key fingerprint from gpg's VALIDSIG status line."""
-    for line in status.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[:2] == ["[GNUPG:]", "VALIDSIG"]:
-            return parts[-1]
-    return None
+    """The primary-key fingerprint of a good, current signature from gpg's status lines,
+    or None. VALIDSIG alone is not enough: gpg also reports it for an expired or revoked key."""
+    words = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] ")]
+    kinds = {w[1] for w in words if len(w) > 1}
+    if "GOODSIG" not in kinds or kinds & REJECT:
+        return None
+    return next((w[-1] for w in words if len(w) >= 3 and w[1] == "VALIDSIG"), None)
 
 
 def check_key(fingerprint):
@@ -86,7 +90,8 @@ def sign(directory, fingerprint, export_key=False, passphrase=None):
     outputs = []
     for target in (sums, files[0]):
         signature = target.with_name(target.name + ".sig")
-        gpg(["--local-user", fingerprint + "!", "--detach-sign", "--output", str(signature), str(target)],
+        # No "!": gpg picks the signing subkey, so the primary key may stay offline.
+        gpg(["--local-user", fingerprint, "--detach-sign", "--output", str(signature), str(target)],
             passphrase, secret=True)
         status = gpg(["--verify", str(signature), str(target)]).stderr
         if signer_fingerprint(status) != fingerprint:
