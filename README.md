@@ -31,6 +31,13 @@ guacd из закреплённого образа `guacamole/guacd:1.6.0` (squa
 графики, поэтому второй образ не нужен. Кэш пакетов хоста и оптимизированные
 под конкретный CPU пакеты не используются.
 
+Воспроизводимая сборка (как в CI): `scripts/ci/build-iso.sh` — mkarchiso в
+закреплённом контейнере Arch, пакеты из одного дня Arch Linux Archive
+(`scripts/ci/arch-snapshot`), `SOURCE_DATE_EPOCH` = время коммита; рядом с ISO
+кладутся `.sha256` и `build-info.json`. GitHub Actions запускает юнит-тесты на
+каждый PR, а сборку ISO со smoke-загрузкой в QEMU (UEFI и BIOS) — на `main`,
+теги `v*` (релиз) и PR, меняющие образ. Подробнее — [CI и сборка](docs/ci.md).
+
 ## Работа с системой
 
 1. Загрузить Live ISO. Сайт открывается автоматически.
@@ -82,7 +89,8 @@ node --check web/static/app.js
 [Live, превью и финализация](docs/local-web.md) ·
 [Архитектура](docs/installer-architecture.md) ·
 [Проверка установленной системы](docs/installation-testing.md) ·
-[Мост модели для разработки](docs/development-bridge.md)
+[Мост модели для разработки](docs/development-bridge.md) ·
+[CI и сборка](docs/ci.md)
 
 ## Лицензии
 
