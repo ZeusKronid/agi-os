@@ -70,9 +70,11 @@ function render(state) {
     $('consentError').hidden = !(state.consent && state.consent.error);
     if (state.consent && state.consent.error) $('consentError').textContent = state.consent.error;
     $('planForm').hidden = !!state.plan;
+    $('secureBootField').hidden = !(state.firmware === 'uefi' && state.configuration && state.configuration.bootloader === 'systemd-boot');
+    if ($('secureBootField').hidden) $('secureBoot').checked = false;
     $('buildForm').hidden = !state.plan;
     if (state.plan) {
-        $('estimate').textContent = `Система займёт ${gib(state.plan.estimate.installed)} (${state.plan.estimate.packages} пакетов, скачать ${gib(state.plan.estimate.download)}). Для превью с запасом нужно ${gib(state.plan.needed)}. Целевой диск: ${state.configuration.disk}.` + (state.plan.encrypt ? ' Корень будет зашифрован.' : '');
+        $('estimate').textContent = `Система займёт ${gib(state.plan.estimate.installed)} (${state.plan.estimate.packages} пакетов, скачать ${gib(state.plan.estimate.download)}). Для превью с запасом нужно ${gib(state.plan.needed)}. Целевой диск: ${state.configuration.disk}.` + (state.plan.encrypt ? ' Корень будет зашифрован.' : '') + (state.plan.secure_boot ? ' Загрузчик и ядро будут подписаны ключами Secure Boot.' : '');
         $('passphraseField').hidden = !state.plan.encrypt; $('passphrase').required = !!state.plan.encrypt;
         if (lastPlan !== state.plan.digest) { lastPlan = state.plan.digest; renderOptions(state.plan); }
     }
@@ -107,6 +109,12 @@ function render(state) {
     if (state.built) {
         $('finalTarget').textContent = 'Конечный диск: ' + state.built.target + (state.built.encrypted ? ' · корень зашифрован' : '');
         $('finalPassphraseField').hidden = !state.built.encrypted;
+        const setupMode = !!(state.hardware && state.hardware.setup_mode);
+        $('secureBootFinal').hidden = !state.built.secure_boot;
+        $('enrollKeys').disabled = !setupMode; if (!setupMode) $('enrollKeys').checked = false;
+        $('secureBootHint').textContent = setupMode
+            ? 'Прошивка в режиме Setup Mode. После записи ключей компьютер будет загружать только подписанные системы: эту, Windows и другие системы с подписью Microsoft. Live AGIOS не подписан — для него Secure Boot придётся временно отключить. BitLocker может один раз запросить ключ восстановления.'
+            : 'Прошивка не в режиме Setup Mode, ключи сейчас не записать. Система уже подписана: чтобы включить Secure Boot позже, сотрите ключи в настройках UEFI (Setup Mode), затем в установленной системе выполните «sudo sbctl enroll-keys --microsoft» и включите Secure Boot.';
         $('targetConfirm').placeholder = state.built.target;
         $('finalHint').textContent = state.built.on_target
             ? 'Превью уже лежит на этом диске: его разделы станут разделами системы без копирования. Перед установкой завершите работу внутри превью через меню выключения.'
@@ -157,7 +165,7 @@ $('prompt').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey)
 document.querySelectorAll('[data-prompt]').forEach(button => button.onclick = () => {$('prompt').value = button.dataset.prompt; $('prompt').focus();});
 $('planForm').onsubmit = async event => {
     event.preventDefault(); $('planButton').disabled = true;
-    try { render(await api('plan', {memory: +$('memory').value, encrypt: $('encrypt').checked})); } catch (error) { showError(error); } finally { $('planButton').disabled = false; }
+    try { render(await api('plan', {memory: +$('memory').value, encrypt: $('encrypt').checked, secure_boot: $('secureBoot').checked})); } catch (error) { showError(error); } finally { $('planButton').disabled = false; }
 };
 $('buildForm').onsubmit = async event => {
     event.preventDefault(); const option = selectedOption(); if (!option) return; $('build').disabled = true;
@@ -223,7 +231,7 @@ document.querySelectorAll('input[name=layout]').forEach(input => input.onchange 
 $('finalInstallForm').onsubmit = async event => {
     event.preventDefault(); $('installFinal').disabled=true;
     const passphrase = $('finalPassphrase').value; $('finalPassphrase').value = '';
-    try {await api('final/finalize',{layout: document.querySelector('input[name=layout]:checked').value, confirmation:$('targetConfirm').value.trim(), accepted:$('finalAccepted').checked, passphrase}); $('finalError').hidden = true; await refresh();}
+    try {await api('final/finalize',{layout: document.querySelector('input[name=layout]:checked').value, confirmation:$('targetConfirm').value.trim(), accepted:$('finalAccepted').checked, enroll_keys: $('enrollKeys').checked, passphrase}); $('finalError').hidden = true; await refresh();}
     catch(error) {finalError(error);} finally {$('installFinal').disabled=false;}
 };
 async function powerAction(action, button) {

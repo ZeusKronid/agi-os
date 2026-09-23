@@ -220,6 +220,10 @@ ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
 device by default (no swap partition, no hibernation). Full-root LUKS2 encryption
 is available: the user enables it and enters its passphrase privately in the app's
 confirmation form, never in this dialogue; just tell them it is offered there.
+Secure Boot is offered there too for UEFI with systemd-boot: the app creates the
+system's own keys, signs boot loader and kernel (re-signed on updates) and, if the
+firmware is in Setup Mode, enrolls the keys at final installation; recommend
+systemd-boot when the user wants Secure Boot. GRUB is not signed.
 No dual boot or partition preservation handler exists yet. Explain if these are
 requested; never misrepresent or silently omit them. User must agree to a supported
 alternative before you propose a configuration. Applications and environments

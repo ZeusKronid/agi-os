@@ -126,6 +126,7 @@ class State:
             built_config = Configuration.parse(self.built['configuration'])
             built = {'summary': built_config.summary(self.built['consent']['disk'], self.built.get('hardware')), 'target': self.built['consent']['target'],
                      'encrypted': self.built['encrypted'], 'digest': self.built['consent']['digest'],
+                     'secure_boot': bool(self.built.get('secure_boot')),
                      'storage': self.preview['option']['title'] if self.preview else None,
                      'on_target': bool(self.preview and self.preview['image']['format'] == 'raw'
                                        and self.preview['image']['path'].startswith(self.built['consent']['target'])),
@@ -154,6 +155,7 @@ class State:
         hardware = profile(self.controller.snapshot['hardware'])
         plan = driver_plan(hardware, config.packages if config else (), config.session if config else '')
         return {'lines': describe(hardware), 'packages': plan['packages'], 'services': plan['services'],
+                'secure_boot': hardware['secure_boot'], 'setup_mode': hardware['setup_mode'],
                 'notes': plan['notes'], 'unverified': plan['unverified'], 'configured': bool(config), 'virtual': virtual(hardware)}
 
     async def monitor_memory(self):
@@ -172,6 +174,7 @@ class State:
 
     async def build(self, config, consent, option, password, passphrase, memory, cpus):
         watchdog = None
+        secure_boot = bool(self.plan and self.plan.get('secure_boot'))
         try:
             self.phase, self.status = 'starting', 'Готовлю хранилище превью: ' + option['title']
             self.disk_ready = False
@@ -193,10 +196,11 @@ class State:
                 self.events.append(value)
                 self.status = value.get('text', self.status)
             hardware = profile(self.controller.snapshot['hardware'])
-            await self.vm.install(config, password, passphrase, event, hardware)
+            await self.vm.install(config, password, passphrase, event, hardware, secure_boot)
             self.phase, self.status = 'ready', 'Система установлена в превью и загружена'
             self.disk_ready = True
-            self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase), 'hardware': hardware}
+            self.built = {'configuration': config.as_dict(), 'consent': consent, 'encrypted': bool(passphrase), 'hardware': hardware,
+                          'secure_boot': secure_boot}
         except asyncio.CancelledError:
             self.phase, self.status = 'stopped', 'VM остановлена. Установка не завершена'
             raise
@@ -307,24 +311,29 @@ async def plan(request):
             raise ValidationError('Сначала согласуйте конфигурацию с агентом или уберите текущее превью')
         memory, _ = vm_size(data)
         encrypt = data.get('encrypt') is True
+        secure_boot = data.get('secure_boot') is True
         config = state.controller.configuration
         state.status = 'Считаю размер системы и ищу место для превью…'
         await asyncio.to_thread(state.refresh_inventory)
         consent = consent_binding(config, state.controller.snapshot)
         hardware = state.controller.snapshot['hardware']
+        if secure_boot and (state.controller.snapshot['firmware'] != 'uefi' or config.bootloader != 'systemd-boot'):
+            raise ValidationError('Подпись для Secure Boot доступна при загрузке UEFI и загрузчике systemd-boot')
         try:
             await asyncio.to_thread(state.controller.catalog.validate, driver_plan(hardware, config.packages, config.session)['packages'])
         except ValidationError as exc:
             raise ValidationError('Ошибка установщика, не вашего выбора — драйверы по железу отсутствуют в репозиториях: ' + str(exc))
-        estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config, hardware))
+        estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config, hardware, secure_boot))
         needed = int(estimate['installed'] * 1.2) + 2 * GIB
         # LUKS output is incompressible: an encrypted in-memory preview needs its full size.
         compression = 1.0 if encrypt else 1.3
         probe = await privileged('storage_worker.py', {'op': 'probe', 'needed': needed, 'target': config.disk,
                                                        'vm_memory': memory * 2**20, 'compression': compression})
         digest = hashlib.sha256(json.dumps({'consent': consent['digest'], 'needed': needed, 'memory': memory, 'encrypt': encrypt,
+                                            'secure_boot': secure_boot,
                                             'options': [o['id'] for o in probe['options']]}, sort_keys=True).encode()).hexdigest()
         state.plan = {'digest': digest, 'estimate': estimate, 'needed': needed, 'memory': memory, 'encrypt': encrypt,
+                      'secure_boot': secure_boot,
                       'compression': compression, 'options': probe['options'], 'consent': consent['digest']}
         state.status = 'Выберите, где сделать превью, и подтвердите'
         return web.json_response(state.public())
@@ -508,9 +517,15 @@ async def finalize(request):
         passphrase = ''
         if built['encrypted']:
             passphrase = secret_text(data.get('passphrase', ''), 'Пароль шифрования', 8, 512)
+        enroll = data.get('enroll_keys') is True
+        if enroll and not built.get('secure_boot'):
+            raise ValidationError('Система в превью не подписана для Secure Boot')
+        if enroll and profile(state.controller.snapshot['hardware'])['setup_mode'] is not True:
+            raise ValidationError('Прошивка не в режиме Setup Mode: ключи Secure Boot сейчас записать нельзя')
         payload = {'target': built['consent']['target'], 'fingerprint': built['consent']['fingerprint'],
                    'configuration': built['configuration'], 'passphrase': passphrase,
-                   'image': state.preview['image'], 'layout': layout, 'confirmation': data['confirmation']}
+                   'image': state.preview['image'], 'layout': layout, 'confirmation': data['confirmation'],
+                   'enroll_keys': enroll}
         # Mark synchronously before scheduling, preventing a concurrent second submission.
         state.controller.installing = True
         state.final = {'phase': 'working', 'target': payload['target'], 'layout': layout, 'events': []}

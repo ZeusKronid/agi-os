@@ -77,9 +77,13 @@ def partition_path(disk, number):
     return disk + ("p" if disk[-1].isdigit() else "") + str(number)
 
 
-def packages_for(config, hardware):
+SBCTL_EFI = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+
+
+def packages_for(config, hardware, secure_boot=False):
     """Everything the target receives: base, filesystem tools, the user's choices and
-    the drivers derived from the real computer's hardware (never from the preview VM)."""
+    the drivers derived from the real computer's hardware (never from the preview VM).
+    Secure Boot adds sbctl: own keys, signing and re-signing on every kernel update."""
     packages = [*BASE_PACKAGES, config.filesystem + "-progs" if config.filesystem == "btrfs"
                 else {"ext4": "e2fsprogs", "xfs": "xfsprogs", "f2fs": "f2fs-tools"}[config.filesystem],
                 *config.packages, *driver_plan(hardware, config.packages, config.session)["packages"]]
@@ -87,6 +91,8 @@ def packages_for(config, hardware):
         packages += ["grub", "efibootmgr"]
     if config.session:
         packages += ["python-gobject", "gtk3"]
+    if secure_boot:
+        packages.append("sbctl")
     return list(dict.fromkeys(packages))
 
 
@@ -114,6 +120,12 @@ def trim_cache(runner):
         pass  # Media without discard support simply keep their blocks allocated.
 
 
+def sbctl_unsigned(output):
+    """Files `sbctl verify` reports as not signed (it marks them with ✗)."""
+    return [line.split("✗", 1)[1].split(" is not signed")[0].strip()
+            for line in output.splitlines() if "✗" in line]
+
+
 def write_file(relative, text, mode=0o644):
     path = TARGET / relative
     if not path.resolve().is_relative_to(TARGET.resolve()):
@@ -126,7 +138,7 @@ def write_file(relative, text, mode=0o644):
 def preflight(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError("Запись дисков разрешена только в загруженной live-системе AGI OS")
-    if set(request) - {"passphrase", "hardware"} != {"configuration", "fingerprint", "consent_digest", "password"}:
+    if set(request) - {"passphrase", "hardware", "secure_boot"} != {"configuration", "fingerprint", "consent_digest", "password"}:
         raise ValidationError("Неизвестный запрос установки")
     config = Configuration.parse(request["configuration"])
     # Inside the preview VM the site passes the real computer's inventory; a native
@@ -144,6 +156,10 @@ def preflight(request):
         raise ValidationError("Диск изменился после подтверждения; запись отменена")
     if snapshot["firmware"] == "bios" and config.bootloader != "grub":
         raise ValidationError("Для BIOS требуется загрузчик GRUB")
+    if request.setdefault("secure_boot", False) not in (True, False):
+        raise ValidationError("Некорректный выбор Secure Boot")
+    if request["secure_boot"] and (snapshot["firmware"] != "uefi" or config.bootloader != "systemd-boot"):
+        raise ValidationError("Подпись для Secure Boot поддерживается для UEFI с загрузчиком systemd-boot")
     password = request["password"]
     if not isinstance(password, str) or not 8 <= len(password) <= 256 or any(c in password for c in "\n\r\x00"):
         raise ValidationError("Введите пароль длиной от 8 до 256 символов без переносов строк")
@@ -186,7 +202,8 @@ def install(request, runner):
     config, snapshot, disk = preflight(request)
     hardware = request.get("hardware") or snapshot["hardware"]
     drivers = driver_plan(hardware, config.packages, config.session)
-    packages = packages_for(config, hardware)
+    secure_boot = request.get("secure_boot") is True
+    packages = packages_for(config, hardware, secure_boot)
     emit("progress", stage=4, text="Проверяю репозитории и пакеты до изменения диска…")
     runner.run(["pacman", "-Sy", "--noconfirm"], timeout=180)
     catalog = Catalog()
@@ -244,8 +261,16 @@ def install(request, runner):
         # Install in batches and drop the download cache between them: the preview
         # image may live in memory, so its peak size must stay close to the installed size.
         chosen = set(config.packages)
-        core = [q for q in qualified if q.rsplit("/", 1)[-1] not in chosen]
+        # sbctl signs every kernel it sees from its pacman and mkinitcpio hooks; it
+        # comes after the base system, once its keys exist.
+        late = {"sbctl"} if secure_boot else set()
+        core = [q for q in qualified if q.rsplit("/", 1)[-1] not in chosen | late]
         retrying(runner, ["pacstrap", "-K", str(TARGET), *core])
+        if secure_boot:
+            emit("progress", stage=5, text="Создаю собственные ключи Secure Boot этой системы…")
+            retrying(runner, ["arch-chroot", str(TARGET), "pacman", "-S", "--noconfirm", "--needed", "--",
+                              *[q for q in qualified if q.rsplit("/", 1)[-1] in late]])
+            runner.run(["arch-chroot", str(TARGET), "sbctl", "create-keys"])
         extra = [q for q in qualified if q.rsplit("/", 1)[-1] in chosen]
         for index in range(0, len(extra), BATCH):
             batch = extra[index:index + BATCH]
@@ -309,7 +334,15 @@ def install(request, runner):
             runner.run(args)
             runner.run([*chroot, "grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
         else:
+            if secure_boot:
+                # bootctl installs the .signed copy when it exists; sbctl re-signs it on updates.
+                runner.run([*chroot, "sbctl", "sign", "--save", "--output", SBCTL_EFI + ".signed", SBCTL_EFI])
             runner.run([*chroot, "bootctl", "--esp-path=/boot", "--no-variables", "install"])
+            if secure_boot:
+                runner.run([*chroot, "sbctl", "sign", "--save", "/boot/vmlinuz-linux"])
+                unsigned = sbctl_unsigned(runner.run([*chroot, "sbctl", "verify"]))
+                if unsigned:
+                    raise ValidationError("Не подписаны для Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
             options = kernel_options if encrypted else f"root=UUID={root_uuid} rw"
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
@@ -327,6 +360,7 @@ def install(request, runner):
         record = {"id": uuid.uuid4().hex, "configuration": config.as_dict(), "packages": packages,
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
                   "firmware": firmware, "encrypted": encrypted, "swap": "zram",
+                  "secure_boot": {"signed": True, "enrolled": False} if secure_boot else None,
                   "hardware": hardware, "drivers": drivers, "status": "first_boot_pending"}
         write_file("var/lib/agi-os/installation.json", json.dumps(record, ensure_ascii=False, indent=2))
         write_file("usr/local/share/agi-os/verify.py", (HERE / "verify.py").read_text())
