@@ -92,6 +92,24 @@ the pinned guacd image), QEMU, `qemu-img`, OVMF, Python 3 as `python`, rsync,
 squashfs-tools 4.6 or newer (`sqfstar`), `/dev/kvm` and ~15 GB free disk. Such a
 runner must be a dedicated build machine, not someone's workstation.
 
+## Versions and the update check
+
+`scripts/build-iso.sh` writes `/usr/local/share/agi-os/version.json` into the image:
+`version` is the release tag (`AGIOS_VERSION`, set by `iso.yml` for `v*` tags) or
+`dev` for every other build, plus the source revision, the build time
+(`SOURCE_DATE_EPOCH`) and the Arch snapshot. The website shows it at the bottom of
+the page (`GET /api/version`, `web/release.py`), and the smoke boot checks that the
+Live reports the expected version.
+
+«Проверить обновления» (`POST /api/version/check`) asks
+`https://api.github.com/repos/ZeusKronid/agi-os/releases/latest` for the latest
+published release **only when the user presses the button**; the Live never
+contacts the release server on its own. The answer is reduced to the version,
+date, release notes (bounded) and links that stay on `github.com`. A release build
+compares versions (`v1.2.3`, pre-releases like `v1.2.3-rc.1` sort first); a `dev`
+build only names the latest release. Verifying and writing the new ISO is on the
+download page; the Live does not download or apply anything itself.
+
 ## Releases
 
 Pushing a tag `v*` runs the whole pipeline and then publishes a GitHub release
