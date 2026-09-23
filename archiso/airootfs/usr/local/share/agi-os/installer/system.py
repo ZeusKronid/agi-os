@@ -73,7 +73,7 @@ class Catalog:
             sync = Path("/var/lib/pacman/sync")
             if live_environment() and any(not (sync / (repo + ".db")).is_file()
                                           for repo in ("core", "extra")):
-                read_command(["sudo", "-n", "pacman", "-Sy", "--noconfirm"], timeout=180)
+                read_command(["sudo", "-n", "/usr/bin/pacman", "-Sy", "--noconfirm"], timeout=180)
             output = read_command(["pacman", "-Sl", "core", "extra"], timeout=60)
             if not output.strip():
                 raise ValidationError("Каталог пакетов пуст. Проверьте сеть и повторите запрос: "

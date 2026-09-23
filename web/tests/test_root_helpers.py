@@ -260,7 +260,7 @@ class SymlinkTests(unittest.TestCase):
     def test_image_file_changes_owner_without_following_links(self):
         folder = self.tmp / 'AGIOS-PREVIEW'
         with patch.object(storage_worker, 'sh', side_effect=lambda args, **kw: Path(args[-2]).write_bytes(b'')), \
-                patch.object(storage_worker, 'agi_ids', return_value=(os.getuid(), os.getgid())), \
+                patch.object(storage_worker, 'site_owner', return_value=(os.getuid(), os.getgid())), \
                 patch.object(storage_worker.os, 'chown') as chown:
             image = storage_worker.image_file(folder, GIB)
         self.assertEqual(image, {'format': 'qcow2', 'path': str(folder / 'preview.qcow2')})
@@ -324,7 +324,7 @@ class PrepareTests(unittest.TestCase):
         stat = os.statvfs(self.tmp)
         with Environment(snapshot), patch.object(storage_worker, 'PREVIEW', self.tmp), \
                 patch.object(storage_worker, 'sh', side_effect=self.sh), \
-                patch.object(storage_worker, 'agi_ids', return_value=(os.getuid(), os.getgid())), \
+                patch.object(storage_worker, 'site_owner', return_value=(os.getuid(), os.getgid())), \
                 patch.object(storage_worker.os, 'statvfs', return_value=type(stat)((0, 4096, 0, 0, 10**9, 0, 0, 0, 0, 255))):
             return storage_worker.prepare(request)
 

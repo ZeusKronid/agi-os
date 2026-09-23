@@ -1,1 +1,1 @@
-SUBSYSTEM=="virtio-ports", ATTR{name}=="org.agi-os.qa", GROUP="agi", MODE="0660"
+SUBSYSTEM=="virtio-ports", ATTR{name}=="org.agi-os.qa", MODE="0600"
