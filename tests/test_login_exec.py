@@ -101,7 +101,7 @@ class ProtectedPathTests(unittest.TestCase):
 class LoginReviewTests(unittest.TestCase):
     def test_login_entries_list_exact_commands(self):
         config = config_with(
-            home=[(".config/autostart/sync.desktop", "[Desktop Entry]\nType=Application\nExec=syncthing serve\n"),
+            home=[(".config/autostart/sync.desktop", "[Desktop Entry]\nType=Application\nName=Sync\nExec=syncthing serve\n"),
                   (".config/sway/config", "set $mod Mod4\nexec waybar\nexec_always kanshi\nbindsym $mod+Return exec foot\n"),
                   (".config/hypr/hyprland.conf", "monitor=,preferred,auto,1\nexec-once = mako\n"),
                   (".config/systemd/user/x.service", "[Service]\nExecStart=/usr/bin/x --daemon\n"),
@@ -109,7 +109,7 @@ class LoginReviewTests(unittest.TestCase):
                   (".config/xfce4/xinitrc", "xset s off\nexec startxfce4\n"),
                   (".config/foot/foot.ini", "[main]\nfont=monospace:size=11\n")],
             system=[("etc/greetd/config.toml", '[default_session]\ncommand = "tuigreet --cmd sway"\n'),
-                    ("usr/local/share/wayland-sessions/my.desktop", "[Desktop Entry]\nName=My\nExec=sway --unsupported-gpu\n")])
+                    ("usr/local/share/wayland-sessions/my.desktop", "[Desktop Entry]\nType=Application\nName=My\nExec=sway --unsupported-gpu\n")])
         entries = {e["path"]: e["commands"] for e in config.login_entries()}
         self.assertEqual(entries["~/.config/autostart/sync.desktop"], ["Exec=syncthing serve"])
         self.assertEqual(entries["~/.config/sway/config"], ["exec waybar", "exec_always kanshi"])

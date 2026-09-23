@@ -76,7 +76,7 @@ class LocalApiTests(AioHTTPTestCase):
     async def test_login_commands_need_their_own_confirmation(self):
         state = self.app['state']
         data = DemoProvider().reply('', [])['configuration']
-        data['home_files'] = [{'path': '.config/autostart/x.desktop', 'content': '[Desktop Entry]\nExec=syncthing serve\n'}]
+        data['home_files'] = [{'path': '.config/autostart/x.desktop', 'content': '[Desktop Entry]\nType=Application\nName=Sync\nExec=syncthing serve\n'}]
         state.controller.configuration = Configuration.parse(data)
         self.assertEqual(state.public()['login'][0]['commands'], ['Exec=syncthing serve'])
         self.fake_plan(state)
