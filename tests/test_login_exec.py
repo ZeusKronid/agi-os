@@ -112,6 +112,15 @@ class LoginReviewTests(unittest.TestCase):
         self.assertIn("ЗАПУСКАЕТСЯ ПРИ ВХОДЕ", summary)
         self.assertIn("syncthing serve", summary)
 
+    def test_lua_hyprland_start_hooks_and_scripts_are_listed(self):
+        lua = ('hl.bind("SUPER + Return", hl.dsp.exec_cmd("foot"))\n'
+               'hl.on("hyprland.start", function ()\n    hl.exec_cmd("waybar")\nend)\n')
+        config = config_with(home=[(".config/hypr/hyprland.lua", lua),
+                                   (".config/hypr/welcome.sh", "# greet\nprintf 'hi'\nexec /bin/bash -i\n")])
+        entries = {e["path"]: e["commands"] for e in config.login_entries()}
+        self.assertEqual(entries["~/.config/hypr/hyprland.lua"], ['hl.exec_cmd("waybar")'])
+        self.assertEqual(entries["~/.config/hypr/welcome.sh"], ["printf 'hi'", "exec /bin/bash -i"])
+
     def test_plain_configuration_needs_no_login_review(self):
         config = config_with(home=[(".config/hypr/hyprland.conf", "monitor=,preferred,auto,1\n")])
         self.assertEqual(config.login_entries(), [])
