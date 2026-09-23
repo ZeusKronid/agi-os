@@ -187,11 +187,19 @@ class ChatGPTProvider:
         self.rpc("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id})
         raise ProviderError("Ответ ChatGPT занял слишком много времени")
 
+    JOIN_TIMEOUT = 5
+
     def close(self):
         with self.close_lock:
             if self.closed.is_set():
                 return
             self.closed.set()
+            # EOF first: the app-server ends on its own, even if it outlived bwrap.
+            if self.proc.stdin:
+                try:
+                    self.proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
             if self.proc.poll() is None:
                 try:
                     self.proc.terminate()
@@ -201,11 +209,13 @@ class ChatGPTProvider:
                     self.proc.wait()
                 except ProcessLookupError:
                     pass
-            self.owner.join(timeout=5)
-            self.reader.join(timeout=5)
-            for pipe in (self.proc.stdin, self.proc.stdout):
-                if pipe:
-                    try:
-                        pipe.close()
-                    except (OSError, ValueError):
-                        pass
+            self.owner.join(timeout=self.JOIN_TIMEOUT)
+            self.reader.join(timeout=self.JOIN_TIMEOUT)
+            # A reader still blocked in readline holds the buffer lock: closing stdout
+            # now would wait for it forever (a sandboxed child that escaped the kill
+            # still holds the pipe). The daemon reader ends when the last writer exits.
+            if self.proc.stdout and not self.reader.is_alive():
+                try:
+                    self.proc.stdout.close()
+                except (OSError, ValueError):
+                    pass
