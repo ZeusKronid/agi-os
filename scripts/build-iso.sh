@@ -58,6 +58,17 @@ cp scripts/web/qa-guest.py "$share/qa-guest.py"
 mkdir -p "$profile/airootfs/usr/share/licenses/agi-guacamole"
 cp .local/guacamole-client-1.6.0/LICENSE .local/guacamole-client-1.6.0/NOTICE "$profile/airootfs/usr/share/licenses/agi-guacamole/"
 git -C "$repo" rev-parse HEAD > "$share/source-revision" 2>/dev/null || true
+# What the Live reports as its version (web/release.py): a v* tag for releases, else "dev".
+python - "$share/version.json" "${AGIOS_VERSION:-dev}" "$snapshot" <<'PY'
+import json, os, re, subprocess, sys, time
+path, version, snapshot = sys.argv[1:]
+if version != 'dev' and not re.fullmatch(r'v\d+(\.\d+){0,2}(-[0-9A-Za-z.]+)?', version):
+    sys.exit(f'AGIOS_VERSION must be a release tag like v0.1.0, not {version!r}')
+revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip() or None
+built = int(os.environ.get('SOURCE_DATE_EPOCH') or time.time())
+json.dump({'version': version, 'revision': revision, 'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(built)),
+           'arch_snapshot': snapshot or None}, open(path, 'w'), indent=2)
+PY
 if [[ -n $snapshot ]]; then
     # Build-time only: mkarchiso resolves packages with this file; the Live keeps its own pacman.conf.
     sed -i "s|^Include = /etc/pacman.d/mirrorlist\$|Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch|" "$profile/pacman.conf"
