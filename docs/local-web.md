@@ -79,8 +79,8 @@ connect a provider.
 ## Live runtime
 
 - `agi-web.service`: website/controller at `127.0.0.1:8787` (system user
-  `agi-web`, groups `kvm render video disk optical`, state in `/var/lib/agi-os`
-  with mode 0700). Root helpers via `sudo -n`: `storage_worker.py`
+  `agi-web`, groups `kvm render video disk optical systemd-journal`, state in
+  `/var/lib/agi-os` with mode 0700). Root helpers via `sudo -n`: `storage_worker.py`
   (probe/prepare/revert), `finalize_worker.py`.
 - `agi-guacd.service`: Guacamole gateway at `127.0.0.1:14822` (user `agi-web`).
 - `agi-guest.service`: the installer inside the inner VM only.
@@ -99,6 +99,45 @@ the site's own browser tab (`login_url` in `/api/state`), not by `xdg-open`.
 
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.
+
+## Logs and diagnostics
+
+Every component writes structured records to journald (`installer/journal.py`,
+native journal protocol, no extra packages):
+
+| Identifier | Process |
+| --- | --- |
+| `agios-web` | the website: API calls, preview build and finalization steps, helper calls |
+| `agios-storage` | `storage_worker.py` (root): operations and every command it runs |
+| `agios-finalize` | `finalize_worker.py` (root) |
+| `agios-worker`, `agios-guest` | the installer inside the inner VM |
+
+Fields: `AGIOS_EVENT` (machine-readable name such as `build.failed`),
+`AGIOS_OPERATION` (one id per preview build or finalization, passed to the
+root helpers as `trace` in their JSON request, so one operation can be followed
+across processes), `AGIOS_DATA` (JSON details), `AGIOS_ERROR` (exception type;
+the traceback is part of `MESSAGE`). Every record passes `journal.redact()`:
+secret-named keys (`password`, `passphrase`, `*_token`, `api_key`, …), API key and
+token formats, crypt hashes and URL credentials become `***`. Commands that get a
+secret on stdin never have their output logged.
+
+```sh
+journalctl -b -t agios-web -t agios-storage -t agios-finalize
+journalctl -b AGIOS_OPERATION=build-…      # one preview build across processes
+```
+
+The inner VM's journal lives in its memory; it is forwarded to the serial
+console (`systemd.journald.forward_to_console=1`) and ends up in
+`/var/lib/agi-os/vm/<VM>/guest-console.log` on the Live side.
+
+**Diagnostics** button (page header, `POST /api/diagnostics`): a
+`agios-diagnostics-<time>.tar.gz` with the AGIOS journal of this boot, the
+journal of Live services, warnings and errors of the whole system, the site state
+and session record, the hardware inventory (disk serial numbers shortened to the
+last four characters), versions (ISO, source revision, kernel, key packages) and
+the tails of the preview VM logs — all through the same redaction. The site
+reads the system journal through the `systemd-journal` group, without sudo.
+Nothing is sent anywhere automatically; the user saves the archive and decides.
 
 ## Limits
 

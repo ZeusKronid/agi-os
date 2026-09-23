@@ -9,7 +9,7 @@ Type=simple
 # A system user of its own: the Live desktop user agi has no disk access and no root.
 User=agi-web
 Group=agi-web
-SupplementaryGroups=kvm render video disk optical
+SupplementaryGroups=kvm render video disk optical systemd-journal
 StateDirectory=agi-os
 StateDirectoryMode=0700
 Environment=AGIOS_DATA_DIR=/var/lib/agi-os

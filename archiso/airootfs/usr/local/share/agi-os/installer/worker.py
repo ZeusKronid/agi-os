@@ -20,6 +20,7 @@ from pathlib import Path
 
 from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
+from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
 
 
@@ -27,6 +28,7 @@ TARGET = Path("/mnt/agi-os")
 HERE = Path(__file__).resolve().parent
 BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python", "zram-generator")
 CRYPT_NAME = "cryptroot"
+LOG = Logger("worker")
 
 
 def emit(kind, **data):
@@ -38,12 +40,25 @@ class Cancelled(RuntimeError):
 
 
 class Runner:
-    def __init__(self):
+    def __init__(self, log=None):
         self.cancel = threading.Event()
+        self.log = log or LOG
 
     def run(self, args, input_text=None, timeout=1800):
         if self.cancel.is_set():
             raise Cancelled("Установка остановлена. Диск мог быть частично изменён.")
+        started = time.monotonic()
+        try:
+            output = self._run(args, input_text, timeout)
+        except Exception as exc:
+            # Output of a command that received a secret on stdin is never logged.
+            self.log.warning("command.failed", f"{args[0]}: {exc}" if input_text is None else f"{args[0]}: ошибка",
+                             args=list(args), seconds=round(time.monotonic() - started, 2))
+            raise
+        self.log.info("command.done", args[0], args=list(args), seconds=round(time.monotonic() - started, 2))
+        return output
+
+    def _run(self, args, input_text, timeout):
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, start_new_session=True,
             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
@@ -378,9 +393,13 @@ def main():
             runner.cancel.set()
 
         threading.Thread(target=watch_cancel, daemon=True).start()
+        LOG.info("install.start", "Установка начата")
         install(request, runner)
+        LOG.info("install.done", "Установка завершена")
     except (Exception, KeyboardInterrupt) as exc:
-        emit("error", text=str(exc) if isinstance(exc, (ValidationError, Cancelled))
+        known = isinstance(exc, (ValidationError, Cancelled))
+        LOG.error("install.failed", str(exc) if known else "Внутренняя ошибка установки", exc=None if known else exc)
+        emit("error", text=str(exc) if known
              else "Установка прервана внутренней ошибкой. Результат не считается готовым.")
         return 1
     return 0
