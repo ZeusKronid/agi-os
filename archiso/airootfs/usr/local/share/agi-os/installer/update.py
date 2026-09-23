@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -266,8 +267,12 @@ def apply(force=False):
     handle = locked()
     try:
         if (PACMAN_DB / "db.lck").exists():
-            raise UpdateError("Менеджер пакетов уже занят другой операцией (/var/lib/pacman/db.lck). "
-                              "Дождитесь её окончания; если её нет — перезагрузите компьютер.")
+            if subprocess.run(["pgrep", "-x", "pacman"], capture_output=True).returncode == 0:
+                raise UpdateError("Менеджер пакетов занят другой операцией. Дождитесь её окончания и повторите.")
+            # The lock lives on disk and survives a reboot; removing it is the user's decision.
+            raise UpdateError("Осталась блокировка от прерванной операции pacman (/var/lib/pacman/db.lck). "
+                              "Если никакой менеджер пакетов сейчас не запущен, удалите её: "
+                              "sudo rm /var/lib/pacman/db.lck — и повторите.")
         low = on_battery_below()
         if low is not None and not force:
             raise UpdateError(f"Заряд батареи {low}% без зарядки. Подключите питание: обрыв во время "
@@ -294,8 +299,9 @@ def apply(force=False):
         try:
             stream(["pacman", "-Su", "--noconfirm"])
         except UpdateError as exc:
-            hint = ("Часть пакетов могла обновиться. Не перезагружайтесь до повторной попытки: "
-                    "sudo agi-os-update apply")
+            hint = ("Часть пакетов могла обновиться. Не перезагружайтесь и не устанавливайте отдельные "
+                    "пакеты до повторной попытки: sudo agi-os-update apply. Если pacman задаёт вопрос "
+                    "(конфликт пакетов), выполните в терминале sudo pacman -Syu и ответьте на него")
             if taken:
                 hint += f". Снимок системы до обновления: {taken}"
             raise UpdateError(hint + "\n" + str(exc)) from None
@@ -304,6 +310,10 @@ def apply(force=False):
         refreshed = refresh_bootloader(bootloader(), changed)
         if refreshed:
             emit("Загрузчик обновлён: " + ", ".join(refreshed))
+            if shutil.which("sbctl"):
+                # Secure Boot: the freshly copied loader must be signed again before the next boot.
+                run(["sbctl", "sign-all"])
+                emit("Загрузчик подписан заново (sbctl)")
         status.update({"checked_at": stamp, "updates": [], "kernel": False,
                        "reboot_required": reboot_required(changed), "applied_boot_id": boot_id(),
                        "pacnew": pacnew_files(),

@@ -126,6 +126,7 @@ class ApplyTests(unittest.TestCase):
             patch.object(update, "bootloader", return_value="grub"),
             patch.object(update, "pacnew_files", return_value=[]),
             patch.object(update, "boot_id", return_value="boot-1"),
+            patch.object(update.shutil, "which", return_value=None),
             patch.object(update.Path, "is_dir", lambda self: str(self) == "/sys/firmware/efi" or Path.exists(self)),
             patch("builtins.print"),
         ]
@@ -166,9 +167,18 @@ class ApplyTests(unittest.TestCase):
 
     def test_busy_package_manager_is_refused(self):
         (self.pacman / "db.lck").write_text("")
-        with self.assertRaises(update.UpdateError):
-            update.apply()
+        for running, expected in ((0, "занят"), (1, "sudo rm /var/lib/pacman/db.lck")):
+            with patch.object(update.subprocess, "run", return_value=subprocess.CompletedProcess([], running)):
+                with self.assertRaises(update.UpdateError) as caught:
+                    update.apply()
+            self.assertIn(expected, str(caught.exception))
+        self.assertTrue((self.pacman / "db.lck").exists())
         self.assertEqual(self.calls, [])
+
+    def test_secure_boot_loader_is_signed_again(self):
+        with patch.object(update.shutil, "which", return_value="/usr/bin/sbctl"):
+            update.apply()
+        self.assertEqual(self.calls[-1], ["sbctl", "sign-all"])
 
     def test_small_free_space_is_refused(self):
         with patch.object(update, "free_bytes", return_value=100 * 1024 ** 2):
