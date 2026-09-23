@@ -187,6 +187,7 @@ class FinalizeEnrollTests(unittest.TestCase):
             finalize_worker.enroll_keys(runner, ["arch-chroot", "/t"], record)
             self.assertEqual(runner.calls[-1], ["arch-chroot", "/t", "sbctl", "enroll-keys", "--microsoft"])
             self.assertTrue(record["secure_boot"]["enrolled"])
+            self.assertTrue(record["secure_boot"]["verified"])
             runner, record = Runner(UNSIGNED), {"secure_boot": {"signed": True, "enrolled": False}}
             with self.assertRaises(ValidationError):
                 finalize_worker.enroll_keys(runner, ["arch-chroot", "/t"], record)
@@ -221,6 +222,20 @@ class VerifyTests(unittest.TestCase):
                 path.write_bytes(data)
                 self.assertEqual(verify.pe_signed(path), expected, name)
             self.assertFalse(verify.pe_signed(Path(tmp) / "missing"))
+
+    def test_unreadable_esp_falls_back_to_firmware_or_finalization(self):
+        """Run B: after a copy /boot is vfat fmask=0077; the user cannot read the images."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            efivars = root / "sys/firmware/efi/efivars"
+            efivars.mkdir(parents=True)
+            with patch.object(verify.Path, "read_bytes", side_effect=PermissionError):
+                self.assertIsNone(verify.pe_signed(root / "boot/vmlinuz-linux"))
+            with patch.object(verify, "pe_signed", return_value=None):
+                self.assertFalse(verify.boot_chain_signed({"signed": True}, root))
+                self.assertTrue(verify.boot_chain_signed({"signed": True, "verified": True}, root))
+                (efivars / verify.SECURE_BOOT_VAR).write_bytes(b"\x06\x00\x00\x00\x01")
+                self.assertTrue(verify.boot_chain_signed({"signed": True}, root))
 
     def test_secure_boot_checks_follow_the_record(self):
         with tempfile.TemporaryDirectory() as tmp:
