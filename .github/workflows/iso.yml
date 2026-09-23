@@ -109,9 +109,34 @@ jobs:
         run: scripts/ci/changelog.sh "$GITHUB_REF_NAME" out/build-info.json > out/CHANGELOG.md
       - name: Verify the checksum
         run: cd out && sha256sum --check agi-os-*.iso.sha256
+      - name: Sign the release
+        # SHA256SUMS and detached OpenPGP signatures (docs/download.md). The private key
+        # lives only in the secret and in a throwaway GNUPGHOME of this job.
+        env:
+          AGIOS_SIGNING_KEY: ${{ secrets.AGIOS_SIGNING_KEY }}
+          AGIOS_SIGNING_PASSPHRASE: ${{ secrets.AGIOS_SIGNING_PASSPHRASE }}
+          AGIOS_SIGNING_FINGERPRINT: ${{ vars.AGIOS_SIGNING_FINGERPRINT }}
+          AGIOS_ALLOW_UNSIGNED_RELEASE: ${{ vars.AGIOS_ALLOW_UNSIGNED_RELEASE }}
+        run: |
+          if [[ -z $AGIOS_SIGNING_KEY || -z $AGIOS_SIGNING_FINGERPRINT ]]; then
+            if [[ $AGIOS_ALLOW_UNSIGNED_RELEASE == 1 ]]; then
+              echo '::warning::Release published WITHOUT signatures: no signing key is configured'
+              exit 0
+            fi
+            echo '::error::No signing key: set the secret AGIOS_SIGNING_KEY and the variable AGIOS_SIGNING_FINGERPRINT (docs/download.md)'
+            exit 1
+          fi
+          GNUPGHOME=$(mktemp -d); export GNUPGHOME
+          trap 'gpgconf --kill all; rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$AGIOS_SIGNING_KEY" | gpg --batch --quiet --import
+          python -B scripts/release/sign-iso.py out --export-key
+          # The published files must pass the same check users run.
+          python -B scripts/release/verify-iso.py out/agi-os-*.iso --fingerprint "$AGIOS_SIGNING_FINGERPRINT"
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          files=(out/agi-os-*.iso out/agi-os-*.iso.sha256 out/build-info.json)
+          if [[ -f out/SHA256SUMS ]]; then files+=(out/SHA256SUMS out/*.sig out/agios-release-key.asc); fi
           gh release create "$GITHUB_REF_NAME" --title "AGIOS $GITHUB_REF_NAME" --notes-file out/CHANGELOG.md --verify-tag \
-            out/agi-os-*.iso out/agi-os-*.iso.sha256 out/build-info.json
+            "${files[@]}"

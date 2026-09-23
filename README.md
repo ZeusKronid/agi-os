@@ -38,6 +38,8 @@ guacd из закреплённого образа `guacamole/guacd:1.6.0` (squa
 кладутся `.sha256` и `build-info.json`. GitHub Actions запускает юнит-тесты на
 каждый PR, а сборку ISO со smoke-загрузкой в QEMU (UEFI и BIOS) — на `main`,
 теги `v*` (релиз) и PR, меняющие образ. Подробнее — [CI и сборка](docs/ci.md).
+Релиз подписывается OpenPGP (`SHA256SUMS`, `.sig`); как скачать и проверить образ —
+[Загрузка и проверка](docs/download.md).
 
 ## Работа с системой
 
@@ -91,7 +93,8 @@ node --check web/static/app.js
 [Архитектура](docs/installer-architecture.md) ·
 [Проверка установленной системы](docs/installation-testing.md) ·
 [Мост модели для разработки](docs/development-bridge.md) ·
-[CI и сборка](docs/ci.md)
+[CI и сборка](docs/ci.md) ·
+[Загрузка и проверка](docs/download.md)
 
 ## Лицензии
 
