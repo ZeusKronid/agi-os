@@ -178,7 +178,10 @@ def gui(record):
         sleep_button = Gtk.Button(label="Проверить гибернацию (компьютер выключится и восстановит этот сеанс)")
         box.pack_start(sleep_button, False, False, 0)
     hint = Gtk.Label(label="Для проверки сохранности файлов нужна ещё одна перезагрузка.\n"
-                    "В окружениях без автозапуска откройте agi-os-verify --gui повторно.", xalign=0)
+                    "В окружениях без автозапуска откройте agi-os-verify --gui повторно."
+                    + ("\nГибернация была выбрана при установке, поэтому проверка завершится только после "
+                       "успешной пробной гибернации (кнопка выше или agi-os-verify --hibernate)."
+                       if record.get("hibernation") else ""), xalign=0)
     hint.set_line_wrap(True)
     box.pack_start(hint, False, False, 0)
 
