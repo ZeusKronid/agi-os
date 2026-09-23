@@ -108,7 +108,12 @@ def versions(share):
     packages, _ = command(['pacman', '-Q', *PACKAGES])
     iso = next((text.strip() for text in (read_text(p) for p in ('/version', '/run/archiso/bootmnt/arch/version')) if text), None)
     os_release = read_text('/etc/os-release') or ''
-    return {'iso_version': iso, 'source_revision': (read_text(Path(share) / 'source-revision') or '').strip() or None,
+    try:
+        release = json.loads(read_text(Path(share) / 'version.json') or 'null')
+    except ValueError:
+        release = None
+    return {'iso_version': iso, 'release': release,
+            'source_revision': (read_text(Path(share) / 'source-revision') or '').strip() or None,
             'kernel': platform.release(), 'python': platform.python_version(),
             'os_release': dict(line.split('=', 1) for line in os_release.splitlines() if '=' in line),
             'packages': dict(line.split(' ', 1) for line in packages.splitlines() if ' ' in line),

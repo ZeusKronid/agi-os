@@ -48,6 +48,7 @@ class BundleTests(unittest.TestCase):
             (vm / 'qemu.log').write_text('x' * (diagnostics.LOG_TAIL + 10) + '\nqemu ok\n')
             (vm / 'guest-console.log').write_text('chpasswd tester:$6$saltsalt$abcdefghijklmnop\n')
             (data_root / 'source-revision').write_text('6ee8e2a\n')
+            (data_root / 'version.json').write_text('{"version": "v2026.10.0", "revision": "6ee8e2a"}')
             inventory = live_demo_inventory()
             inventory['disks'][0]['serial'] = 'S4EVNX0N123456'
             files = unpack(diagnostics.bundle({'phase': 'error', 'error': 'Bearer abcdefghijklmnop'}, inventory, data_root, data_root))
@@ -61,6 +62,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn('…3456', files['inventory.json'])
         versions = json.loads(files['versions.json'])
         self.assertEqual((versions['source_revision'], versions['packages']['linux']), ('6ee8e2a', '6.9.1-1'))
+        self.assertEqual(versions['release']['version'], 'v2026.10.0')
         first, second = [json.loads(line) for line in files['journal-agios.jsonl'].splitlines()]
         self.assertEqual(first['AGIOS_OPERATION'], 'build-0123456789ab')
         self.assertNotIn('_CMDLINE', first)
