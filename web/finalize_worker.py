@@ -190,8 +190,10 @@ def promote(runner, request, disk, source, firmware):
         args += [f'--new=0:{start}:{end}', f'--typecode=0:{typecode}', f'--change-name=0:{name or "AGI-ROOT"}']
         kinds[kind] = (start, end)
     runner.run(args + [target])
-    # Erase the nested table signatures now sitting in gaps between real partitions.
-    runner.run(['dd', 'if=/dev/zero', f'of={target}', 'bs=512', f'seek={base}', 'count=34', 'conv=notrunc,fsync'])
+    # Erase the nested table signatures and the preview record now sitting in gaps between
+    # real partitions: everything before the first nested partition (aligned, so >= 2048).
+    head = min(int(p['start']) for p in nested)
+    runner.run(['dd', 'if=/dev/zero', f'of={target}', 'bs=512', f'seek={base}', f'count={head}', 'conv=notrunc,fsync'])
     tail = base + int(entry['size']) - 33
     runner.run(['dd', 'if=/dev/zero', f'of={target}', 'bs=512', f'seek={tail}', 'count=33', 'conv=notrunc,fsync'])
     runner.run(['partprobe', target])

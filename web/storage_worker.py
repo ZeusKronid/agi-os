@@ -8,6 +8,11 @@ Every prepared location is reversible except an explicitly chosen disk erase:
 - shrink:    an NTFS/ext4 partition is shrunk and the freed space holds the new
              partition; revert deletes it, restores the boundary and grows the filesystem.
 - erase:     the whole target disk becomes one preview partition (not reversible).
+
+Every non-memory preview also carries a secret-free preview record (see
+preview_record.py) so that a restarted Live can find it again: scan lists the
+previews on this computer's media, adopt reattaches one, remove undoes one found
+after a restart and mark updates the record of the active preview.
 """
 import json
 import os
@@ -21,6 +26,8 @@ sys.path.insert(0, str(ENGINE))
 from domain import ValidationError
 from system import inventory, live_environment, read_command
 from worker import Runner, partition_path
+from preview_record import (FILE_LIMIT, GAP_BYTES, GAP_END, GAP_START, clean, decode_file, decode_gap,
+                            encode_file, encode_gap)
 
 PREVIEW = DATA_ROOT / 'preview'
 SECTOR = 512
@@ -32,6 +39,9 @@ FILE_FS = ('ext4', 'exfat', 'ntfs', 'btrfs', 'xfs', 'f2fs', 'vfat')
 SHRINK_FS = ('ntfs', 'ext4')
 RESERVE = 3 * GIB  # Live desktop, browser, guacd and the site itself (measured ≈ 2.5 GiB).
 COMPRESSION = 1.3  # Conservative zram ratio for a freshly installed system (measured ≈ 1.35).
+RECORD = 'preview.json'
+# Read-only mounts that also skip journal replay: looking must not write to the medium.
+READ_ONLY = {'ext4': 'ro,noload', 'xfs': 'ro,norecovery', 'f2fs': 'ro,norecovery', 'btrfs': 'ro,rescue=nologreplay'}
 
 
 def sh(args, timeout=120, input_text=None):
@@ -78,13 +88,19 @@ def free_regions(disk):
     return aligned
 
 
+def read_only_mount(device, fstype, point):
+    point.mkdir(parents=True, exist_ok=True)
+    release_mount(point)
+    kind = ['-t', 'ntfs3'] if fstype == 'ntfs' else []
+    result = subprocess.run(['mount', '-o', READ_ONLY.get(fstype, 'ro'), *kind, device, str(point)],
+                            capture_output=True, timeout=60)
+    return result.returncode == 0
+
+
 def mounted_free(device, fstype):
     """Free bytes inside a filesystem, read through a temporary read-only mount."""
     point = PREVIEW / 'probe'
-    point.mkdir(parents=True, exist_ok=True)
-    kind = ['-t', 'ntfs3'] if fstype == 'ntfs' else []
-    result = subprocess.run(['mount', '-o', 'ro', *kind, device, str(point)], capture_output=True, timeout=60)
-    if result.returncode:
+    if not read_only_mount(device, fstype, point):
         return None
     try:
         stat = os.statvfs(point)
@@ -201,6 +217,8 @@ def new_partition(disk, start, end):
     created = [p['path'] for p in inventory_disk(disk)['partitions'] if p['path'] not in partitions]
     if len(created) != 1:
         raise ValidationError('Не удалось определить созданный раздел превью')
+    # Old data under a new entry must not look like a nested table or a preview record.
+    sh(['dd', 'if=/dev/zero', f'of={created[0]}', 'bs=1M', 'count=1', 'conv=fsync'], timeout=60)
     return created[0]
 
 
@@ -305,7 +323,8 @@ def prepare(request):
         created = new_partition(disk, region[0], region[1])
         return {'image': {'format': 'raw', 'path': created},
                 'revert': {'kind': 'shrink', 'disk': disk, 'device': created, 'shrunk': device, 'fstype': fstype,
-                           'number': number, 'original_end': start + part['size'] // SECTOR - 1, 'backup': backup}}
+                           'number': number, 'start': start, 'original_end': start + part['size'] // SECTOR - 1,
+                           'backup': backup}}
     if kind == 'erase':
         disk = option['disk']
         sh(['sgdisk', '--zap-all', disk])
@@ -318,6 +337,7 @@ def prepare(request):
 
 def delete_partition(disk, device):
     number = int(''.join(c for c in device[len(disk):] if c.isdigit()))
+    clear_gap(device)
     sh(['wipefs', '--all', device])
     sh(['sgdisk', f'--delete={number}', disk])
     sh(['partprobe', disk])
@@ -356,6 +376,261 @@ def revert(request):
     raise ValidationError('Неизвестный вид хранилища превью')
 
 
+def read_gap(device):
+    with open(device, 'rb') as handle:
+        handle.seek(GAP_START * SECTOR)
+        return handle.read(GAP_BYTES)
+
+
+def write_gap(device, frame):
+    # O_EXCL refuses a partition that is mounted or held by the kernel (dm, md).
+    descriptor = os.open(device, os.O_WRONLY | os.O_EXCL)
+    try:
+        os.lseek(descriptor, GAP_START * SECTOR, os.SEEK_SET)
+        data = frame.ljust(GAP_BYTES, b'\0')
+        while data:
+            data = data[os.write(descriptor, data):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def clear_gap(device):
+    try:
+        with open(device, 'rb') as handle:
+            handle.seek(GAP_START * SECTOR)
+            if not handle.read(len(b'AGIOS')) == b'AGIOS':
+                return
+        write_gap(device, b'')
+    except OSError:
+        pass  # The partition is deleted next; an unreadable leftover is never listed again.
+
+
+def gap_free(device):
+    """Nothing of the nested disk (table, entries, partitions) lives in the record area."""
+    try:
+        table = json.loads(sh(['sfdisk', '--json', device]))['partitiontable']
+    except (ValidationError, ValueError, KeyError):
+        return True  # No nested table yet: the installation has not partitioned the preview.
+    if int(table.get('firstlba', 34)) > GAP_START:
+        return False
+    return all(int(p['start']) >= GAP_END for p in table.get('partitions', []))
+
+
+def preview_partition(device):
+    for disk in inventory()['disks']:
+        for part in disk['partitions']:
+            if part['path'] == device:
+                if part.get('partlabel') != NAME:
+                    raise ValidationError('Раздел не является разделом превью AGIOS')
+                if part['mounted']:
+                    raise ValidationError('Раздел превью смонтирован')
+                return disk, part
+    raise ValidationError('Раздел превью не найден')
+
+
+def record_problem(raw):
+    if raw is None:
+        return None, 'Записи превью нет: установка в него не началась или оно создано старой версией AGIOS'
+    try:
+        return clean(raw), None
+    except ValidationError as exc:
+        return None, 'Запись превью не принята: ' + str(exc)
+
+
+def partition_entry(disk, part):
+    entry = {'id': 'partition:' + part['path'], 'kind': 'partition', 'disk': disk['path'],
+             'device': part['path'], 'size': part['size'], 'medium': disk.get('model') or disk['path']}
+    try:
+        entry['record'], entry['problem'] = record_problem(decode_gap(read_gap(part['path'])))
+    except OSError:
+        entry['record'], entry['problem'] = None, 'Раздел превью не читается'
+    return entry
+
+
+def safe_folder(point):
+    """AGIOS-PREVIEW on a medium: a real directory, never a link out of the medium."""
+    folder = point / NAME
+    if folder.is_symlink() or not folder.is_dir() or not folder.resolve().is_relative_to(point.resolve()):
+        return None
+    return folder
+
+
+def file_entry(disk, part):
+    point = PREVIEW / 'scan'
+    if not read_only_mount(part['path'], part['fstype'], point):
+        return None
+    try:
+        folder = safe_folder(point)
+        image = folder / 'preview.qcow2' if folder else None
+        if image is None or image.is_symlink() or not image.is_file():
+            return None
+        entry = {'id': 'file:' + part['path'], 'kind': 'file', 'disk': disk['path'], 'device': part['path'],
+                 'fstype': part['fstype'], 'size': image.stat().st_blocks * 512,
+                 'medium': part.get('label') or disk.get('model') or disk['path']}
+        meta = folder / RECORD
+        raw = None
+        if meta.is_file() and not meta.is_symlink() and meta.stat().st_size <= FILE_LIMIT:
+            raw = decode_file(meta.read_bytes())
+        entry['record'], entry['problem'] = record_problem(raw)
+        return entry
+    finally:
+        subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+
+
+def scan(request):
+    """Previews left on this computer's media: AGIOS-PREVIEW partitions and preview files."""
+    found = []
+    live_medium = read_command(['findmnt', '-n', '-o', 'SOURCE', '/run/archiso/bootmnt']).strip()
+    for disk in inventory()['disks']:
+        for part in disk['partitions']:
+            if part['path'] == live_medium or part['mounted']:
+                continue
+            if part.get('partlabel') == NAME:
+                found.append(partition_entry(disk, part))
+            elif part.get('fstype') in FILE_FS:
+                entry = file_entry(disk, part)
+                if entry:
+                    found.append(entry)
+    return {'found': found}
+
+
+def locate(found_id):
+    kind, _, device = str(found_id).partition(':')
+    for disk in inventory()['disks']:
+        for part in disk['partitions']:
+            if part['path'] != device or part['mounted']:
+                continue
+            if kind == 'partition' and part.get('partlabel') == NAME:
+                return disk, part, partition_entry(disk, part)
+            if kind == 'file' and part.get('fstype') in FILE_FS:
+                entry = file_entry(disk, part)
+                if entry:
+                    return disk, part, entry
+    raise ValidationError('Найденное превью больше недоступно; обновите список')
+
+
+def shrink_state(disk, part, storage):
+    """Undo of a shrink, checked against the current layout: the shrunk partition must
+    directly precede the preview and the recorded boundary must lie between them."""
+    parts = sorted(disk['partitions'], key=lambda p: int(p['start'] or 0))
+    index = next(i for i, p in enumerate(parts) if p['path'] == part['path'])
+    before = parts[index - 1] if index else None
+    preview_end = int(part['start']) + part['size'] // SECTOR - 1
+    if (before is None or int(before['start']) != storage['shrunk_start'] or before['mounted']
+            or before.get('fstype') not in SHRINK_FS or before.get('fstype') != storage['fstype']):
+        return None
+    before_end = int(before['start']) + before['size'] // SECTOR - 1
+    if not before_end < storage['original_end'] <= preview_end:
+        return None
+    number = int(''.join(c for c in before['path'][len(disk['path']):] if c.isdigit()))
+    return {'kind': 'shrink', 'disk': disk['path'], 'device': part['path'], 'shrunk': before['path'],
+            'fstype': before['fstype'], 'number': number, 'start': storage['shrunk_start'],
+            'original_end': storage['original_end']}
+
+
+def undo_state(disk, part, entry, remove=False):
+    """How to undo a found preview, derived from the current layout (never trusted from the record)."""
+    if entry['kind'] == 'file':
+        point = PREVIEW / 'media'
+        return {'kind': 'file', 'device': part['path'], 'mount': str(point), 'folder': str(point / NAME)}
+    storage = (entry.get('record') or {}).get('storage', {})
+    if storage.get('kind') == 'shrink':
+        state = shrink_state(disk, part, storage)
+        if state:
+            return state
+    if storage.get('kind') == 'erase' and not remove:
+        return {'kind': 'erase', 'disk': disk['path'], 'device': part['path']}
+    # A plain partition, an erased disk being cleaned up, or a shrink whose boundary no longer matches.
+    return {'kind': 'partition', 'disk': disk['path'], 'device': part['path']}
+
+
+def check_image(image):
+    """A preview file from a medium is untrusted: no backing chain, no external data file."""
+    info = json.loads(sh(['qemu-img', 'info', '--output=json', '-f', 'qcow2', str(image)], timeout=60))
+    specific = (info.get('format-specific') or {}).get('data') or {}
+    if info.get('format') != 'qcow2' or info.get('backing-filename') or info.get('full-backing-filename') \
+            or specific.get('data-file'):
+        raise ValidationError('Файл превью ссылается на другие данные; продолжить его нельзя')
+
+
+def mount_medium(part):
+    PREVIEW.mkdir(parents=True, exist_ok=True)
+    PREVIEW.chmod(0o755)  # QEMU runs as agi and must reach the image inside.
+    point = PREVIEW / 'media'
+    point.mkdir(exist_ok=True)
+    release_mount(point)
+    options = 'noatime' + (',uid=agi,gid=agi' if part['fstype'] in ('ntfs', 'exfat', 'vfat') else '')
+    sh(['mount', '-o', options, *(['-t', 'ntfs3'] if part['fstype'] == 'ntfs' else []), part['path'], str(point)])
+    folder = safe_folder(point)
+    if folder is None:
+        subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+        raise ValidationError('На носителе нет папки превью')
+    return point, folder
+
+
+def adopt(request):
+    """Reattach a found, completely installed preview after a Live restart."""
+    disk, part, entry = locate(request['id'])
+    if entry['record'] is None:
+        raise ValidationError(entry['problem'])
+    if entry['kind'] == 'file':
+        point, folder = mount_medium(part)
+        image = folder / 'preview.qcow2'
+        try:
+            if image.is_symlink() or not image.is_file():
+                raise ValidationError('Файл превью не найден')
+            check_image(image)
+        except Exception:
+            subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+            raise
+        shutil.chown(folder, 'agi', 'agi')
+        shutil.chown(image, 'agi', 'agi')
+        described = {'format': 'qcow2', 'path': str(image)}
+    else:
+        described = {'format': 'raw', 'path': part['path']}
+    return {'image': described, 'revert': undo_state(disk, part, entry), 'record': entry['record'],
+            'medium': entry['medium']}
+
+
+def remove(request):
+    """Undo a preview found after a restart; other partitions and files stay untouched."""
+    disk, part, entry = locate(request['id'])
+    state = undo_state(disk, part, entry, remove=True)
+    if entry['kind'] == 'file':
+        mount_medium(part)
+    return revert({'state': state})
+
+
+def mark(request):
+    """Write the record of the active preview into its storage."""
+    record = clean(request['record'])
+    state = request['revert']
+    kind = state.get('kind')
+    if kind == 'ram':
+        return {'marked': False}
+    if kind == 'file':
+        point = PREVIEW / 'media'
+        folder = safe_folder(point) if os.path.ismount(point) else None
+        if folder is None:
+            raise ValidationError('Носитель превью не подключён')
+        temp = folder / (RECORD + '.tmp')
+        temp.unlink(missing_ok=True)
+        with open(temp, 'xb') as handle:
+            handle.write(encode_file(record))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.replace(folder / RECORD)
+        return {'marked': True}
+    if kind in ('partition', 'shrink', 'erase'):
+        _, part = preview_partition(state.get('device'))
+        if not gap_free(part['path']):
+            raise ValidationError('Служебная область раздела превью занята')
+        write_gap(part['path'], encode_gap(record))
+        return {'marked': True}
+    raise ValidationError('Неизвестный вид хранилища превью')
+
+
 def main():
     try:
         if os.geteuid() != 0 or not live_environment():
@@ -366,7 +641,8 @@ def main():
         if not data_root.is_absolute():
             raise ValidationError('Некорректный каталог данных')
         PREVIEW = data_root / 'preview'
-        handler = {'probe': probe, 'prepare': prepare, 'revert': revert}[request['op']]
+        handler = {'probe': probe, 'prepare': prepare, 'revert': revert, 'scan': scan, 'adopt': adopt,
+                   'remove': remove, 'mark': mark}[request['op']]
         print(json.dumps({'result': handler(request)}, ensure_ascii=False))
     except Exception as exc:
         text = str(exc) if isinstance(exc, (ValidationError, KeyError)) else 'Внутренняя ошибка операции с носителем'

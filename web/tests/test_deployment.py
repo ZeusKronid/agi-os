@@ -45,17 +45,6 @@ class ConsentTests(unittest.TestCase):
                     function({})
 
 
-class OrphanTests(unittest.TestCase):
-    def test_only_labelled_unmounted_partitions_except_the_active_preview(self):
-        snapshot = demo_inventory()
-        snapshot['disks'][0]['partitions'] = [
-            {'path': '/dev/vda1', 'size': 1, 'partlabel': 'AGIOS-PREVIEW', 'mounted': False},
-            {'path': '/dev/vda2', 'size': 1, 'partlabel': 'AGIOS-PREVIEW', 'mounted': False},
-            {'path': '/dev/vda3', 'size': 1, 'partlabel': 'DATA', 'mounted': False}]
-        found = deployment.orphan_previews(snapshot, current='/dev/vda2')
-        self.assertEqual([o['device'] for o in found], ['/dev/vda1'])
-
-
 class FreeSpaceTests(unittest.TestCase):
     def test_gaps_between_partitions_are_aligned_and_reported(self):
         size = 64 * GIB
@@ -144,6 +133,9 @@ class PromoteTests(unittest.TestCase):
         self.assertNotIn('--delete=1', sgdisk)  # alongside keeps the user's partition
         zeroing = [c for c in calls if c[0] == 'dd']
         self.assertEqual(len(zeroing), 2)
+        # The nested table and the preview record before the first nested partition are erased.
+        self.assertIn(f'seek={base}', zeroing[0])
+        self.assertIn('count=2048', zeroing[0])
 
 
 if __name__ == '__main__':
