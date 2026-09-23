@@ -17,6 +17,7 @@ after a restart and mark updates the record of the active preview.
 import json
 import os
 from pathlib import Path
+import pwd
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,7 @@ SHRINK_FS = ('ntfs', 'ext4')
 RESERVE = 3 * GIB  # Live desktop, browser, guacd and the site itself (measured ≈ 2.5 GiB).
 COMPRESSION = 1.3  # Conservative zram ratio for a freshly installed system (measured ≈ 1.35).
 RECORD = 'preview.json'
+FOREIGN = 'nosuid,nodev,noexec'
 # Read-only mounts that also skip journal replay: looking must not write to the medium.
 READ_ONLY = {'ext4': 'ro,noload', 'xfs': 'ro,norecovery', 'f2fs': 'ro,norecovery', 'btrfs': 'ro,rescue=nologreplay'}
 
@@ -92,7 +94,8 @@ def read_only_mount(device, fstype, point):
     point.mkdir(parents=True, exist_ok=True)
     release_mount(point)
     kind = ['-t', 'ntfs3'] if fstype == 'ntfs' else []
-    result = subprocess.run(['mount', '-o', READ_ONLY.get(fstype, 'ro'), *kind, device, str(point)],
+    # A foreign medium must not bring setuid programs or device nodes with it.
+    result = subprocess.run(['mount', '-o', READ_ONLY.get(fstype, 'ro') + ',' + FOREIGN, *kind, device, str(point)],
                             capture_output=True, timeout=60)
     return result.returncode == 0
 
@@ -560,7 +563,7 @@ def mount_medium(part):
     point = PREVIEW / 'media'
     point.mkdir(exist_ok=True)
     release_mount(point)
-    options = 'noatime' + (',uid=agi,gid=agi' if part['fstype'] in ('ntfs', 'exfat', 'vfat') else '')
+    options = 'noatime,' + FOREIGN + (',uid=agi,gid=agi' if part['fstype'] in ('ntfs', 'exfat', 'vfat') else '')
     sh(['mount', '-o', options, *(['-t', 'ntfs3'] if part['fstype'] == 'ntfs' else []), part['path'], str(point)])
     folder = safe_folder(point)
     if folder is None:
@@ -584,8 +587,9 @@ def adopt(request):
         except Exception:
             subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
             raise
-        shutil.chown(folder, 'agi', 'agi')
-        shutil.chown(image, 'agi', 'agi')
+        owner = pwd.getpwnam('agi')
+        for path in (folder, image):  # Never follow a link swapped in after the checks.
+            os.chown(path, owner.pw_uid, owner.pw_gid, follow_symlinks=False)
         described = {'format': 'qcow2', 'path': str(image)}
     else:
         described = {'format': 'raw', 'path': part['path']}

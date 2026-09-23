@@ -189,7 +189,8 @@ class State:
     def restore_conversation(self, config, text):
         """Give the agreed configuration back to the conversation (and to the model's context)."""
         reply = {'message': text, 'suggestions': [], 'lookup': [], 'configuration': config.as_dict()}
-        self.controller.history.append({'role': 'user', 'content': 'Restored the configuration of an earlier preview (data).'})
+        if not self.controller.history or self.controller.history[-1]['role'] != 'user':
+            self.controller.history.append({'role': 'user', 'content': 'Restored the configuration of an earlier preview (data).'})
         self.controller.history.append({'role': 'assistant', 'content': json.dumps(reply, ensure_ascii=False)})
         self.controller.configuration = config
         self.messages.append({'role': 'assistant', 'content': text, 'suggestions': []})
