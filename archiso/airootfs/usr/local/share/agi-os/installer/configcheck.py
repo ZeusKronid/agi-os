@@ -26,6 +26,10 @@ SYSTEMD_UNITS = (".service", ".socket", ".timer", ".path", ".target", ".mount", 
                  ".slice", ".scope", ".swap", ".device")
 
 
+# Programs whose .json settings allow comments and trailing commas (VS Code writes them itself).
+JSONC_OWNERS = ("Code", "Code - OSS", "VSCodium", "Cursor", "zed", "waybar", "fastfetch")
+
+
 def display(scope, path):
     return ("~/" if scope == "home" else "/") + path
 
@@ -34,10 +38,11 @@ def kind(scope, path):
     """The syntax of a file by its location, or None when it is not checked statically."""
     posix = PurePosixPath(path)
     name, suffix, parts = posix.name, posix.suffix.lower(), posix.parts
+    if suffix == ".jsonc" or (len(parts) >= 2 and parts[-2] == "waybar" and name == "config") or (
+            suffix == ".json" and any(part in JSONC_OWNERS for part in parts)):
+        return "jsonc"
     if suffix == ".json":
         return "json"
-    if suffix == ".jsonc" or (len(parts) >= 2 and parts[-2] == "waybar" and name == "config"):
-        return "jsonc"
     if suffix == ".toml":
         return "toml"
     if suffix == ".xml":
@@ -54,14 +59,16 @@ def kind(scope, path):
         return "xorg"
     if name == "hyprland.conf" or (len(parts) >= 2 and parts[-2] in ("sway", "i3") and name == "config"):
         return "braces"
-    if suffix == ".ini" or (suffix == ".conf" and "lightdm" in parts):
-        return "ini"
+    if suffix == ".conf" and "lightdm" in parts or suffix == ".ini" and "foot" in parts:
+        return "ini"  # GKeyFile and foot: only «key=value».
+    if suffix == ".ini":
+        return "ini-any"
     return None
 
 
 FORMATS = {"json": "JSON", "jsonc": "JSON с комментариями", "toml": "TOML", "xml": "XML",
            "desktop": "desktop-файл", "python": "Python", "systemd": "формат systemd",
-           "xorg": "формат xorg.conf", "braces": "парность скобок", "ini": "INI"}
+           "xorg": "формат xorg.conf", "braces": "парность скобок", "ini": "INI", "ini-any": "INI"}
 
 
 def strip_jsonc(text):
@@ -88,12 +95,35 @@ def strip_jsonc(text):
         else:
             out.append(char)
             i += 1
-    return re.sub(r',(\s*[}\]])', r'\1', "".join(out))
+    return drop_trailing_commas("".join(out))
 
 
-def check_ini(text, sections_required):
+def drop_trailing_commas(text):
+    """Remove a comma that only precedes } or ]; strings are copied untouched."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        char = text[i]
+        if char == '"':
+            end = i + 1
+            while end < n and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            out.append(text[i:end + 1])
+            i = end + 1
+            continue
+        if char == ",":
+            following = text[i + 1:].lstrip()
+            if following[:1] in ("}", "]"):
+                i += 1
+                continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def check_ini(text, sections_required, delimiters="="):
     """Lines are blank, comments, [section] or key=value; systemd also allows
-    backslash continuations and forbids keys before the first section."""
+    backslash continuations and forbids keys before the first section. A generic
+    .ini may also use «key: value» (Python configparser and others accept it)."""
     section = None
     continued = False
     for number, raw in enumerate(text.splitlines(), 1):
@@ -108,7 +138,8 @@ def check_ini(text, sections_required):
                 raise ConfigCheckError(f"строка {number}: некорректный заголовок секции {line[:80]}")
             section = line
             continue
-        if "=" not in line or not line.split("=", 1)[0].strip():
+        position = min((line.find(d) for d in delimiters if d in line), default=-1)
+        if position <= 0 or not line[:position].strip():
             raise ConfigCheckError(f"строка {number}: ожидается «ключ=значение», получено {line[:80]}")
         if sections_required and section is None:
             raise ConfigCheckError(f"строка {number}: параметр вне секции [..]")
@@ -192,6 +223,8 @@ def static(scope, path, content):
             check_braces(content, PurePosixPath(path).name == "hyprland.conf")
         elif syntax == "ini":
             check_ini(content, False)
+        elif syntax == "ini-any":
+            check_ini(content, False, "=:")
     except ConfigCheckError as exc:
         raise ConfigCheckError(f"Файл {display(scope, path)} ({FORMATS[syntax]}): {exc}")
     except json.JSONDecodeError as exc:
@@ -203,6 +236,11 @@ def static(scope, path, content):
     except SyntaxError as exc:
         raise ConfigCheckError(f"Файл {display(scope, path)} (Python): строка {exc.lineno}: {exc.msg}")
     return syntax
+
+
+HINTS = {"systemd-analyze": "Файлы из system_files записываются с правами 0644: скрипт в ExecStart не будет "
+                              "исполняемым — вызывайте его через интерпретатор (ExecStart=/usr/bin/bash /путь) "
+                              "или используйте программу из пакета."}
 
 
 def tool_checks(scope, path):

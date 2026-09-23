@@ -34,6 +34,9 @@ VALID = {
     ("system", "etc/greetd/config.toml"): '[terminal]\nvt = 1\n[default_session]\ncommand = "tuigreet --cmd sway"\n',
     ("system", "etc/xdg/foot/foot.ini"): "[main]\nfont=monospace:size=11\n",
     ("home", ".config/kitty/kitty.conf"): "anything goes here: no checker { [ \n",
+    ("home", ".config/Code/User/settings.json"): '{\n  // written by VS Code itself\n  "editor.fontSize": 14,\n}\n',
+    ("home", ".config/zed/settings.json"): '{"theme": "One Dark", /* c */}',
+    ("home", ".config/app/app.ini"): "[general]\nname: value\nother = 1\n",
 }
 
 INVALID = {
@@ -51,6 +54,8 @@ INVALID = {
     ("system", "etc/systemd/logind.conf.d/lid.conf"): ("HandleLidSwitch=suspend\n", "вне секции"),
     ("system", "etc/X11/xorg.conf.d/30-touchpad.conf"): ('Section "InputClass"\n  Identifier "t"\n', "EndSection"),
     ("system", "etc/lightdm/lightdm.conf"): ("[Seat:*]\nthis line has no value\n", "ключ=значение"),
+    ("system", "etc/xdg/foot/foot.ini"): ("[main]\nfont: monospace\n", "ключ=значение"),
+    ("home", ".config/app/strict.json"): ('{"a": 1, // no comments in plain JSON\n}', "JSON"),
 }
 
 
@@ -72,6 +77,7 @@ class StaticCheckTests(unittest.TestCase):
     def test_jsonc_keeps_strings_and_line_numbers(self):
         text = '{\n/* a\nb */ "url": "http://x//y", // c\n"n": [1,2,],\n}'
         self.assertEqual(json.loads(configcheck.strip_jsonc(text)), {"url": "http://x//y", "n": [1, 2]})
+        self.assertEqual(json.loads(configcheck.strip_jsonc('{"s": "a,}", "t": [1,],}')), {"s": "a,}", "t": [1]})
 
     def test_configuration_rejects_invalid_file(self):
         data = DemoProvider().reply("", [])["configuration"]
@@ -175,6 +181,13 @@ class ToolCheckTests(unittest.TestCase):
         self.assertFalse(any("/usr/bin/sway" in c for c in calls))
         bash = next(c for c in calls if "/usr/bin/bash" in c)
         self.assertEqual(bash, ["arch-chroot", bash[1], "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
+
+    def test_systemd_failure_explains_file_modes(self):
+        config = self.config(system_files=[{"path": "etc/systemd/user/agi.service",
+                                            "content": "[Service]\nExecStart=/etc/agi/run.sh\n"}])
+        _, error, _ = self.run_checks(config, ["usr/bin/systemd-analyze"], fail="/usr/bin/systemd-analyze")
+        self.assertIn("/etc/systemd/user/agi.service — systemd-analyze", error)
+        self.assertIn("0644", error)
 
     def test_unknown_keyboard_layout_blocks_the_preview(self):
         config = self.config()
