@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-from configcheck import tool_checks
+from configcheck import HINTS, tool_checks
 from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
 from system import Catalog, inventory, live_environment, selected_disk
@@ -156,7 +156,7 @@ def check_generated_files(config, runner):
                 except ValidationError as exc:
                     detail = str(exc).split("\n", 1)[1].strip() if "\n" in str(exc) else str(exc)
                     where = ("~/" if scope == "home" else "/") + path
-                    problems.append(f"{where} — {label}:\n{detail[-1200:]}")
+                    problems.append(f"{where} — {label}:\n{detail[-1200:]}" + (f"\n{HINTS[label]}" if label in HINTS else ""))
         # Keyboard layouts go into the X11/Wayland configuration; an unknown one breaks input.
         symbols = TARGET / "usr/share/X11/xkb/symbols"
         if config.session and symbols.is_dir():
