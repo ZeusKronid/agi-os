@@ -232,3 +232,33 @@ async function powerAction(action, button) {
 }
 $('rebootLive').onclick = () => powerAction('reboot');
 $('poweroffLive').onclick = () => powerAction('poweroff');
+
+// Version of this Live image and an update check that runs only when the user asks (CMP-137).
+function describeVersion(info) {
+    const built = info.built ? ' · сборка ' + info.built.slice(0, 10) : '';
+    const revision = info.revision ? ' · ' + info.revision.slice(0, 7) : '';
+    return 'AGIOS ' + (info.release ? info.version : 'сборка для разработки') + built + revision;
+}
+api('version').then(info => { $('version').textContent = describeVersion(info); }).catch(() => {});
+$('checkUpdates').onclick = async () => {
+    const box = $('updateResult'); $('checkUpdates').disabled = true; box.hidden = false; box.replaceChildren('Проверяем…');
+    try {
+        const result = await api('version/check', {});
+        box.replaceChildren();
+        if (result.error) { box.textContent = result.error; return; }
+        const latest = result.latest, line = document.createElement('p');
+        line.textContent = {update: 'Доступна новая версия ' + latest.version + '.', latest: 'У вас последняя версия (' + latest.version + ').',
+            development: 'Это сборка для разработки. Последний выпуск: ' + latest.version + '.'}[result.verdict];
+        box.append(line);
+        if (result.verdict !== 'latest') {
+            const link = document.createElement('a'); link.href = latest.url || result.download_page; link.target = '_blank'; link.rel = 'noopener';
+            link.textContent = 'Страница выпуска ' + latest.version;
+            const how = document.createElement('a'); how.href = result.download_page; how.target = '_blank'; how.rel = 'noopener';
+            how.textContent = 'как проверить подпись и записать носитель';
+            const hint = document.createElement('p'); hint.append(link, ' · ', how, latest.signed ? '' : ' · выпуск без подписи');
+            box.append(hint);
+            if (latest.notes) { const notes = document.createElement('pre'); notes.textContent = latest.notes; box.append(notes); }
+        }
+    } catch (error) { box.textContent = error.message || error; }
+    finally { $('checkUpdates').disabled = false; }
+};

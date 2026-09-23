@@ -23,6 +23,7 @@ from guacamole import tunnel
 from provider import LiveProvider, connect_chatgpt
 from system import live_environment
 from deployment import consent as consent_binding, orphan_previews, target_inventory
+import release
 
 GIB = 2**30
 
@@ -237,6 +238,15 @@ async def guacamole_script(request):
 
 async def state_get(request):
     return web.json_response(request.app['state'].public())
+
+
+async def version_get(request):
+    return web.json_response(release.current())
+
+
+async def version_check(request):
+    # Only on the user's explicit request: the Live never contacts the release server by itself.
+    return web.json_response(await asyncio.to_thread(release.check))
 
 
 def not_busy(state):
@@ -563,6 +573,8 @@ def application(port=8787, guacd_port=14822):
     app.router.add_post('/api/orphans/remove', remove_orphan)
     app.router.add_post('/api/final/finalize', finalize)
     app.router.add_post('/api/final/power', power)
+    app.router.add_get('/api/version', version_get)
+    app.router.add_post('/api/version/check', version_check)
     app.router.add_get('/tunnel', tunnel)
     app.router.add_get('/', index)
     app.router.add_static('/static', ROOT / 'web/static')
