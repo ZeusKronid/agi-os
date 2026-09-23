@@ -152,12 +152,14 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 worker.preflight({})
 
-    def fake_install(self, fail_on=None, cleanup_code=0):
+    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, files=None):
         config = Configuration.parse(specification())
         snapshot = demo_inventory()
         disk = snapshot["disks"][0]
         request = {"configuration": config.as_dict(), "fingerprint": disk["fingerprint"],
                    "consent_digest": config.digest(), "password": "private-password"}
+        if passphrase:
+            request["passphrase"] = passphrase
         runner, events = FakeRunner(fail_on), []
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
@@ -169,6 +171,8 @@ class WorkerTests(unittest.TestCase):
                     worker.install(request, runner)
                 except ValidationError:
                     pass
+                if files is not None:
+                    files.update({str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file()})
                 record_path = target / "var/lib/agi-os/installation.json"
                 if record_path.exists():
                     self.assertNotIn("private-password", record_path.read_text())
@@ -183,6 +187,28 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("private-password", json.dumps(calls))
         self.assertEqual(events[-1]["kind"], "installed")
         self.assertEqual(events[-1]["stage"], 7)
+
+    def test_no_secret_in_events_commands_or_installed_files(self):
+        for fail_on in (None, "pacstrap", "chpasswd"):
+            with self.subTest(fail_on=fail_on):
+                files = {}
+                calls, events = self.fake_install(fail_on=fail_on, passphrase="private-luks-passphrase", files=files)
+                self.assertIn("cryptsetup", [c[0] for c in calls])
+                self.assertTrue(files or fail_on == "pacstrap")
+                for secret in ("private-password", "private-luks-passphrase"):
+                    self.assertNotIn(secret, json.dumps(calls))
+                    self.assertNotIn(secret, json.dumps(events, ensure_ascii=False))
+                    for name, content in files.items():
+                        self.assertNotIn(secret.encode(), content, name)
+
+    def test_failed_command_never_echoes_its_secret_input(self):
+        runner = worker.Runner()
+        with self.assertRaises(ValidationError) as failure:
+            runner.run(["sh", "-c", "cat; echo; echo diagnostic; exit 3"], input_text="private-luks-passphrase")
+        self.assertNotIn("private-luks-passphrase", str(failure.exception))
+        with self.assertRaises(ValidationError) as failure:
+            runner.run(["sh", "-c", "echo diagnostic; exit 3"])
+        self.assertIn("diagnostic", str(failure.exception))  # ordinary failures keep their output
 
     def test_failure_never_reports_installed(self):
         for fail_on, cleanup in (("pacman", 0), ("pacstrap", 0), (None, 1)):
