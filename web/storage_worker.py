@@ -208,6 +208,11 @@ def inventory_disk(disk):
     return next(d for d in inventory()['disks'] if d['path'] == disk)
 
 
+def site_owner():
+    """The unprivileged website that called this helper through sudo (it runs QEMU)."""
+    return int(os.environ.get('SUDO_UID', 0)), int(os.environ.get('SUDO_GID', 0))
+
+
 def release_mount(point):
     """Never stack a new preview mount over a stale one left by an interrupted attempt."""
     while os.path.ismount(point):
@@ -219,8 +224,9 @@ def image_file(directory, size):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / 'preview.qcow2'
     sh(['qemu-img', 'create', '-q', '-f', 'qcow2', str(path), str(size)])
-    shutil.chown(directory, 'agi', 'agi')
-    shutil.chown(path, 'agi', 'agi')
+    uid, gid = site_owner()
+    os.chown(directory, uid, gid)
+    os.chown(path, uid, gid)
     return {'format': 'qcow2', 'path': str(path)}
 
 
@@ -229,7 +235,7 @@ def prepare(request):
     virtual = min(max(needed * 2, 16 * GIB), 64 * GIB)  # Sparse capacity of an image-backed preview.
     kind = option['kind']
     PREVIEW.mkdir(parents=True, exist_ok=True)
-    PREVIEW.chmod(0o755)  # QEMU runs as agi and must reach the image inside.
+    PREVIEW.chmod(0o755)  # QEMU runs as the website's user and must reach the image inside.
     if kind == 'ram':
         budget = mem_available() - int(request['vm_memory']) - RESERVE
         if needed / float(request.get('compression', COMPRESSION)) > budget:
@@ -242,7 +248,7 @@ def prepare(request):
         point.mkdir(exist_ok=True)
         release_mount(point)
         sh(['mount', '-o', 'discard,noatime', device, str(point)])
-        shutil.chown(point, 'agi', 'agi')
+        os.chown(point, *site_owner())
         return {'image': image_file(point, virtual), 'revert': {'kind': 'ram', 'device': device, 'mount': str(point)},
                 'monitor': f'/sys/block/{Path(device).name}/mm_stat', 'budget': int(budget)}
     if kind == 'file':
@@ -252,7 +258,7 @@ def prepare(request):
         fstype = option['fstype']
         options = 'noatime'
         if fstype in ('ntfs', 'exfat', 'vfat'):
-            options += ',uid=agi,gid=agi'
+            options += ',uid=%d,gid=%d' % site_owner()
         sh(['mount', '-o', options, *(['-t', 'ntfs3'] if fstype == 'ntfs' else []), option['device'], str(point)])
         folder = point / NAME
         stat = os.statvfs(point)

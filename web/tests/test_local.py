@@ -104,6 +104,23 @@ class LocalApiTests(AioHTTPTestCase):
                 await vm.start()
             self.assertFalse((vm.directory / 'system.qcow2').exists())
 
+    async def test_chatgpt_sign_in_page_is_handed_to_the_browser_tab(self):
+        # The site runs as a system user without the desktop: no xdg-open, the page opens the URL.
+        seen = []
+        state = self.app['state']
+
+        def connect(model, show_login):
+            show_login('file:///etc/shadow')
+            seen.append(state.login_url)
+            show_login('https://auth.openai.com/oauth/authorize?state=x')
+            seen.append(state.login_url)
+            return DemoProvider()
+        with patch.object(server, 'connect_chatgpt', connect):
+            response = await self.request('/api/provider', {'kind': 'chatgpt'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(seen, [None, 'https://auth.openai.com/oauth/authorize?state=x'])
+        self.assertIsNone((await response.json())['login_url'])
+
     async def test_foreign_origin_cannot_start_vm(self):
         response = await self.request('/api/build', {}, {'Origin': 'https://example.org'})
         self.assertEqual(response.status, 403)

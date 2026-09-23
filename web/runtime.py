@@ -131,7 +131,7 @@ class VirtualMachine:
             if marker_present() and mirror.exists():
                 # Test-only: a pinned mirror for the guest's choose-mirror service (fw_cfg is root-readable).
                 import subprocess
-                value = subprocess.run(['sudo', '-n', 'cat', str(mirror)], capture_output=True, text=True, timeout=10).stdout.strip()
+                value = subprocess.run(['sudo', '-n', '/usr/bin/cat', str(mirror)], capture_output=True, text=True, timeout=10).stdout.strip()
                 if value:
                     cmdline += ' mirror=' + value
             cmdline += ' console=ttyS0'
