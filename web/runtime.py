@@ -62,7 +62,7 @@ def guest_kernel():
 class VirtualMachine:
     def __init__(self, image, memory=4096, cpus=4, firmware=None, directory=None):
         if image.get('format') not in ('qcow2', 'raw') or not isinstance(image.get('path'), str):
-            raise ValueError('Некорректное описание образа превью')
+            raise ValueError('Invalid preview image description')
         self.image = image
         self.firmware = firmware or live_firmware()
         self.directory = directory or DATA_ROOT / 'vm' / ('web-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
@@ -83,7 +83,7 @@ class VirtualMachine:
     def restore(cls, saved):
         directory = Path(saved['directory']).resolve()
         if directory.parent != (DATA_ROOT / 'vm').resolve() or not directory.name.startswith('web-'):
-            raise ValueError('Некорректный путь VM')
+            raise ValueError('Invalid VM path')
         return cls(saved['image'], saved.get('memory', 4096), saved.get('cpus', 4), saved.get('firmware'), directory)
 
     @property
@@ -92,13 +92,13 @@ class VirtualMachine:
 
     async def start(self, install=True):
         if not live_environment():
-            raise RuntimeError('VM создаётся только внутри загруженной Live-среды AGIOS')
+            raise RuntimeError('A VM is created only inside the booted AGIOS Live environment')
         if not Path('/dev/kvm').exists():
-            raise RuntimeError('Аппаратная виртуализация недоступна. Включите Intel VT-x / AMD-V в настройках '
-                               'UEFI/BIOS компьютера и загрузите AGIOS снова.')
+            raise RuntimeError('Hardware virtualization is unavailable. Turn on Intel VT-x / AMD-V in the '
+                               'computer’s UEFI/BIOS settings and boot AGIOS again.')
         path = Path(self.image['path'])
         if not (path.is_file() or path.is_block_device()):
-            raise RuntimeError('Хранилище превью недоступно: ' + str(path))
+            raise RuntimeError('Preview storage unavailable: ' + str(path))
         cache = ',cache=none' if path.is_block_device() else ''
         args = ['qemu-system-x86_64', '-name', 'AGIOS local preview', '-machine', 'q35',
                 '-accel', 'kvm', '-cpu', 'host', '-m', str(self.memory), '-smp', str(self.cpus),
@@ -119,7 +119,7 @@ class VirtualMachine:
             medium, optical = await asyncio.to_thread(boot_medium)
             kernel, initrd = guest_kernel()
             if not kernel.is_file() or not initrd.is_file():
-                raise RuntimeError('На загрузочном носителе нет ядра Live для установочной VM')
+                raise RuntimeError('The boot medium has no Live kernel for the installer VM')
             if optical:
                 args += ['-drive', f'file={medium},media=cdrom,readonly=on,if=none,id=live',
                          '-device', 'ide-cd,drive=live,bootindex=1']
@@ -160,18 +160,18 @@ class VirtualMachine:
         self.process = await asyncio.create_subprocess_exec(*args, stdout=self.log, stderr=self.log)
         await asyncio.sleep(.5)
         if not self.running:
-            raise RuntimeError('QEMU не запустился: ' + (self.directory / 'qemu.log').read_text()[-1500:])
+            raise RuntimeError('QEMU did not start: ' + (self.directory / 'qemu.log').read_text()[-1500:])
 
     async def install(self, config, password, passphrase, notify):
         await asyncio.wait_for(self.connection, 180)
         ready = json.loads(await asyncio.wait_for(self.reader.readline(), 240))
         if ready.get('kind') != 'ready':
-            raise RuntimeError('Установочная VM не готова')
+            raise RuntimeError('The installer VM is not ready')
         inner = next((d for d in ready['inventory']['disks'] if d['path'] == '/dev/vda' and d['eligible']), None)
         if inner is None:
-            raise RuntimeError('Установочная VM не видит хранилище превью')
+            raise RuntimeError('The installer VM can’t see the preview storage')
         if ready['inventory']['firmware'] != self.firmware:
-            raise RuntimeError('Тип загрузки установочной VM не совпадает с компьютером')
+            raise RuntimeError('The installer VM boot type does not match this computer')
         # Inside the VM the preview storage is /dev/vda; consent is re-bound to that view.
         translated = type(config).parse({**config.as_dict(), 'disk': '/dev/vda'})
         request = {'configuration': translated.as_dict(), 'consent_digest': translated.digest(),
@@ -184,12 +184,12 @@ class VirtualMachine:
             event = json.loads(line)
             notify(event)
             if event.get('kind') == 'error':
-                raise RuntimeError(event.get('text', 'Установка завершилась ошибкой'))
+                raise RuntimeError(event.get('text', 'The installation failed'))
             installed |= event.get('kind') == 'installed'
             if event.get('kind') == 'shutdown':
                 break
         if not installed:
-            raise RuntimeError('Связь с установщиком потеряна до завершения установки')
+            raise RuntimeError('Lost contact with the installer before it finished')
         await self.wait_exit()
         await self.close_channel()
         self.log.close()

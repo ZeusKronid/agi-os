@@ -43,23 +43,23 @@ def run_json(runner, args):
 
 def checked_request(request):
     if os.geteuid() != 0 or not live_environment():
-        raise ValidationError('Завершение установки разрешено только внутри Live')
+        raise ValidationError('Finishing the installation is allowed only inside Live')
     if set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation'}:
-        raise ValidationError('Неизвестный запрос завершения')
+        raise ValidationError('Unknown finishing request')
     config = Configuration.parse(request['configuration'])
     if config.disk != request['target'] or request['confirmation'] != request['target']:
-        raise ValidationError('Введите точный путь конечного диска для подтверждения')
+        raise ValidationError('Type the exact path of the target disk to confirm')
     if request['layout'] not in ('erase', 'alongside'):
-        raise ValidationError('Неизвестный вариант разметки')
+        raise ValidationError('Unknown layout')
     disk = selected_disk(inventory(), request['target'])
     if disk['fingerprint'] != request['fingerprint']:
-        raise ValidationError('Диск изменился после подтверждения; завершение отменено')
+        raise ValidationError('The disk changed after you confirmed; nothing was finished')
     passphrase = request['passphrase']
     if not isinstance(passphrase, str) or any(c in passphrase for c in '\n\r\x00'):
-        raise ValidationError('Некорректный пароль шифрования')
+        raise ValidationError('Invalid encryption password')
     image = request['image']
     if image.get('format') not in ('qcow2', 'raw') or not isinstance(image.get('path'), str):
-        raise ValidationError('Некорректное описание образа превью')
+        raise ValidationError('Invalid preview image description')
     return config, disk
 
 
@@ -80,7 +80,7 @@ class Source:
             self.nbd = next((f'/dev/nbd{i}' for i in range(16) if Path(f'/sys/class/block/nbd{i}').exists()
                              and not Path(f'/sys/class/block/nbd{i}/pid').exists()), None)
             if self.nbd is None:
-                raise ValidationError('Нет свободного NBD для образа превью')
+                raise ValidationError('No free NBD device for the preview image')
             self.runner.run(['qemu-nbd', '--read-only', '--format=qcow2', '--connect', self.nbd, self.image['path']])
             self.device = self.nbd
             self.runner.run(['partprobe', self.nbd])
@@ -90,7 +90,7 @@ class Source:
         self.runner.run(['udevadm', 'settle', '--timeout=30'])
         table = run_json(self.runner, ['sfdisk', '--json', self.device])['partitiontable']
         if table.get('label') != 'gpt' or not table.get('partitions'):
-            raise ValidationError('В превью нет ожидаемой таблицы разделов')
+            raise ValidationError('The preview has no expected partition table')
         self.partitions = table['partitions']
         return self
 
@@ -102,7 +102,7 @@ class Source:
         kind = self.runner.run(['blkid', '-s', 'TYPE', '-o', 'value', device]).strip()
         if kind == 'crypto_LUKS':
             if not passphrase:
-                raise ValidationError('Корень зашифрован: введите пароль шифрования для завершения')
+                raise ValidationError('The root is encrypted: enter the encryption password to finish')
             self.runner.run(['cryptsetup', 'open', '--readonly', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
             self.opened = True
             return '/dev/mapper/' + SOURCE_MAP, True
@@ -133,17 +133,17 @@ def read_record(runner, root_device, mount):
 def check_record(record, config, firmware, encrypted):
     installed = Configuration.parse({**record['configuration'], 'disk': config.disk})
     if installed.digest() != config.digest():
-        raise ValidationError('В превью установлена не та конфигурация, которая была подтверждена')
+        raise ValidationError('The preview holds a different configuration than the one you confirmed')
     if record['firmware'] != firmware:
-        raise ValidationError('Превью установлено для другого типа загрузки, чем у этого компьютера')
+        raise ValidationError('The preview was installed for a different boot type than this computer')
     if bool(record.get('encrypted')) != encrypted:
-        raise ValidationError('Состояние шифрования не совпадает с записью установки')
+        raise ValidationError('The encryption state does not match the installation record')
 
 
 def free_regions(runner, disk_path, size):
     table = run_json(runner, ['sfdisk', '--json', disk_path])['partitiontable']
     if table.get('label') != 'gpt':
-        raise ValidationError('Установка рядом с существующими системами возможна только на диске с GPT')
+        raise ValidationError('Installing alongside other systems needs a GPT disk')
     total = size // SECTOR
     first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
     used = sorted((int(p['start']), int(p['start']) + int(p['size']) - 1) for p in table.get('partitions', []))
@@ -164,13 +164,13 @@ def promote(runner, request, disk, source, firmware):
     table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
     entry = next((p for p in table['partitions'] if p['node'] == preview), None)
     if entry is None or entry.get('name') != 'AGIOS-PREVIEW':
-        raise ValidationError('Раздел превью не найден на конечном диске')
+        raise ValidationError('The preview partition is not on the target disk')
     base, number = int(entry['start']), int(preview[len(target):].lstrip('p'))
     nested = sorted(source.partitions, key=lambda p: int(p['start']))
     for part in nested:
         if int(part['start']) % ALIGN:
-            raise ValidationError('Разделы превью не выровнены; повышение невозможно')
-    emit('final-progress', text='Повышаю разделы превью до разделов диска (данные не перемещаются)')
+            raise ValidationError('The preview partitions are not aligned; they can’t be promoted')
+    emit('final-progress', text='Promoting the preview partitions to disk partitions (no data moves)')
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
     if request['layout'] == 'erase':
         others = [int(p['node'][len(target):].lstrip('p')) for p in table['partitions'] if p['node'] != preview]
@@ -213,7 +213,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     runner.run(['mount', '-o', 'ro', source.partition(boot_number), str(src_mount / 'boot')])
     used = int(runner.run(['du', '-sxB1', str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
     needed = used + used // 5 + 2 * GIB
-    emit('final-progress', text=f'Создаю разделы на {target} для {used / GIB:.1f} ГиБ данных')
+    emit('final-progress', text=f'Creating partitions on {target} for {used / GIB:.1f} GiB of data')
     if request['layout'] == 'erase':
         runner.run(['sgdisk', '--zap-all', target])
         runner.run(['sgdisk', '--clear', target])
@@ -221,7 +221,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
         runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
     regions = [r for r in free_regions(runner, target, disk['size']) if (r[1] - r[0] + 1) * SECTOR >= needed]
     if not regions:
-        raise ValidationError(f'На диске нет свободного места для системы ({needed / GIB:.1f} ГиБ)')
+        raise ValidationError(f'The disk has no free space for the system ({needed / GIB:.1f} GiB)')
     start, end = max(regions, key=lambda r: r[1] - r[0])
     args = ['sgdisk']
     if firmware == 'bios':
@@ -240,7 +240,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     runner.run(['mkfs.fat', '-F', '32', boot] if firmware == 'uefi' else ['mkfs.ext4', '-F', boot])
     root = root_partition
     if encrypted:
-        emit('final-progress', text='Шифрую корневой раздел конечного диска (LUKS2)')
+        emit('final-progress', text='Encrypting the root partition of the target disk (LUKS2)')
         runner.run(['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', root_partition], input_text=passphrase)
         runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
         root = '/dev/mapper/' + TARGET_MAP
@@ -251,15 +251,15 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     runner.run(['mount', root, str(dst)])
     (dst / 'boot').mkdir()
     runner.run(['mount', boot, str(dst / 'boot')])
-    emit('final-progress', text='Копирую проверенную систему пофайлово')
+    emit('final-progress', text='Copying the checked system file by file')
     runner.run(['rsync', '-aHAX', '--numeric-ids', '--exclude=/boot/*', f'{src_mount}/', f'{dst}/'], timeout=14400)
     # The boot partition is FAT on UEFI: copy contents without POSIX ownership or modes.
     runner.run(['rsync', '-rt', '--no-perms', '--no-owner', '--no-group', '--modify-window=2', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600)
-    emit('final-progress', text='Проверяю копию по контрольным суммам')
+    emit('final-progress', text='Verifying the copy by checksums')
     differences = runner.run(['rsync', '-aHAXcn', '--numeric-ids', '--exclude=/boot/*', '--out-format=%n', f'{src_mount}/', f'{dst}/'], timeout=14400).strip()
     differences += runner.run(['rsync', '-rcn', '--no-perms', '--no-owner', '--no-group', '--out-format=%n', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600).strip()
     if differences:
-        raise ValidationError('Проверка копии не пройдена: ' + differences.splitlines()[0])
+        raise ValidationError('The copy did not pass the check: ' + differences.splitlines()[0])
     runner.run(['umount', str(src_mount / 'boot')])
     runner.run(['umount', str(src_mount)])
     source.mount = None
@@ -277,7 +277,7 @@ def finalize(request, runner):
     opened_target = False
     dst = None
     try:
-        emit('final-progress', text='Открываю превью для проверки')
+        emit('final-progress', text='Opening the preview for checking')
         source.attach()
         src_root, encrypted = source.open_root(boot_number + 1, passphrase)
         record = read_record(runner, src_root, mount)
@@ -305,7 +305,7 @@ def finalize(request, runner):
         passphrase = None
         chroot = ['arch-chroot', str(dst)]
         if moved:
-            emit('final-progress', text='Обновляю идентификаторы разделов в новой системе')
+            emit('final-progress', text='Updating partition IDs in the new system')
             (dst / 'etc/fstab').write_text(runner.run(['genfstab', '-U', str(dst)]))
             root_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root]).strip()
             options = f'root=UUID={root_uuid} rw'
@@ -320,9 +320,9 @@ def finalize(request, runner):
                 text = '\n'.join(('options ' + options) if line.startswith('options ') else line for line in entry.read_text().splitlines())
                 entry.write_text(text + '\n')
             record['root_uuid'] = root_uuid
-        emit('final-progress', text='Пересобираю initramfs под оборудование этого компьютера')
+        emit('final-progress', text='Rebuilding initramfs for this computer’s hardware')
         runner.run([*chroot, 'mkinitcpio', '-P'])
-        emit('final-progress', text='Регистрирую загрузку установленной системы')
+        emit('final-progress', text='Registering the boot of the installed system')
         if config.bootloader == 'systemd-boot':
             runner.run([*chroot, 'bootctl', '--esp-path=/boot', 'install'])
         elif firmware == 'uefi':
@@ -345,7 +345,7 @@ def finalize(request, runner):
         dst = None
         if opened_target:
             runner.run(['cryptsetup', 'close', TARGET_MAP]); opened_target = False
-        emit('finalized', text='Система на ' + target + ' готова к загрузке. Выключите Live, извлеките носитель и включите компьютер.',
+        emit('finalized', text='The system on ' + target + ' is ready to boot. Shut down Live, remove the stick and power on the computer.',
              target=target, record_id=record['id'], mode='copy' if moved else 'promote')
     finally:
         passphrase = None
@@ -368,7 +368,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finalize(json.loads(sys.stdin.readline(1000000)), Runner())
     except Exception as exc:
-        emit('final-error', text=str(exc) if isinstance(exc, ValidationError) else 'Завершение прервано внутренней ошибкой: ' + type(exc).__name__)
+        emit('final-error', text=str(exc) if isinstance(exc, ValidationError) else 'Finishing stopped on an internal error: ' + type(exc).__name__)
         return 1
     return 0
 

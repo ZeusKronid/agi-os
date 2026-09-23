@@ -44,7 +44,7 @@ def mem_available():
     for line in Path('/proc/meminfo').read_text().splitlines():
         if line.startswith('MemAvailable:'):
             return int(line.split()[1]) * 1024
-    raise ValidationError('Не удалось прочитать объём памяти')
+    raise ValidationError('Could not read the memory size')
 
 
 def free_regions(disk):
@@ -128,13 +128,13 @@ def probe(request):
     snapshot = inventory()
     disks = {d['path']: d for d in snapshot['disks']}
     if target not in disks:
-        raise ValidationError('Целевой диск не найден')
+        raise ValidationError('Target disk not found')
     options = []
     budget = mem_available() - vm_memory - RESERVE
-    options.append({'id': 'ram', 'kind': 'ram', 'title': 'В оперативной памяти',
-                    'detail': f'Сжатый образ (zram). Доступно ≈ {budget / GIB:.1f} ГиБ после выделения VM'
-                              + (' — зашифрованные данные не сжимаются' if compression <= 1 else ''),
-                    'revert': 'Диски не затрагиваются: выключить VM — и всё',
+    options.append({'id': 'ram', 'kind': 'ram', 'title': 'In memory',
+                    'detail': f'A compressed image (zram). About {budget / GIB:.1f} GiB free after the VM takes its share'
+                              + (' — encrypted data does not compress' if compression <= 1 else ''),
+                    'revert': 'no disk is touched: stop the VM and it’s gone',
                     'destructive': False, 'confirm': None, 'available': max(0, budget),
                     'fits': needed / compression <= budget, 'order': 0})
     live_medium = read_command(['findmnt', '-n', '-o', 'SOURCE', '/run/archiso/bootmnt']).strip()
@@ -148,19 +148,19 @@ def probe(request):
                 if free is None:
                     continue
                 limit = min(free, 4 * GIB - MIB) if part['fstype'] == 'vfat' else free
-                options.append({'id': 'file:' + part['path'], 'kind': 'file', 'title': f'Файл на {part["path"]}',
-                                'detail': f'{part["fstype"]} «{part.get("label") or disk.get("model") or ""}», свободно {free / GIB:.1f} ГиБ, {tran}'
-                                          + (' — FAT32 ограничивает файл 4 ГиБ' if part['fstype'] == 'vfat' else ''),
-                                'revert': 'Удалить файл AGIOS-PREVIEW/preview.qcow2; остальное не менялось',
+                options.append({'id': 'file:' + part['path'], 'kind': 'file', 'title': f'File on {part["path"]}',
+                                'detail': f'{part["fstype"]} “{part.get("label") or disk.get("model") or ""}”, {free / GIB:.1f} GiB free, {tran}'
+                                          + (' — FAT32 limits a file to 4 GiB' if part['fstype'] == 'vfat' else ''),
+                                'revert': 'delete AGIOS-PREVIEW/preview.qcow2; nothing else changed',
                                 'destructive': False, 'confirm': None, 'device': part['path'], 'fstype': part['fstype'],
                                 'available': limit, 'fits': needed <= limit, 'order': 1 if tran != 'usb' else 2})
         for start, end in free_regions(disk):
             size = (end - start + 1) * SECTOR
             options.append({'id': f'part:{disk["path"]}:{start}', 'kind': 'partition',
-                            'title': f'Новый раздел в свободном месте {disk["path"]}',
-                            'detail': f'Неразмечено {size / GIB:.1f} ГиБ, {disk.get("model") or tran}'
-                                      + (' — это целевой диск, разделы превью станут разделами системы без копирования' if disk['path'] == target else ''),
-                            'revert': 'Удалить одну добавленную запись раздела; существующие разделы не менялись',
+                            'title': f'A new partition in free space on {disk["path"]}',
+                            'detail': f'{size / GIB:.1f} GiB unpartitioned, {disk.get("model") or tran}'
+                                      + (' — this is the target disk: the preview partitions become the system without copying' if disk['path'] == target else ''),
+                            'revert': 'delete one added partition entry; existing partitions stay',
                             'destructive': False, 'confirm': None, 'disk': disk['path'], 'start': start, 'end': end,
                             'available': size, 'fits': needed <= size, 'order': 1 if disk['path'] == target else 2})
         if disk['path'] == target and disk.get('pttype') == 'gpt':
@@ -168,16 +168,16 @@ def probe(request):
                 room = shrink_room(part)
                 if room is None or room < needed:
                     continue
-                options.append({'id': 'shrink:' + part['path'], 'kind': 'shrink', 'title': f'Ужать раздел {part["path"]}',
-                                'detail': f'{part["fstype"]} «{part.get("label") or ""}» {part["size"] / GIB:.1f} ГиБ → освободить {needed / GIB:.1f} ГиБ. '
-                                          'Данные сохраняются; рекомендуется резервная копия',
-                                'revert': 'Удалить раздел превью, вернуть границу раздела и вырастить файловую систему обратно',
+                options.append({'id': 'shrink:' + part['path'], 'kind': 'shrink', 'title': f'Shrink partition {part["path"]}',
+                                'detail': f'{part["fstype"]} “{part.get("label") or ""}” {part["size"] / GIB:.1f} GiB → frees {needed / GIB:.1f} GiB. '
+                                          'Data stays; a backup is recommended',
+                                'revert': 'delete the preview partition, restore the boundary and grow the filesystem back',
                                 'destructive': True, 'confirm': part['path'], 'disk': disk['path'], 'device': part['path'],
                                 'fstype': part['fstype'], 'available': room, 'fits': True, 'order': 3})
     disk = disks[target]
-    options.append({'id': 'erase:' + target, 'kind': 'erase', 'title': f'Стереть весь диск {target} сейчас',
-                    'detail': f'{disk["size"] / GIB:.1f} ГиБ{", " + disk["model"] if disk.get("model") else ""}. Все данные будут удалены до превью',
-                    'revert': 'Необратимо', 'destructive': True, 'confirm': target, 'disk': target,
+    options.append({'id': 'erase:' + target, 'kind': 'erase', 'title': f'Erase the whole disk {target} now',
+                    'detail': f'{disk["size"] / GIB:.1f} GiB{", " + disk["model"] if disk.get("model") else ""}. All data is deleted before the preview',
+                    'revert': 'not reversible', 'destructive': True, 'confirm': target, 'disk': target,
                     'available': disk['size'], 'fits': needed <= disk['size'] - 2 * GIB, 'order': 4})
     fitting = [o for o in options if o['fits']]
     fitting.sort(key=lambda o: (o['destructive'], o['order']))
@@ -200,7 +200,7 @@ def new_partition(disk, start, end):
     sh(['udevadm', 'settle', '--timeout=30'])
     created = [p['path'] for p in inventory_disk(disk)['partitions'] if p['path'] not in partitions]
     if len(created) != 1:
-        raise ValidationError('Не удалось определить созданный раздел превью')
+        raise ValidationError('Could not find the created preview partition')
     return created[0]
 
 
@@ -212,7 +212,7 @@ def release_mount(point):
     """Never stack a new preview mount over a stale one left by an interrupted attempt."""
     while os.path.ismount(point):
         if subprocess.run(['umount', str(point)], capture_output=True, timeout=60).returncode:
-            raise ValidationError('Каталог превью занят предыдущей операцией: ' + str(point))
+            raise ValidationError('A previous operation still holds the preview directory: ' + str(point))
 
 
 def image_file(directory, size):
@@ -233,7 +233,7 @@ def prepare(request):
     if kind == 'ram':
         budget = mem_available() - int(request['vm_memory']) - RESERVE
         if needed / float(request.get('compression', COMPRESSION)) > budget:
-            raise ValidationError('Для превью в памяти недостаточно свободной RAM')
+            raise ValidationError('Not enough free RAM for an in-memory preview')
         subprocess.run(['modprobe', 'zram'], capture_output=True, timeout=30)
         device = sh(['zramctl', '--find', '--size', str(virtual), '--algorithm', 'zstd']).strip()
         Path('/sys/block', Path(device).name, 'mem_limit').write_text(str(int(budget)))
@@ -258,7 +258,7 @@ def prepare(request):
         stat = os.statvfs(point)
         if stat.f_bavail * stat.f_frsize < needed:
             subprocess.run(['umount', str(point)], capture_output=True)
-            raise ValidationError('На выбранном носителе стало меньше свободного места, чем нужно')
+            raise ValidationError('The selected medium now has less free space than needed')
         limit = min(virtual, 4 * GIB - MIB) if fstype == 'vfat' else virtual
         image = image_file(folder, limit)
         return {'image': image, 'revert': {'kind': 'file', 'device': option['device'], 'mount': str(point), 'folder': str(folder)}}
@@ -267,13 +267,13 @@ def prepare(request):
         current = inventory_disk(disk)
         if not current.get('pttype'):
             if current.get('fstype'):
-                raise ValidationError('На носителе есть файловая система без таблицы разделов')
+                raise ValidationError('The medium has a filesystem without a partition table')
             sh(['sgdisk', '--clear', disk])
         backup = gpt_backup(disk)
         regions = dict((s, e) for s, e in free_regions(inventory_disk(disk)))
         start = int(option['start'])
         if start not in regions:
-            raise ValidationError('Свободное место на носителе изменилось; обновите варианты')
+            raise ValidationError('Free space on the medium changed; refresh the options')
         end = min(regions[start], start + max(needed * 2, 16 * GIB) // SECTOR - 1) if disk != request['target'] else regions[start]
         end = (end + 1) // ALIGN * ALIGN - 1
         device = new_partition(disk, start, end)
@@ -283,7 +283,7 @@ def prepare(request):
         disk, device, fstype = option['disk'], option['device'], option['fstype']
         part = next(p for p in inventory_disk(disk)['partitions'] if p['path'] == device)
         if part['mounted']:
-            raise ValidationError('Раздел смонтирован')
+            raise ValidationError('The partition is mounted')
         new_size = (part['size'] - needed) // MIB * MIB
         if fstype == 'ntfs':
             sh(['ntfsresize', '--no-action', '--force', '--size', str(new_size), device], timeout=1800)
@@ -301,7 +301,7 @@ def prepare(request):
         regions = free_regions(inventory_disk(disk))
         region = next(((s, e) for s, e in regions if s > new_end and (e - s + 1) * SECTOR >= needed), None)
         if region is None:
-            raise ValidationError('После ужатия не появилось ожидаемое свободное место')
+            raise ValidationError('Shrinking did not leave the expected free space')
         created = new_partition(disk, region[0], region[1])
         return {'image': {'format': 'raw', 'path': created},
                 'revert': {'kind': 'shrink', 'disk': disk, 'device': created, 'shrunk': device, 'fstype': fstype,
@@ -313,7 +313,7 @@ def prepare(request):
         regions = free_regions(inventory_disk(disk))
         device = new_partition(disk, regions[0][0], regions[0][1])
         return {'image': {'format': 'raw', 'path': device}, 'revert': {'kind': 'erase', 'disk': disk, 'device': device}}
-    raise ValidationError('Неизвестный вид хранилища превью')
+    raise ValidationError('Unknown preview storage kind')
 
 
 def delete_partition(disk, device):
@@ -330,16 +330,16 @@ def revert(request):
     if kind == 'ram':
         subprocess.run(['umount', state['mount']], capture_output=True, timeout=60)
         sh(['zramctl', '--reset', state['device']])
-        return {'reverted': True, 'text': 'Память освобождена; диски не менялись'}
+        return {'reverted': True, 'text': 'Memory freed; no disk was changed'}
     if kind == 'file':
         if Path(state['folder']).is_dir():
             shutil.rmtree(state['folder'])
         sh(['sync'])
         subprocess.run(['umount', state['mount']], capture_output=True, timeout=120)
-        return {'reverted': True, 'text': 'Файл превью удалён; носитель в исходном состоянии'}
+        return {'reverted': True, 'text': 'Preview file deleted; the medium is as it was'}
     if kind == 'partition':
         delete_partition(state['disk'], state['device'])
-        return {'reverted': True, 'text': 'Раздел превью удалён; остальные разделы не менялись'}
+        return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
     if kind == 'shrink':
         delete_partition(state['disk'], state['device'])
         sh(['parted', '--script', state['disk'], 'resizepart', str(state['number']), f'{state["original_end"]}s'])
@@ -350,28 +350,28 @@ def revert(request):
         else:
             sh(['e2fsck', '-f', '-y', state['shrunk']], timeout=1800)
             sh(['resize2fs', state['shrunk']], timeout=7200)
-        return {'reverted': True, 'text': 'Раздел превью удалён, граница раздела восстановлена, файловая система выращена обратно'}
+        return {'reverted': True, 'text': 'Preview partition deleted, the boundary restored and the filesystem grown back'}
     if kind == 'erase':
-        return {'reverted': False, 'text': 'Диск был стёрт по явному выбору; вернуть данные невозможно'}
-    raise ValidationError('Неизвестный вид хранилища превью')
+        return {'reverted': False, 'text': 'The disk was erased by your explicit choice; the data can’t come back'}
+    raise ValidationError('Unknown preview storage kind')
 
 
 def main():
     try:
         if os.geteuid() != 0 or not live_environment():
-            raise ValidationError('Операции с носителями разрешены только внутри Live')
+            raise ValidationError('Storage operations are allowed only inside Live')
         request = json.loads(sys.stdin.readline(1_000_000))
         global PREVIEW
         data_root = Path(request.get('data_root', DATA_ROOT))
         if not data_root.is_absolute():
-            raise ValidationError('Некорректный каталог данных')
+            raise ValidationError('Invalid data directory')
         PREVIEW = data_root / 'preview'
         handler = {'probe': probe, 'prepare': prepare, 'revert': revert}[request['op']]
         print(json.dumps({'result': handler(request)}, ensure_ascii=False))
     except Exception as exc:
-        text = str(exc) if isinstance(exc, (ValidationError, KeyError)) else 'Внутренняя ошибка операции с носителем'
+        text = str(exc) if isinstance(exc, (ValidationError, KeyError)) else 'Internal storage operation error'
         if isinstance(exc, subprocess.CalledProcessError):
-            text = 'Команда завершилась ошибкой: ' + ' '.join(exc.cmd[:2])
+            text = 'Command failed: ' + ' '.join(exc.cmd[:2])
         print(json.dumps({'error': text}, ensure_ascii=False))
         return 1
     return 0

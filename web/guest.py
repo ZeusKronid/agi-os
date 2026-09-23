@@ -59,7 +59,7 @@ def main():
             proc.wait()
             proc.stdin.close()
         if installed and proc.returncode == 0:
-            send({'kind': 'shutdown', 'text': 'Перехожу к загрузке установленной системы'})
+            send({'kind': 'shutdown', 'text': 'Booting the installed system'})
             subprocess.run(['systemctl', 'poweroff'], check=True)
 
 
