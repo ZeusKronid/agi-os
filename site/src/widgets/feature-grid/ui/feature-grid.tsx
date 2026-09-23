@@ -88,7 +88,7 @@ export function FeatureGrid() {
           <FeatureCard
             span={6}
             title="Arch was never this easy"
-            text="Any window manager, rice, theme or tool: say it out loud and AGIOS puts the system together the way you meant it. Walk through it in the preview before it ever touches your disk."
+            text="Any window manager, rice or tool: say it, and AGIOS builds the system you meant. Try it in the preview before it touches your disk."
             visualClassName="h-auto"
           >
             <ArchWayVisual />
