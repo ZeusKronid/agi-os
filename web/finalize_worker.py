@@ -27,11 +27,12 @@ import uuid
 
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
-from domain import Configuration, ValidationError
+from domain import SWAPFILE, Configuration, ValidationError, hibernation_swap_size
 from hardware import SETUP_MODE_VAR, driver_plan, efi_flag, initramfs_config, profile
 from journal import Logger, adopt
 from system import inventory, live_environment, selected_disk
-from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path, sbctl_unsigned
+from worker import (CRYPT_NAME, Cancelled, Runner, boot_options, create_swapfile, emit, grub_defaults,
+                    partition_path, resume_parameter, sbctl_unsigned, swap_fstab_line)
 from deployment import restrict_test_targets
 import storage_worker
 
@@ -238,8 +239,12 @@ def promote(runner, request, disk, source, firmware):
     return node('boot'), node('linux'), False
 
 
-def copy(runner, request, disk, source, firmware, passphrase, mount):
-    """Create fresh partitions on the target and copy the preview into them file by file."""
+def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), reserve=0):
+    """Create fresh partitions on the target and copy the preview into them file by file.
+
+    Paths in skip (root-relative, e.g. the hibernation swap file) are recreated by the
+    caller: a copied swap file would sit at other physical blocks than resume_offset says.
+    reserve is the space the caller needs for them on the new root."""
     target = disk['path']
     boot_number = 1 if firmware == 'uefi' else 2
     root_number = boot_number + 1
@@ -249,8 +254,9 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     runner.run(['mount', '-o', SOURCE_MOUNT, src_root, str(src_mount)])
     source.mount = src_mount
     runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
-    used = int(runner.run(['du', '-sxB1', str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
-    needed = used + used // 5 + 2 * GIB
+    skipped = [f'--exclude={src_mount / path}' for path in skip]
+    used = int(runner.run(['du', '-sxB1', *skipped, str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
+    needed = used + used // 5 + 2 * GIB + reserve
     emit('final-progress', text=f'Создаю разделы на {target} для {used / GIB:.1f} ГиБ данных')
     if request['layout'] == 'erase':
         runner.run(['sgdisk', '--zap-all', target])
@@ -290,11 +296,12 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     (dst / 'boot').mkdir()
     runner.run(['mount', boot, str(dst / 'boot')])
     emit('final-progress', text='Копирую проверенную систему пофайлово')
-    runner.run(['rsync', '-aHAX', '--numeric-ids', '--exclude=/boot/*', f'{src_mount}/', f'{dst}/'], timeout=14400)
+    excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
+    runner.run(['rsync', '-aHAX', '--numeric-ids', *excludes, f'{src_mount}/', f'{dst}/'], timeout=14400)
     # The boot partition is FAT on UEFI: copy contents without POSIX ownership or modes.
     runner.run(['rsync', '-rt', '--no-perms', '--no-owner', '--no-group', '--modify-window=2', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600)
     emit('final-progress', text='Проверяю копию по контрольным суммам')
-    differences = runner.run(['rsync', '-aHAXcn', '--numeric-ids', '--exclude=/boot/*', '--out-format=%n', f'{src_mount}/', f'{dst}/'], timeout=14400).strip()
+    differences = runner.run(['rsync', '-aHAXcn', '--numeric-ids', *excludes, '--out-format=%n', f'{src_mount}/', f'{dst}/'], timeout=14400).strip()
     differences += runner.run(['rsync', '-rcn', '--no-perms', '--no-owner', '--no-group', '--out-format=%n', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600).strip()
     if differences:
         raise ValidationError('Проверка копии не пройдена: ' + differences.splitlines()[0])
@@ -302,6 +309,23 @@ def copy(runner, request, disk, source, firmware, passphrase, mount):
     runner.run(['umount', str(src_mount)])
     source.mount = None
     return boot, root_partition, root, encrypted, dst
+
+
+def swapfile_size(record):
+    """Sized for this computer's RAM (the preview was sized for the same inventory)."""
+    try:
+        return hibernation_swap_size(inventory()['hardware'].get('memory'))
+    except ValidationError:
+        return int(record['hibernation']['size'])
+
+
+def recreate_swapfile(runner, dst, root_uuid, record, size):
+    """The hibernation swap file on the new root filesystem: new UUID, new offset."""
+    fstype = runner.run(['findmnt', '-n', '-o', 'FSTYPE', str(dst)]).strip()
+    emit('final-progress', text=f'Создаю swap-файл для гибернации ({size // 2**30} ГиБ) на конечном диске')
+    offset = create_swapfile(runner, dst, fstype, size)
+    record['hibernation'] = {**record['hibernation'], 'size': size, 'resume_uuid': root_uuid, 'resume_offset': offset}
+    return resume_parameter(root_uuid, offset)
 
 
 def missing_drivers(hardware, config, installed):
@@ -338,7 +362,7 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
                  + (', '.join(plan['packages']) or 'дополнительных не требуется'))
         # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
         dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
-        if initramfs := initramfs_config(plan, encrypted):
+        if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation'))):
             dropin.parent.mkdir(exist_ok=True)
             dropin.write_text(initramfs)
         elif dropin.exists():
@@ -424,23 +448,27 @@ def finalize(request, runner):
             runner.run(['mount', boot, str(dst / 'boot')])
             moved = False
         else:
-            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, firmware, passphrase, mount)
+            # The swap directory (a subvolume on btrfs) is recreated, not copied.
+            skip = [str(Path(SWAPFILE).parent)] if record.get('hibernation') else []
+            swap_size = swapfile_size(record) if skip else 0
+            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, firmware, passphrase, mount,
+                                                              skip, swap_size)
             opened_target = encrypted
             moved = True
         passphrase = None
         chroot = ['arch-chroot', str(dst)]
         if moved:
             emit('final-progress', text='Обновляю идентификаторы разделов в новой системе')
-            (dst / 'etc/fstab').write_text(runner.run(['genfstab', '-U', str(dst)]))
             root_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root]).strip()
-            options = f'root=UUID={root_uuid} rw'
-            if encrypted:
-                luks_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root_partition]).strip()
-                options = f'cryptdevice=UUID={luks_uuid}:{CRYPT_NAME} root=/dev/mapper/{CRYPT_NAME} rw'
-                defaults = dst / 'etc/default/grub'
-                if defaults.exists():
-                    lines = [l for l in defaults.read_text().splitlines() if not l.startswith('GRUB_CMDLINE_LINUX=')]
-                    defaults.write_text('\n'.join(lines) + f'\nGRUB_CMDLINE_LINUX="cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"\n')
+            luks_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root_partition]).strip() if encrypted else None
+            resume = None
+            if record.get('hibernation'):
+                resume = recreate_swapfile(runner, dst, root_uuid, record, swap_size)
+            (dst / 'etc/fstab').write_text(runner.run(['genfstab', '-U', str(dst)]) + (swap_fstab_line() if resume else ''))
+            options = boot_options(root_uuid, luks_uuid, resume)
+            defaults = dst / 'etc/default/grub'
+            if defaults.exists() and (encrypted or resume):
+                defaults.write_text(grub_defaults(defaults.read_text(), luks_uuid, resume))
             for entry in (dst / 'boot/loader/entries').glob('*.conf') if (dst / 'boot/loader/entries').is_dir() else []:
                 text = '\n'.join(('options ' + options) if line.startswith('options ') else line for line in entry.read_text().splitlines())
                 entry.write_text(text + '\n')

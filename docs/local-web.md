@@ -228,7 +228,16 @@ What Live keeps, all in RAM (lost at power-off):
 - Disks with MBR partition tables: only the explicit whole-disk erase.
 - Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
   hibernation) is refused by `ntfsresize` — shut Windows down fully first.
-- Swap is zram; hibernation is not configured.
+- Swap is zram by default. `swap: "hibernate"` adds a swap file `/swap/swapfile`
+  as large as the real computer's RAM inside the root (inside LUKS when encrypted;
+  a separate subvolume on Btrfs), `resume=UUID=… resume_offset=…` and the
+  `resume` initramfs hook. The file is reserved with `fallocate`/`mkswapfile`, so an
+  in-memory preview does not grow by the RAM size; promotion keeps it in place,
+  a file-by-file copy recreates it on the target with the new UUID and offset.
+  F2FS is refused for hibernation. `agi-os-verify` checks the swap file,
+  `/sys/power/resume*` and logind `CanHibernate`; `agi-os-verify --hibernate`
+  (or the button in the GUI) hibernates once and passes only if the same session
+  comes back; with hibernation chosen, acceptance is complete only after that test.
 - Secure Boot: the Live ISO itself is not signed and boots only with Secure Boot
   off or in Setup Mode. Booting it with Secure Boot on would need Arch's
   unsigned kernel behind a Microsoft-signed `shim` plus a MOK the user enrolls

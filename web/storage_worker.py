@@ -398,6 +398,15 @@ def checked_state(state, snapshot):
     return state
 
 
+def in_memory(request):
+    """Bytes an in-memory preview really stores: a reserved but never written area (the
+    hibernation swap file) takes room on the image's filesystem, not in zram."""
+    needed, sparse = int(request['needed']), int(request.get('sparse', 0))
+    if not 0 <= sparse <= needed:
+        raise ValidationError('Некорректный размер зарезервированного места')
+    return needed - sparse
+
+
 def probe(request):
     needed, target, vm_memory, compression = sizing(request)
     snapshot = restrict_test_targets(inventory())
@@ -410,10 +419,13 @@ def probe(request):
     budget = mem_available() - vm_memory - RESERVE
     options.append({'id': 'ram', 'kind': 'ram', 'title': 'В оперативной памяти',
                     'detail': f'Сжатый образ (zram). Доступно ≈ {budget / GIB:.1f} ГиБ после выделения VM'
-                              + (' — зашифрованные данные не сжимаются' if compression <= 1 else ''),
+                              + (' — зашифрованные данные не сжимаются' if compression <= 1 else '')
+                              + (f'; swap-файл гибернации ({int(request["sparse"]) / GIB:.0f} ГиБ) только зарезервирован: память он займёт, '
+                                 'лишь если превью начнёт в него выгружаться (тогда сработает общий лимит памяти)'
+                                 if int(request.get('sparse', 0)) else ''),
                     'revert': 'Диски не затрагиваются: выключить VM — и всё',
                     'destructive': False, 'confirm': None, 'available': max(0, budget),
-                    'fits': needed / compression <= budget, 'order': 0})
+                    'fits': in_memory(request) / compression <= budget, 'order': 0})
     live_medium = live_source()
     for disk in snapshot['disks']:
         if disk['path'] == live_disk or disk.get('ro'):
@@ -517,12 +529,13 @@ def image_file(directory, size):
 def prepare(request):
     needed, target, vm_memory, compression = sizing(request)
     option = resolve_option(request['option'], target, restrict_test_targets(inventory()))
-    virtual = min(max(needed * 2, 16 * GIB), 64 * GIB)  # Sparse capacity of an image-backed preview.
+    # Sparse capacity of an image-backed preview; never below what the system needs.
+    virtual = max(min(max(needed * 2, 16 * GIB), 64 * GIB), needed)
     kind = option['kind']
     private_dir(PREVIEW)  # 0755: QEMU runs as the website's user and must reach the image inside.
     if kind == 'ram':
         budget = mem_available() - vm_memory - RESERVE
-        if needed / compression > budget:
+        if in_memory(request) / compression > budget:
             raise ValidationError('Для превью в памяти недостаточно свободной RAM')
         subprocess.run(['modprobe', 'zram'], capture_output=True, timeout=30)
         device = sh(['zramctl', '--find', '--size', str(virtual), '--algorithm', 'zstd']).strip()

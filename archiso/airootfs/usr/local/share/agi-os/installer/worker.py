@@ -9,6 +9,7 @@ credentials are accepted by this process.
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -19,7 +20,8 @@ import uuid
 from pathlib import Path
 
 from configcheck import HINTS, tool_checks
-from domain import Configuration, ValidationError, console_font_exists, console_keymap_exists, system_path_allowed
+from domain import (GIB, SWAPFILE, Configuration, ValidationError, console_font_exists, console_keymap_exists,
+                    hibernation_swap_size, system_path_allowed)
 from hardware import driver_plan, initramfs_config, profile
 from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
@@ -143,10 +145,69 @@ def resolved(relative):
     if not real.is_relative_to(TARGET.resolve()):
         raise ValidationError("Файл настроек выходит за пределы установленной системы")
     return real.relative_to(TARGET.resolve()).as_posix()
+
+
 def sbctl_unsigned(output):
     """Files `sbctl verify` reports as not signed (it marks them with ✗)."""
     return [line.split("✗", 1)[1].split(" is not signed")[0].strip()
             for line in output.splitlines() if "✗" in line]
+
+
+PAGE = 4096  # resume_offset counts pages; x86_64 pages are 4 KiB.
+
+
+def first_extent_offset(filefrag):
+    """resume_offset from `filefrag -v`: the first extent's physical start, in pages."""
+    block = re.search(r"blocks? of (\d+) bytes", filefrag)
+    first = re.search(r"^\s*0:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.", filefrag, re.MULTILINE)
+    if not block or not first:
+        raise ValidationError("Не удалось определить положение swap-файла на диске (resume_offset)")
+    return int(first.group(1)) * int(block.group(1)) // PAGE
+
+
+def create_swapfile(runner, root, filesystem, size):
+    """Swap file for hibernation inside a mounted root; returns its resume_offset.
+
+    Space is reserved without writing data (fallocate; mkswapfile on btrfs), so an
+    in-memory preview does not grow by the size of RAM. On btrfs the file lives in
+    its own subvolume (kept out of root snapshots) and is created NOCOW by mkswapfile.
+    """
+    path = Path(root) / SWAPFILE
+    if filesystem == "btrfs":
+        runner.run(["btrfs", "subvolume", "create", str(path.parent)])
+        runner.run(["chmod", "700", str(path.parent)])
+        runner.run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size // GIB}g", str(path)])
+        output = runner.run(["btrfs", "inspect-internal", "map-swapfile", "-r", str(path)]).strip()
+        if not output.isdigit():
+            raise ValidationError("Не удалось определить положение swap-файла на btrfs (resume_offset)")
+        return int(output)
+    runner.run(["mkdir", "-m", "700", "-p", str(path.parent)])
+    runner.run(["fallocate", "-l", str(size), str(path)])
+    runner.run(["chmod", "600", str(path)])
+    runner.run(["mkswap", str(path)])
+    return first_extent_offset(runner.run(["filefrag", "-v", str(path)]))
+
+
+def swap_fstab_line():
+    # Lower priority than zram (100): the file is used when zram is full and for hibernation.
+    return f"/{SWAPFILE} none swap defaults,pri=10 0 0\n"
+
+
+def resume_parameter(filesystem_uuid, offset):
+    return f"resume=UUID={filesystem_uuid} resume_offset={offset}"
+
+
+def boot_options(root_uuid, luks_uuid=None, resume=None):
+    """Kernel options of the systemd-boot entries."""
+    root = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}", f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid else [f"root=UUID={root_uuid}"]
+    return " ".join([*root, "rw", *([resume] if resume else [])])
+
+
+def grub_defaults(text, luks_uuid=None, resume=None):
+    """/etc/default/grub with the engine's GRUB_CMDLINE_LINUX (encryption and resume)."""
+    params = [*([f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"] if luks_uuid else []), *([resume] if resume else [])]
+    lines = [line for line in text.splitlines() if not line.startswith("GRUB_CMDLINE_LINUX=")]
+    return "\n".join(lines) + f'\nGRUB_CMDLINE_LINUX="{" ".join(params)}"\n'
 
 
 def write_file(relative, text, mode=0o644):
@@ -250,8 +311,10 @@ def preflight(request):
             raise ValidationError("Выбранная локаль недоступна: " + locale)
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("Каталог установки занят предыдущей операцией; нужна проверка её состояния")
+    tools = ("fallocate", "mkswap", "filefrag") if config.filesystem != "btrfs" else ("btrfs",)
     for command in ("sgdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
-                    "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount"):
+                    "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount",
+                    *(tools if config.swap == "hibernate" else ())):
         if not shutil.which(command):
             raise ValidationError("В live-системе отсутствует инструмент: " + command)
     return config, snapshot, disk
@@ -282,6 +345,9 @@ def install(request, runner):
     drivers = driver_plan(hardware, config.packages, config.session)
     secure_boot = request.get("secure_boot") is True
     packages = packages_for(config, hardware, secure_boot)
+    hibernate = config.swap == "hibernate"
+    # Sized for the computer the system is for (inside the preview: the real one, not the VM).
+    swap_size = hibernation_swap_size(hardware.get("memory")) if hibernate else 0
     emit("progress", stage=4, text="Проверяю репозитории и пакеты до изменения диска…")
     runner.run(["pacman", "-Sy", "--noconfirm"], timeout=180)
     catalog = Catalog()
@@ -357,9 +423,22 @@ def install(request, runner):
             trim_cache(runner)
         trim_cache(runner)
 
+        hibernation = None
+        if hibernate:
+            emit("progress", stage=6, text=f"Создаю swap-файл для гибернации ({swap_size // GIB} ГиБ, по объёму RAM)…")
+            try:
+                offset = create_swapfile(runner, TARGET, config.filesystem, swap_size)
+            except ValidationError as exc:
+                raise ValidationError("Не удалось создать swap-файл для гибернации (нужно "
+                                      f"{swap_size // GIB} ГиБ свободного места в корне): {exc}") from exc
+            filesystem_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
+            hibernation = {"file": "/" + SWAPFILE, "size": swap_size, "resume_uuid": filesystem_uuid,
+                           "resume_offset": offset}
+        resume = resume_parameter(hibernation["resume_uuid"], hibernation["resume_offset"]) if hibernation else None
+
         emit("progress", stage=6, text="Настраиваю загрузку, пользователя, сеть и выбранное окружение…")
         chroot = ["arch-chroot", str(TARGET)]
-        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]))
+        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]) + (swap_fstab_line() if hibernation else ""))
         write_file("etc/hostname", config.hostname + "\n")
         write_file("etc/hosts", f"127.0.0.1 localhost\n::1 localhost\n127.0.1.1 {config.hostname}.localdomain {config.hostname}\n")
         write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in config.generated_locales()))
@@ -394,12 +473,9 @@ def install(request, runner):
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
         check_generated_files(config, runner)
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
-        kernel_options = "rw"
-        if initramfs := initramfs_config(drivers, encrypted):
+        if initramfs := initramfs_config(drivers, encrypted, hibernate):
             write_file("etc/mkinitcpio.conf.d/agi-os.conf", initramfs)
-        if encrypted:
-            luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip()
-            kernel_options = f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME} root={root} rw"
+        luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip() if encrypted else None
         time_sync = ["systemd-timesyncd.service"] if config.time_sync else []
         for service in dict.fromkeys(["NetworkManager.service", *time_sync, *drivers["services"], *config.services]):
             runner.run([*chroot, "systemctl", "enable", service])
@@ -415,9 +491,8 @@ def install(request, runner):
                 raise ValidationError("Для графической сессии не включён дисплейный менеджер")
         runner.run([*chroot, "mkinitcpio", "-P"])
         if config.bootloader == "grub":
-            if encrypted:
-                defaults = (TARGET / "etc/default/grub").read_text()
-                write_file("etc/default/grub", defaults + f'\nGRUB_CMDLINE_LINUX="cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"\n')
+            if encrypted or resume:
+                write_file("etc/default/grub", grub_defaults((TARGET / "etc/default/grub").read_text(), luks_uuid, resume))
             args = [*chroot, "grub-install"]
             args += (["--target=x86_64-efi", "--efi-directory=/boot", "--bootloader-id=AGIOS",
                       "--removable", "--no-nvram"] if firmware == "uefi" else ["--target=i386-pc", config.disk])
@@ -434,7 +509,7 @@ def install(request, runner):
                 if unsigned:
                     raise ValidationError("Не подписаны для Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
-            options = kernel_options if encrypted else f"root=UUID={root_uuid} rw"
+            options = boot_options(root_uuid, luks_uuid, resume)
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
             write_file("boot/loader/entries/agi-os.conf", "title AGI OS\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux.img\noptions {options}\n")
@@ -449,7 +524,7 @@ def install(request, runner):
         runner.run([*chroot, "findmnt", "--verify", "--tab-file", "/etc/fstab"])
         record = {"id": uuid.uuid4().hex, "configuration": config.as_dict(), "packages": packages,
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
-                  "firmware": firmware, "encrypted": encrypted, "swap": "zram",
+                  "firmware": firmware, "encrypted": encrypted, "swap": config.swap, "hibernation": hibernation,
                   "secure_boot": {"signed": True, "enrolled": False} if secure_boot else None,
                   "hardware": hardware, "drivers": drivers, "settings": config.settings_record(),
                   "status": "first_boot_pending"}
