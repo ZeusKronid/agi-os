@@ -70,6 +70,8 @@ class DefaultsTests(RegionalTestCase):
         self.assertEqual(self.config(keyboard_layouts=["fr", "us"]).effective_keymap(), "fr")
         self.assertEqual(self.config(keyboard_layouts=["de", "us"]).effective_keymap(), "us")  # kbd calls it de-latin1
         self.assertEqual(self.config(keyboard_layouts=["us", "fr"]).effective_keymap(), "us")
+        kbd_tree(self.kbd, ("uk",))
+        self.assertEqual(self.config(keyboard_layouts=["gb"]).effective_keymap(), "uk")  # XKB gb is kbd uk
 
     def test_cjk_language_gets_cjk_fonts(self):
         config = self.config(session="sway", locale="ja_JP.UTF-8", keyboard_layouts=["us"])
