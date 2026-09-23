@@ -62,7 +62,7 @@ interface SunburstProps extends Omit<ComponentProps<'svg'>, 'children'> {
  *
  * Вариант с `headroom` (`live`) — HTML-обёртка, обрезанная по горизонту: лучи-полоски, дуга в поворотном
  * окне и SVG с точками. Он встаёт из-за линии основания с первой отрисовки на композиторных анимациях,
- * а длину лучей потом каждый кадр ведёт JS (`widgets/hero/lib/mount-live-sun.ts`).
+ * а длину лучей потом каждый кадр ведёт JS (`mount-live-sun.ts` рядом).
  * Без JS это законченный статичный восход.
  */
 export function Sunburst({ variant, className, ...props }: SunburstProps) {
@@ -173,7 +173,11 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
               во время роста и не меняется потом: луч вразнобой удлиняется и укорачивается по формуле
               голоса из прототипа (свойство `scale`) — с первой отрисовки, не дожидаясь JS и демо. Затухание к концу луча — градиент самой
               полоски (у SVG это делала радиальная маска). */}
-          <div className="absolute" style={{ left: `${((cx / spec.width) * 100).toFixed(3)}%`, top: horizon }}>
+          <div
+            data-sun-rays
+            className="absolute"
+            style={{ left: `${((cx / spec.width) * 100).toFixed(3)}%`, top: horizon }}
+          >
             {rays[variant].map((ray, index) => {
               const x1 = Number(ray.x1) - cx
               const y1 = Number(ray.y1) - cy
