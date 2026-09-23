@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 from aiohttp import web
@@ -447,6 +448,17 @@ async def remove_orphan(request):
         return web.json_response(state.public())
 
 
+def discard_preview_logs():
+    """Remove the preview VMs' directories: QEMU and guest console logs, UEFI variables,
+    sockets. Only after a successful finalization: on failure they are the diagnostics."""
+    removed = 0
+    for directory in (DATA_ROOT / 'vm').glob('web-*'):
+        if directory.is_dir() and not directory.is_symlink():
+            shutil.rmtree(directory, ignore_errors=True)
+            removed += not directory.exists()
+    return removed
+
+
 async def finalize_task(state, payload):
     state.final = {'phase': 'working', 'target': payload['target'], 'layout': payload['layout'], 'events': []}
     state.persist()
@@ -479,6 +491,10 @@ async def finalize_task(state, payload):
             result = await privileged('storage_worker.py', {'op': 'revert', 'state': state.preview['revert']})
             state.final['events'].append({'kind': 'final-progress', 'text': 'Временное хранилище превью убрано: ' + result['text']})
         state.final['phase'] = 'complete'
+        # The preview is finished for good: its logs and firmware state are not needed any more.
+        state.vm = state.saved_vm = None
+        if await asyncio.to_thread(discard_preview_logs):
+            state.final['events'].append({'kind': 'final-progress', 'text': 'Журналы и служебные файлы превью удалены'})
         state.phase, state.status = 'finalized', 'Система готова к загрузке с диска компьютера'
     except Exception as exc:
         state.final.update(phase='error', error=str(exc))
