@@ -88,6 +88,33 @@ connect a provider.
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.
 
+## Updates of the installed system
+
+The installer adds `agi-os-update` to every installed system:
+
+- `agi-os-update-check.timer` (daily, 10 min after boot, persistent) runs
+  `agi-os-update check` as root. It refreshes a private copy of the sync
+  databases in `/var/lib/agi-os/update-db`, never the system's own, so a later
+  `pacman -S` cannot become a partial upgrade. The result goes to
+  `/var/lib/agi-os/update-status.json`; interactive shells print a one-line
+  reminder from `/var/lib/agi-os/update-notice`.
+- `sudo agi-os-update apply` refuses on a discharging battery below 30 %
+  (`--force` overrides), with less than 2 GiB free, or while pacman is busy.
+  On a btrfs root it first takes a read-only snapshot
+  `/.snapshots/pre-update-*` (the three newest are kept). Then it updates
+  `archlinux-keyring`, runs `pacman -Su`, refreshes the bootloader when its
+  package changed (`bootctl update`; GRUB is reinstalled exactly as the
+  finalization did) and reports `.pacnew` files and whether a reboot is needed.
+  `systemd-boot-update.service` is enabled for systemd-boot as well.
+- Desktops get "AGI OS — Updates" in the menu and a reminder window at login,
+  at most once a day while updates wait: the list and one button. The password
+  goes only to `sudo -S` on stdin.
+- `agi-os-verify` checks that the timer is enabled.
+
+Not yet: discussing updates with the agent in the installed system (it has no
+provider), a bootable rollback (the snapshot is a file-level copy; the root is
+the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
+
 ## Limits
 
 - Disks with MBR partition tables: only the explicit whole-disk erase.
