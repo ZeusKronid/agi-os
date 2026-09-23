@@ -1,17 +1,17 @@
 import { spokenToolIds, tools } from '@/entities/tool'
 
 export interface Setup {
-  /** Подпись в углу визуала: `your setup · <name>`. */
+  /** Подпись вкладки набора в карточке «Arch was never this easy». Коротко: все вкладки — в один ряд. */
   name: string
   ids: readonly string[]
 }
 
 /**
- * Наборы, которые атлас подсвечивает по очереди: не случайные чипы, а системы, которые правда собирают.
- * Первый — тот же, что в демо; порядок дальше перемешивается на клиенте.
+ * Наборы для сравнения «обычный Arch против одной фразы»: не случайные вещи, а системы, которые правда собирают.
+ * Первый — тот же, что в демо в hero.
  */
 export const setups: readonly Setup[] = [
-  { name: 'the one from the demo', ids: spokenToolIds },
+  { name: 'from the demo', ids: spokenToolIds },
   { name: 'gaming rig', ids: ['kde', 'steam', 'nvidia', 'wine', 'gaming', 'discord'] },
   { name: 'tiling minimalist', ids: ['sway', 'waybar', 'alacritty', 'fish', 'tmux', 'gruvbox'] },
   { name: 'server, no desktop', ids: ['no-desktop', 'docker', 'python', 'git', 'luks', 'snapshots'] },
