@@ -244,6 +244,17 @@ class SymlinkTests(unittest.TestCase):
         fine = storage_worker.private_dir(self.tmp / 'a' / 'b')
         self.assertEqual(fine.stat().st_mode & 0o777, 0o755)
 
+    def test_parents_inside_the_runtime_directory_are_0755_under_a_strict_umask(self):
+        root = self.tmp / 'run-preview'
+        old = os.umask(0o077)
+        try:
+            with patch.object(storage_worker, 'PREVIEW', root):
+                storage_worker.private_dir(root / 'scan')
+        finally:
+            os.umask(old)
+        self.assertEqual(root.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((root / 'scan').stat().st_mode & 0o777, 0o755)
+
     def test_image_file_refuses_planted_links(self):
         media = self.tmp / 'media'
         media.mkdir()

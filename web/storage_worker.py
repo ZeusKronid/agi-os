@@ -232,7 +232,11 @@ def sizing(request):
 
 
 def private_dir(path):
-    """A root-owned directory (0755) that nobody else can replace or write into."""
+    """A root-owned directory (0755) that nobody else can replace or write into.
+    Parents below PREVIEW get the same treatment: mkdir(parents=True) would create them
+    with the caller's umask (0700 was seen in Live), and QEMU must reach the image."""
+    if path != PREVIEW and PREVIEW in path.parents:
+        private_dir(path.parent)
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
     info = os.lstat(path)
     if stat_module.S_ISDIR(info.st_mode) and os.path.ismount(path):
