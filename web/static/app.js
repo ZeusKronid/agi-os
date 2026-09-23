@@ -1,11 +1,11 @@
 // AGIOS Live workspace: one sunrise scene. Talk → find room for the preview → the sun rises while it builds →
-// the preview VM rises from the horizon → decide → the sun rises again while it installs → good morning.
+// the preview VM stands on the horizon under the sun → install or put it back → the sun rises again while it installs → good morning.
 const $ = id => document.getElementById(id);
 const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 // Like the site, the workspace always plays its motion: the system reduced-motion setting is not honored.
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
-let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', revertAsk = false, orphanAsk = '', replanning = false;
-let providerKind = 'chatgpt', labels = [], shown = 0;
+let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
+let providerKind = 'chatgpt', shown = 0, placeStep = 1;
 
 async function api(path, data) {
     const response = await fetch('/api/' + path, data === undefined ? {} : {
@@ -33,7 +33,7 @@ function scene(s) {
 }
 function chapter(s) {
     const place = scene(s);
-    if (place === 'done' || place === 'install' || sheet === 'final') return 3;
+    if (place === 'done' || place === 'install' || modal === 'install') return 3;
     if (place === 'build' || place === 'preview') return 2;
     return s.configuration ? 1 : 0;
 }
@@ -68,8 +68,8 @@ function mulberry(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5
 const random = mulberry(11);
 const RAYS = Array.from({length: 98}, (_, i) => ({f: i / 97, major: i % 4 === 0, len: i % 4 === 0 ? .62 : .16 + random() * .28,
                                                   voice: .4 + random() * .9, speed: 1 / (.26 + random() * .06), phase: random() * 6.283}));
-const sun = {now: {hy: .42, rs: .17, arc: 0, grow: 0, energy: .3, lift: 1, dim: 1}, goal: {hy: .42, rs: .17, arc: 1, grow: .8, energy: .3, lift: 1, dim: 1},
-             dots: [], alpha: {}, at: {}, share: 0};
+const sun = {now: {hy: -1, rs: .17, arc: 0, grow: 0, energy: .3, lift: 0, dim: 1}, goal: {hy: .42, rs: .17, arc: 1, grow: .8, energy: .3, lift: 1, dim: 1},
+             dots: [], far: false, share: 0};
 function drawSun(time) {
     const canvas = $('sky'), w = innerWidth, h = innerHeight, dpr = Math.min(2, devicePixelRatio || 1);
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
@@ -78,8 +78,6 @@ function drawSun(time) {
     const s = sun.now, ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
     const hy = s.hy * h, r = Math.min(s.rs * h, w * .36), cx = w / 2, cy = hy + (1 - s.lift) * r * 1.25, t = time;
     ctx.save(); ctx.globalAlpha = s.dim;
-    const glow = ctx.createRadialGradient(cx, hy, 0, cx, hy, r * 2.4); glow.addColorStop(0, `rgba(255,106,61,${.1 + .1 * s.energy})`); glow.addColorStop(1, 'rgba(255,106,61,0)');
-    ctx.fillStyle = glow; ctx.fillRect(0, 0, w, hy);
     ctx.beginPath(); ctx.rect(0, 0, w, hy); ctx.clip(); ctx.lineCap = 'round'; ctx.strokeStyle = '#ff6a3d'; ctx.lineWidth = 1.5;
     const inner = r + Math.max(4, r * .07);
     for (const ray of RAYS) {
@@ -102,13 +100,7 @@ function drawSun(time) {
         if (state === 'current') { ctx.globalAlpha = .18 * s.dim; ctx.beginPath(); ctx.arc(x, y, size + 5, 0, 6.283); ctx.fill(); }
         ctx.globalAlpha = (state === 'next' ? .5 : 1) * s.dim; ctx.beginPath(); ctx.arc(x, y, size, 0, 6.283); ctx.fill();
     }
-    ctx.globalAlpha = 1; ctx.font = `500 ${Math.max(10, Math.min(12, r * .07))}px "Geist Mono", monospace`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (const word of Object.keys(sun.alpha)) {
-        const index = labels.indexOf(word), goal = index < 0 ? 0 : 1, value = sun.alpha[word] += (goal - sun.alpha[word]) * .06;
-        if (value < .01) { if (index < 0) delete sun.alpha[word]; continue; }
-        const f = sun.at[word], a = Math.PI + f * Math.PI, distance = r * 1.62 + (1 - value) * 14;
-        ctx.fillStyle = `rgba(217,210,199,${value * s.dim})`; ctx.fillText(word.toUpperCase(), cx + Math.cos(a) * distance, cy + Math.sin(a) * distance);
-    }
+    if (sun.far) { ctx.fillStyle = '#ff6a3d'; ctx.globalAlpha = s.dim; for (const side of [-1, 1]) { ctx.beginPath(); ctx.arc(cx + side * r * 2.35, cy - r * .55, 2.4, 0, 6.283); ctx.fill(); } }
     ctx.restore();
     const line = ctx.createLinearGradient(0, 0, w, 0); line.addColorStop(0, 'rgba(255,255,255,0)'); line.addColorStop(.5, 'rgba(255,255,255,.14)'); line.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = line; ctx.fillRect(0, hy, w, 1);
@@ -116,18 +108,9 @@ function drawSun(time) {
     shown += (sun.share - shown) * .08;
     if (!$('rise').hidden) $('pct').textContent = Math.round(shown * 100);
 }
-function frame(time) { if (!document.hidden) drawSun(time / 1000); requestAnimationFrame(frame); }
+// Nothing is drawn before the first state arrives, so the sun starts where the scene needs it.
+function frame(time) { if (!document.hidden && current) drawSun(time / 1000); requestAnimationFrame(frame); }
 requestAnimationFrame(frame);
-function setLabels(words) {
-    labels = words.slice(0, 5);
-    labels.forEach((word, index) => { if (!(word in sun.alpha)) sun.alpha[word] = 0; sun.at[word] = .12 + index * .19; });
-}
-function agreedWords(config) {
-    const quiet = /^(greetd|pipewire|wireplumber|noto-|ttf-|xdg-|mesa|networkmanager|lib|base|linux|polkit|sudo)/;
-    const words = config.session ? [config.session] : [];
-    for (const name of config.packages) if (!quiet.test(name) && !words.includes(name)) words.push(name);
-    return words;
-}
 
 /* ── render ───────────────────────────────────────────── */
 function render(state) {
@@ -156,10 +139,10 @@ function render(state) {
     if (serialized !== lastMessages) {
         const fresh = JSON.parse(lastMessages || '[]').length;
         lastMessages = serialized;
-        for (const box of [$('messages'), $('history')]) {
+        for (const box of [$('messages')]) {
             box.replaceChildren();
             state.messages.forEach((message, index) => {
-                const line = document.createElement('div'); line.className = 'line ' + (message.role === 'user' ? 'user' : 'assistant') + (index >= fresh && box === $('messages') ? ' fresh' : '');
+                const line = document.createElement('div'); line.className = 'line ' + (message.role === 'user' ? 'user' : 'assistant') + (index >= fresh ? ' fresh' : '');
                 const who = document.createElement('span'); who.className = 'who'; who.textContent = message.role === 'user' ? 'You' : 'AGIOS';
                 const text = document.createElement('span'); text.className = 'text'; text.textContent = message.content;
                 line.append(who, text); box.append(line);
@@ -172,7 +155,7 @@ function render(state) {
             const chip = document.createElement('button'); chip.className = 'chip'; chip.textContent = suggestion;
             chip.onclick = () => send(suggestion); $('suggestions').append(chip);
         }
-        for (const box of [$('lines'), $('history')]) box.scrollTop = box.scrollHeight;
+        $('lines').scrollTop = $('lines').scrollHeight;
     }
     $('talk').classList.toggle('chatting', state.messages.length > 0 || busy);
     $('welcome').hidden = state.messages.length > 0 || busy;
@@ -180,9 +163,6 @@ function render(state) {
     if (busy) $('thinkingText').textContent = state.status;
     $('error').hidden = !state.error || place !== 'talk';
     if (state.error) $('error').textContent = state.error;
-    const lookup = /^Looking up packages: (.+)/.exec(state.status);
-    if (place !== 'talk') setLabels([]);
-    else if (config) setLabels(agreedWords(config)); else if (lookup) setLabels(lookup[1].split(',').map(term => term.trim())); else if (!busy) setLabels([]);
 
     const consentError = state.consent && state.consent.error;
     $('consentError').hidden = !consentError;
@@ -218,18 +198,28 @@ function render(state) {
     }
     if (place === 'preview') {
         const stateText = state.phase === 'error' ? ['The build stopped', state.error || 'Look at the log, then put everything back and try again.']
-            : !state.running ? ['VM stopped · preview kept', 'Start it again to keep checking, or decide now.']
+            : !state.running ? ['VM stopped · preview kept', 'Start it again to keep checking — or install it now.']
             : !connected ? ['Connecting the screen…', ''] : null;
         $('vmState').hidden = !stateText;
         if (stateText) { $('vmStateLabel').textContent = stateText[0]; $('vmStateText').textContent = stateText[1]; $('vmStateText').hidden = !stateText[1]; }
         $('resumeInline').hidden = !state.can_resume;
         $('reconnect').hidden = !state.running || connected;
-        $('revertInline').hidden = state.phase !== 'error' || !state.can_revert;
-        $('decide').disabled = state.phase === 'error' || !state.built;
+        $('revertInline').hidden = state.phase !== 'error';
+        $('install').disabled = state.phase === 'error' || !state.built;
+        const [dot, label] = state.phase === 'error' ? ['', 'needs a look'] : !state.running ? ['off', 'vm stopped'] : connected ? ['ok', 'live · connected'] : ['blink', 'connecting'];
+        $('vmStatus').querySelector('.dot').className = 'dot ' + dot; $('vmStatus').querySelector('span').textContent = label;
+        // The agent's answer to a change asked for during the preview stands above the bar.
+        const answer = [...state.messages].reverse().find(message => message.role !== 'user');
+        $('said').hidden = !changeAsked;
+        if (changeAsked) $('saidText').innerHTML = busy ? '<span class="typing"><i></i><i></i><i></i></span>' : '';
+        if (changeAsked && !busy && answer) $('saidText').textContent = answer.content;
     }
-    $('screenStatus').hidden = place !== 'preview';
-    $('screenStatus').textContent = state.running ? (connected ? 'Screen connected · click it to control' : 'Connecting the screen…') : 'Local VM · Apache Guacamole';
-    $('fullscreen').hidden = $('stop').hidden = !state.running;
+    if (place !== 'preview') changeAsked = false;
+    document.body.classList.toggle('has-said', changeAsked);
+    $('vmStatus').hidden = $('vmbar').hidden;
+    $('fullscreen').hidden = !(place === 'preview' && state.running);
+    $('stop').hidden = !state.running;
+    $('resume').hidden = state.running || !state.can_resume;
 
     // Place sheet.
     if (state.plan) {
@@ -257,8 +247,9 @@ function render(state) {
             + (state.built.revert || 'nothing else changes') + '.';
     }
     $('finalBlocked').hidden = !(state.built && state.running);
-    $('finalInstallForm').querySelectorAll('input, button').forEach(el => { el.disabled = !state.can_finalize; });
-    $('revert').hidden = !state.can_revert;
+    $('finalInstallForm').querySelectorAll('input, #installFinal').forEach(el => { el.disabled = !state.can_finalize; });
+    // The server stops a running VM before it removes the preview, so putting it back works either way.
+    $('revert').disabled = !(state.can_revert || state.running || state.phase === 'error');
     $('revert').textContent = revertAsk ? 'Confirm: put everything back' : 'Not right — put everything back';
     $('revert').className = 'btn ' + (revertAsk ? 'danger' : 'outline');
     $('keep').hidden = !revertAsk;
@@ -266,7 +257,8 @@ function render(state) {
     if (state.final.error) $('finalError').textContent = state.final.error;
     updateLayoutWarning(); validateFinal();
     if (sheet === 'place' && (place !== 'talk' || !state.plan)) openSheet('');
-    if (sheet === 'final' && !state.built) openSheet('');
+    if (modal === 'install' && !state.built) openModal('');
+    if (modal && place !== 'preview') openModal('');
 
     // Log: the build or the final installation.
     const events = place === 'install' || place === 'done' ? state.final.events : state.events;
@@ -279,17 +271,27 @@ function render(state) {
     renderOrphans(place === 'talk' ? state.orphans || [] : []);
     aimSun(state, place);
 }
+const horizon = () => Math.min(230, Math.max(170, innerHeight * .24));
 function aimSun(state, place) {
+    sun.far = place === 'preview';
+    document.documentElement.style.setProperty('--horizon', horizon() + 'px');
     const thinking = busy && place === 'talk';
     if (place === 'done') Object.assign(sun.goal, {hy: .5, rs: .2, arc: 1, grow: 1.1, energy: .6, lift: 1, dim: 1});
     else if (place === 'build' || place === 'install') {
         const p = sun.share, failed = state.final.phase === 'error';
         Object.assign(sun.goal, {hy: .7, rs: .24, arc: Math.max(.02, p), grow: .5 + .6 * p, energy: failed ? .1 : .9, lift: .35 + .65 * p, dim: failed ? .45 : 1});
     }
-    else if (place === 'preview') Object.assign(sun.goal, {hy: 1.02, rs: .5, arc: 1, grow: 1.2, energy: state.running ? .5 : .1, lift: 1, dim: state.phase === 'error' ? .35 : .7});
-    else if (state.messages.length || busy) Object.assign(sun.goal, {hy: 1, rs: .17, arc: 1, grow: state.configuration ? 1 : .8, energy: thinking ? 1.1 : .35, lift: 1, dim: sheet ? .5 : 1});
+    // The preview stands on the horizon like the hero headline: one sun above the window's top edge.
+    else if (place === 'preview') Object.assign(sun.goal, {hy: horizon() / innerHeight, rs: Math.min(118, innerWidth * .12) / innerHeight, arc: 1, grow: 1,
+                                                          energy: busy ? 1.1 : state.running ? .35 : .1, lift: 1, dim: state.phase === 'error' ? .3 : state.running ? 1 : .45});
+    // While talking the sun stays at the bottom, dimmed behind the conversation that runs over it.
+    else if (state.messages.length || busy) Object.assign(sun.goal, {hy: 1, rs: .2, arc: 1, grow: 1, energy: thinking ? .9 : .3, lift: 1, dim: sheet ? .2 : .35});
     else Object.assign(sun.goal, {hy: .42, rs: .17, arc: 1, grow: state.model ? 1 : .8, energy: .35, lift: 1, dim: 1});
     if (place === 'build' && sun.now.arc > sun.goal.arc + .05) Object.assign(sun.now, {arc: 0, grow: 0, lift: .35});
+    // The sun never slides across the page: when it has to move far (the first paint after F5, a new scene)
+    // it appears in its new place below the horizon and rises from there.
+    if (Math.abs(sun.goal.hy - sun.now.hy) > .2 || Math.abs(sun.goal.rs - sun.now.rs) > .15)
+        Object.assign(sun.now, {hy: sun.goal.hy, rs: sun.goal.rs, lift: 0, grow: 0});
 }
 
 function renderOptions(plan) {
@@ -307,17 +309,22 @@ function renderOptions(plan) {
         detail.textContent = option.detail; undo.textContent = 'Undo: ' + option.revert;
         body.append(title, detail, undo); card.append(radio, body); box.append(card);
         card.onclick = () => pickOption(option.id);
-        card.onkeydown = event => { if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); pickOption(option.id); } };
+        card.onkeydown = event => { if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); pickOption(option.id); if (event.key === 'Enter') showPlaceStep(2); } };
+        card.ondblclick = () => { pickOption(option.id); showPlaceStep(2); };
     }
-    const preferred = plan.options.find(o => o.recommended && o.fits) || plan.options.find(o => o.fits);
-    pickOption(preferred ? preferred.id : null);
+    const kept = plan.options.find(o => o.id === chosen && o.fits);
+    const preferred = kept || plan.options.find(o => o.recommended && o.fits) || plan.options.find(o => o.fits);
+    pickOption(preferred ? preferred.id : null, !!kept);
 }
 let chosen = null;
 function selectedOption() { return current && current.plan ? current.plan.options.find(o => o.id === chosen) : null; }
-function pickOption(id) {
+function pickOption(id, keep) {
     const option = current && current.plan && current.plan.options.find(o => o.id === id);
     if (id && (!option || !option.fits)) return;
-    chosen = id; $('optionAccepted').checked = false; $('optionPath').value = '';
+    if (!keep) { $('optionAccepted').checked = false; $('optionPath').value = ''; }
+    chosen = id;
+    $('placeNext').disabled = !option;
+    if (option) { $('chosenTitle').textContent = option.title; $('chosenUndo').textContent = 'Undo: ' + option.revert; }
     document.querySelectorAll('.option').forEach(card => { const on = card.dataset.id === id; card.classList.toggle('selected', on); card.setAttribute('aria-checked', String(on)); });
     const destructive = option && option.destructive;
     $('optionConfirm').hidden = !destructive;
@@ -379,26 +386,33 @@ function renderOrphans(orphans) {
     }
 }
 
-/* ── sheets and drawer ────────────────────────────────── */
+/* ── sheets and modals ────────────────────────────────── */
+// Placing the preview goes one step at a time: first where it lives, then its settings and the password.
+function showPlaceStep(step) {
+    if (step === 2 && !selectedOption()) return;
+    placeStep = step;
+    $('placeStep1').hidden = step !== 1; $('buildForm').hidden = step !== 2;
+    $('placeSheet').querySelector('.sheet-in').scrollTop = 0;
+    setTimeout(() => (step === 1 ? document.querySelector('.option.selected') || $('placeNext') : $('password')).focus({preventScroll: true}), 60);
+}
 function openSheet(name) {
+    if (name === 'place' && sheet !== 'place') showPlaceStep(1);
     sheet = name; revertAsk = false;
-    for (const [id, key] of [['placeSheet', 'place'], ['finalSheet', 'final']]) {
-        const on = sheet === key; $(id).classList.toggle('on', on); $(id).inert = !on;
-    }
-    $('veil').classList.toggle('on', !!sheet || $('drawer').classList.contains('on'));
-    if (sheet === 'place') setTimeout(() => (document.querySelector('.option.selected') || $('password')).focus({preventScroll: true}), 60);
-    if (sheet === 'final') setTimeout(() => $('finalAccepted').focus({preventScroll: true}), 60);
+    $('placeSheet').classList.toggle('on', sheet === 'place'); $('placeSheet').inert = sheet !== 'place';
+    $('veil').classList.toggle('on', !!sheet);
     if (current) render(current);
 }
-function toggleDrawer(on) {
-    $('drawer').classList.toggle('on', on); $('drawer').inert = !on;
-    $('veil').classList.toggle('on', on || !!sheet);
-    if (on) $('history').scrollTop = $('history').scrollHeight;
+// Install and Put it back each open their own modal over the preview.
+function openModal(name) {
+    modal = name; revertAsk = false;
+    $('installModal').hidden = modal !== 'install'; $('backModal').hidden = modal !== 'back';
+    if (modal) setTimeout(() => (modal === 'install' ? ($('stopForFinal').offsetParent ? $('stopForFinal') : $('finalAccepted')) : $('revert')).focus({preventScroll: true}), 60);
+    if (current) render(current);
 }
-function closeAll() { toggleDrawer(false); if (sheet) openSheet(''); }
+function closeAll() { if (sheet) openSheet(''); if (modal) openModal(''); }
 $('veil').onclick = closeAll;
+for (const id of ['installModal', 'backModal']) $(id).onclick = event => { if (event.target === $(id)) openModal(''); };
 document.querySelectorAll('[data-close]').forEach(button => button.onclick = closeAll);
-$('drawerButton').onclick = () => toggleDrawer(!$('drawer').classList.contains('on'));
 document.querySelectorAll('[data-log]').forEach(button => button.onclick = () => { $('logPanel').hidden = !$('logPanel').hidden; });
 document.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || event.target === $('screen') || $('settings').open) return;
@@ -415,7 +429,7 @@ async function send(text) {
     finally { busy = false; if (current) render(current); }
 }
 $('chatForm').onsubmit = event => { event.preventDefault(); send($('prompt').value); };
-$('changeForm').onsubmit = event => { event.preventDefault(); send($('changePrompt').value); };
+$('changeForm').onsubmit = event => { event.preventDefault(); if ($('changePrompt').value.trim()) changeAsked = true; send($('changePrompt').value); };
 document.querySelectorAll('[data-prompt]').forEach(chip => chip.onclick = () => { $('prompt').value = chip.dataset.prompt; $('prompt').focus(); });
 
 async function plan() {
@@ -441,16 +455,19 @@ $('buildForm').onsubmit = async event => {
 };
 const post = path => async () => { try { render(await api(path, {})); } catch (error) { showError(error); } };
 $('stop').onclick = $('stopBuild').onclick = $('stopForFinal').onclick = post('stop');
-$('resumeInline').onclick = post('resume');
+$('resume').onclick = $('resumeInline').onclick = post('resume');
 async function revert() {
     if (!revertAsk) { revertAsk = true; render(current); return; }
     revertAsk = false; closeAll();
     try { render(await api('revert', {})); } catch (error) { showError(error); }
 }
-$('revert').onclick = $('revertInline').onclick = revert;
+$('revert').onclick = revert;
+$('revertInline').onclick = () => openModal('back');
+$('placeNext').onclick = () => showPlaceStep(2);
+$('placeBack').onclick = () => showPlaceStep(1);
 $('keep').onclick = () => { revertAsk = false; render(current); };
-$('decide').onclick = () => openSheet('final');
-$('retryFinal').onclick = () => openSheet('final');
+$('install').onclick = $('retryFinal').onclick = () => openModal('install');
+$('putBack').onclick = () => openModal('back');
 document.querySelectorAll('input[name=layout]').forEach(input => input.onchange = updateLayoutWarning);
 for (const id of ['finalAccepted', 'targetConfirm', 'finalPassphrase']) $(id).oninput = validateFinal;
 $('finalInstallForm').onsubmit = async event => {
@@ -459,7 +476,7 @@ $('finalInstallForm').onsubmit = async event => {
     try {
         await api('final/finalize', {layout: document.querySelector('input[name=layout]:checked').value, confirmation: $('targetConfirm').value.trim(),
                                      accepted: $('finalAccepted').checked, passphrase});
-        shown = 0; sun.share = 0; Object.assign(sun.now, {arc: 0, grow: 0, lift: .35}); openSheet(''); await refresh();
+        shown = 0; sun.share = 0; Object.assign(sun.now, {arc: 0, grow: 0, lift: .35}); openModal(''); await refresh();
     } catch (error) { $('finalError').textContent = error.message; $('finalError').hidden = false; validateFinal(); }
 };
 async function powerAction(action) {
@@ -534,7 +551,8 @@ function connect() {
 }
 $('reconnect').onclick = connect;
 $('fullscreen').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('vm').requestFullscreen().catch(showError);
-document.addEventListener('fullscreenchange', () => { $('fullscreen').textContent = document.fullscreenElement ? 'Exit full screen' : 'Full screen'; });
+document.addEventListener('fullscreenchange', () => { $('fullscreen').title = $('fullscreen').ariaLabel = document.fullscreenElement ? 'Exit full screen' : 'Full screen'; });
+addEventListener('resize', () => { if (current) render(current); });
 new ResizeObserver(scaleDisplay).observe($('screen'));
 window.addEventListener('beforeunload', () => { if (keyboard) keyboard.reset(); if (client) client.disconnect(); });
 window.addEventListener('blur', () => { if (keyboard) keyboard.reset(); });

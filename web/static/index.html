@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-4"></head>
 <body>
 <canvas id="sky" aria-hidden="true"></canvas>
 
@@ -50,6 +50,8 @@
     <div class="row"><button id="stopBuild" class="btn ghost">Stop VM</button><button id="retryFinal" class="btn outline" hidden>Try again</button><button class="btn ghost" data-log>Log</button></div>
   </section>
 
+  <p id="vmStatus" class="vm-status" hidden><i class="dot"></i><span></span></p>
+  <button id="fullscreen" class="icon vm-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg></button>
   <section id="vm" class="vm" hidden>
     <div id="screen" tabindex="0" aria-label="Screen of the preview VM"></div>
     <div id="vmState" class="vm-state" hidden>
@@ -58,14 +60,16 @@
       <div class="row"><button id="resumeInline" class="btn outline">Start again</button><button id="reconnect" class="btn outline">Reconnect</button><button id="revertInline" class="btn outline">Put everything back</button><button class="btn ghost" data-log>Log</button></div>
     </div>
   </section>
+  <p id="said" class="said" hidden><span class="who">AGIOS</span><span id="saidText"></span></p>
   <div id="vmbar" class="vmbar" hidden>
-    <button id="drawerButton" class="btn ghost">Conversation</button>
-    <form id="changeForm" class="ask"><input id="changePrompt" autocomplete="off" maxlength="16000" placeholder="Ask for a change while you try it…" aria-label="Ask for a change"><button class="send" aria-label="Send">↑</button></form>
-    <button id="decide" class="btn outline">Decide</button>
-    <button id="fullscreen" class="btn ghost">Full screen</button>
-    <button id="stop" class="btn ghost">Stop VM</button>
+    <button id="putBack" class="btn quiet">Put it back</button>
+    <div class="mid">
+      <button id="stop" class="icon round" aria-label="Stop VM" title="Stop VM"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
+      <button id="resume" class="icon round" aria-label="Start the VM again" title="Start again" hidden><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3.5v9l7-4.5z"/></svg></button>
+      <form id="changeForm" class="ask"><input id="changePrompt" autocomplete="off" maxlength="16000" placeholder="Ask for a change while you try it…" aria-label="Ask for a change"><button class="send" aria-label="Send">↑</button></form>
+    </div>
+    <button id="install" class="btn primary">Install <span class="arr">→</span></button>
   </div>
-  <p id="screenStatus" class="screen-status" hidden></p>
 
   <section id="done" class="after" hidden>
     <span class="caps">Installed</span>
@@ -82,65 +86,69 @@
 
 <section id="placeSheet" class="sheet" role="dialog" aria-modal="true" aria-label="Find room for the preview" inert>
   <div class="grab"></div><button class="btn ghost close" data-close>Back ✕</button>
-  <div class="sheet-in">
-    <div class="col">
-      <span class="caps">Place · where the preview lives</span>
-      <h2>Find room for the <em>preview</em></h2>
-      <p id="estimate" class="hint"></p>
-      <div id="options" class="options" role="radiogroup" aria-label="Where the preview lives"></div>
-      <details class="agreed"><summary>What you agreed on</summary><dl id="facts"></dl></details>
-    </div>
-    <form id="buildForm" class="col">
-      <div class="pair">
-        <label class="field"><span>VM memory</span><select id="memory"><option value="2048">2 GiB</option><option value="3072">3 GiB</option><option value="4096" selected>4 GiB</option><option value="6144">6 GiB</option><option value="8192">8 GiB</option></select></label>
-        <label class="field"><span>CPUs</span><select id="cpus"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
+  <div class="sheet-in steps">
+    <section id="placeStep1" class="place-step">
+      <div class="step-head"><span class="caps">Step 1 of 2 · where the preview lives</span><h2>Find room for the <em>preview</em></h2><p id="estimate" class="hint"></p></div>
+      <div id="options" class="options wide" role="radiogroup" aria-label="Where the preview lives"></div>
+      <div class="step-foot"><details class="agreed"><summary>What you agreed on</summary><dl id="facts"></dl></details><button type="button" id="placeNext" class="btn primary">Continue <span class="arr">→</span></button></div>
+    </section>
+    <form id="buildForm" class="place-step" hidden>
+      <div class="step-head"><span class="caps">Step 2 of 2 · settings and password</span><h2>Build the <em>preview</em></h2></div>
+      <div class="chosen"><div><b id="chosenTitle"></b><small id="chosenUndo"></small></div><button type="button" id="placeBack" class="btn ghost">← Change the place</button></div>
+      <div class="step-cols">
+        <div class="col">
+          <div class="pair">
+            <label class="field"><span>VM memory</span><select id="memory"><option value="2048">2 GiB</option><option value="3072">3 GiB</option><option value="4096" selected>4 GiB</option><option value="6144">6 GiB</option><option value="8192">8 GiB</option></select></label>
+            <label class="field"><span>CPUs</span><select id="cpus"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
+          </div>
+          <label class="check"><input type="checkbox" id="encrypt"><span>Encrypt the system root (LUKS2) — asked for on every boot</span></label>
+          <p id="replanning" class="hint" hidden><span class="spin"></span> Measuring again…</p>
+          <div id="optionConfirm" hidden><p id="optionWarning" class="line error"></p><label class="field"><span id="optionPathLabel">Type the path to confirm</span><input id="optionPath" autocomplete="off"></label></div>
+        </div>
+        <div class="col">
+          <label class="check"><input type="checkbox" id="optionAccepted"><span id="optionAcceptText">I understand what happens</span></label>
+          <label class="field"><span>Password for your user in the new system</span><input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="8+ characters"></label>
+          <label class="field" id="passphraseField" hidden><span>Encryption password</span><input id="passphrase" type="password" autocomplete="new-password" minlength="8" maxlength="512" placeholder="8+ characters"></label>
+          <div id="buildNeeds" class="needs"></div>
+          <button id="build" class="btn primary" type="submit">Build the preview <span class="arr">→</span></button>
+          <p class="hint">Passwords go only to the installer; the agent never sees them.</p>
+        </div>
       </div>
-      <label class="check"><input type="checkbox" id="encrypt"><span>Encrypt the system root (LUKS2) — asked for on every boot</span></label>
-      <p id="replanning" class="hint" hidden><span class="spin"></span> Measuring again…</p>
-      <div id="optionConfirm" hidden><p id="optionWarning" class="line error"></p><label class="field"><span id="optionPathLabel">Type the path to confirm</span><input id="optionPath" autocomplete="off"></label></div>
-      <label class="check"><input type="checkbox" id="optionAccepted"><span id="optionAcceptText">I understand what happens</span></label>
-      <label class="field"><span>Password for your user in the new system</span><input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="8+ characters"></label>
-      <label class="field" id="passphraseField" hidden><span>Encryption password</span><input id="passphrase" type="password" autocomplete="new-password" minlength="8" maxlength="512" placeholder="8+ characters"></label>
-      <div id="buildNeeds" class="needs"></div>
-      <button id="build" class="btn primary" type="submit">Build the preview <span class="arr">→</span></button>
-      <p class="hint">Passwords go only to the installer; the agent never sees them.</p>
     </form>
   </div>
 </section>
 
-<section id="finalSheet" class="sheet" role="dialog" aria-modal="true" aria-label="Decide" inert>
-  <div class="grab"></div><button class="btn ghost close" data-close>Back ✕</button>
-  <div class="sheet-in">
-    <div class="col">
-      <span class="caps">Decide</span>
-      <h2>Keep it — or put <em>everything back</em></h2>
-      <p id="revertHint" class="hint"></p>
-      <div id="finalBlocked" class="line" hidden><span>Shut the preview down from its power menu first, or stop the VM here.</span><button id="stopForFinal" class="btn outline">Stop VM</button></div>
-      <div class="row"><button id="revert" class="btn outline">Not right — put everything back</button><button id="keep" class="btn ghost" hidden>Keep it</button></div>
-    </div>
-    <form id="finalInstallForm" class="col">
-      <span class="caps accent">Install on the computer</span>
-      <h3 id="finalTarget"></h3>
-      <p id="finalHint" class="hint"></p>
-      <label class="check"><input type="radio" name="layout" value="alongside" checked><span>Install <b>alongside</b> existing data and systems, in free space</span></label>
-      <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the whole disk</b>: the system takes it all, other partitions are deleted</span></label>
-      <p id="layoutWarning" class="hint"></p>
-      <label class="field" id="finalPassphraseField" hidden><span>Encryption password (needed to finish)</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
-      <label class="check"><input type="checkbox" id="finalAccepted"><span>I checked the system in the preview and want it on this disk</span></label>
-      <label class="field"><span>Type the disk path</span><input id="targetConfirm" autocomplete="off"></label>
-      <div id="finalNeeds" class="needs"></div>
-      <button type="submit" id="installFinal" class="btn primary">Install on this computer</button>
-      <p id="finalError" class="line error" hidden></p>
-    </form>
+<div id="installModal" class="modal-veil" hidden>
+  <form id="finalInstallForm" class="modal" role="dialog" aria-modal="true" aria-labelledby="installTitle">
+    <button type="button" class="btn ghost close" data-close>Back ✕</button>
+    <span class="caps accent">Install on the computer</span>
+    <h2 id="installTitle">Keep it on <em>this computer</em></h2>
+    <p id="finalTarget" class="hint"></p>
+    <div id="finalBlocked" class="blocked" hidden><span>Shut the preview down from its power menu first, or stop the VM here.</span><button type="button" id="stopForFinal" class="btn outline">Stop VM</button></div>
+    <label class="check"><input type="radio" name="layout" value="alongside" checked><span>Install <b>alongside</b> existing data and systems, in free space</span></label>
+    <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the whole disk</b>: the system takes it all, other partitions are deleted</span></label>
+    <p id="layoutWarning" class="hint"></p>
+    <p id="finalHint" class="hint"></p>
+    <label class="field" id="finalPassphraseField" hidden><span>Encryption password (needed to finish)</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
+    <label class="check"><input type="checkbox" id="finalAccepted"><span>I checked the system in the preview and want it on this disk</span></label>
+    <label class="field"><span>Type the disk path</span><input id="targetConfirm" autocomplete="off"></label>
+    <div id="finalNeeds" class="needs"></div>
+    <button type="submit" id="installFinal" class="btn primary">Install on this computer</button>
+    <p id="finalError" class="line error" hidden></p>
+  </form>
+</div>
+
+<div id="backModal" class="modal-veil" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backTitle">
+    <button type="button" class="btn ghost close" data-close>Back ✕</button>
+    <span class="caps">Put it back</span>
+    <h2 id="backTitle">Not right? Put <em>everything back</em></h2>
+    <p id="revertHint" class="hint"></p>
+    <div class="row"><button id="revert" class="btn outline">Not right — put everything back</button><button id="keep" class="btn ghost" hidden>Keep it</button></div>
   </div>
-</section>
+</div>
 
-<aside id="drawer" class="drawer" aria-label="Conversation" inert>
-  <div class="drawer-head"><span class="caps">Conversation</span><button class="btn ghost" data-close>Close ✕</button></div>
-  <div id="history" class="lines"></div>
-</aside>
-
-<section id="logPanel" class="log-panel" hidden><div class="drawer-head"><span class="caps">Log</span><button class="btn ghost" data-log>Close ✕</button></div><pre id="events"></pre></section>
+<section id="logPanel" class="log-panel" hidden><div class="panel-head"><span class="caps">Log</span><button class="btn ghost" data-log>Close ✕</button></div><pre id="events"></pre></section>
 
 <dialog id="settings"><form id="providerForm">
   <span class="caps">Model</span><h2>Connect your <em>model</em></h2>
@@ -155,5 +163,5 @@
   <div class="row end"><button type="button" id="closeSettings" class="btn ghost">Close</button><button type="submit" id="providerSubmit" class="btn primary">Connect</button></div>
 </form></dialog>
 
-<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise"></script>
+<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-4"></script>
 </body></html>
