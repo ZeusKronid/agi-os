@@ -129,9 +129,9 @@ jobs:
           GNUPGHOME=$(mktemp -d); export GNUPGHOME
           trap 'gpgconf --kill all; rm -rf "$GNUPGHOME"' EXIT
           printf '%s\n' "$AGIOS_SIGNING_KEY" | gpg --batch --quiet --import
-          python -B scripts/release/sign-iso.py out --export-key
+          python3 -B scripts/release/sign-iso.py out --export-key
           # The published files must pass the same check users run.
-          python -B scripts/release/verify-iso.py out/agi-os-*.iso --fingerprint "$AGIOS_SIGNING_FINGERPRINT"
+          python3 -B scripts/release/verify-iso.py out/agi-os-*.iso --fingerprint "$AGIOS_SIGNING_FINGERPRINT"
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

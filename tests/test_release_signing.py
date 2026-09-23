@@ -92,6 +92,36 @@ class SigningTests(unittest.TestCase):
         with self.assertRaises(sign_iso.SigningError):
             sign_iso.sign(self.release, self.fingerprint)
 
+    def test_offline_primary_key_with_signing_subkey(self):
+        """The recommended setup: CI holds only the signing subkey; the primary key is offline."""
+        uid = "AGIOS offline primary <offline@invalid>"
+        subprocess.run(["gpg", "--batch", "--passphrase", "", "--quick-gen-key", uid, "ed25519", "cert", "1d"],
+                       check=True, capture_output=True)
+        listing = subprocess.run(["gpg", "--with-colons", "--list-keys", uid], check=True, capture_output=True, text=True).stdout
+        primary = next(line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:"))
+        subprocess.run(["gpg", "--batch", "--passphrase", "", "--quick-add-key", primary, "ed25519", "sign", "1d"],
+                       check=True, capture_output=True)
+        subkeys = subprocess.run(["gpg", "--batch", "--armor", "--export-secret-subkeys", primary],
+                                 check=True, capture_output=True, text=True).stdout
+        ci = Path(self.temp.name) / "ci-gnupg"
+        ci.mkdir(mode=0o700)
+        self.addCleanup(subprocess.run, ["gpgconf", "--homedir", str(ci), "--kill", "all"], capture_output=True)
+        with patch.dict(os.environ, {"GNUPGHOME": str(ci)}):
+            subprocess.run(["gpg", "--batch", "--import"], input=subkeys, check=True, capture_output=True, text=True)
+            secret = subprocess.run(["gpg", "--with-colons", "--list-secret-keys"], capture_output=True, text=True).stdout
+            sec = next(line for line in secret.splitlines() if line.startswith("sec:"))
+            self.assertEqual(sec.split(":")[14], "#")  # the primary key's secret is really absent (stub)
+            sign_iso.sign(self.release, primary, export_key=True)
+        self.assertEqual(verify_iso.verify(self.iso, self.release / "agios-release-key.asc", primary), [])
+
+    def test_expired_or_revoked_signatures_are_rejected(self):
+        good = "[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 1 x\n[GNUPG:] VALIDSIG a b c d e f g h i FPR\n"
+        self.assertEqual(sign_iso.signer_fingerprint(good), "FPR")
+        for bad in ("EXPKEYSIG", "REVKEYSIG", "EXPSIG"):
+            status = good.replace("GOODSIG", bad)
+            self.assertIsNone(sign_iso.signer_fingerprint(status))
+            self.assertIsNone(verify_iso.signer_fingerprint(status))
+
     def test_passphrase_protected_key_via_environment(self):
         uid = "AGIOS protected <protected@invalid>"
         subprocess.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase", "release-test-pass",
