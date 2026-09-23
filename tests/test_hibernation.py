@@ -240,12 +240,37 @@ class VerifyTests(unittest.TestCase):
         log = "PM: hibernation: Creating image:\nPM: Wakeup event detected during hibernation, rolling back.\n"
         for output, gap in ((log, 290.0), ("", 2.0)):
             ticks = iter([(1000.0, 0.0), (1001.0, 0.0), (1004.0, gap)])
-            with self.subTest(gap=gap), patch.object(verify, "command", return_value=(0, output)), \
+            def command(args, output=output):
+                return (1, "none") if args[0] == "systemd-detect-virt" else (0, output)
+            with self.subTest(gap=gap), patch.object(verify, "command", side_effect=command), \
                     patch.object(verify, "clocks", side_effect=lambda: next(ticks)), patch.object(verify.time, "sleep"):
                 passed, detail = verify.hibernate(self.record, state, self.root)
                 self.assertFalse(passed, detail)
                 self.assertFalse(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
         self.assertIn("не подтверждена", detail)
+
+    def test_unreadable_kernel_log_is_not_a_pass(self):
+        state = self.root / "state"
+        ticks = iter([(1000.0, 0.0), (1001.0, 0.0), (1300.0, 290.0)])
+        def command(args):
+            return (1, "") if args[0] == "journalctl" else (0, "")
+        with patch.object(verify, "command", side_effect=command), patch.object(verify, "clocks", side_effect=lambda: next(ticks)), \
+                patch.object(verify.time, "sleep"):
+            passed, detail = verify.hibernate(self.record, state, self.root)
+        self.assertFalse(passed)
+        self.assertIn("журнал ядра недоступен", detail)
+
+    def test_preview_vm_does_not_try_platform_hibernation(self):
+        calls = []
+        def command(args):
+            calls.append(args)
+            return (0, "kvm") if args[0] == "systemd-detect-virt" else (0, "")
+        record = {**self.record, "hibernation": {**self.record["hibernation"], "mode": "platform"}}
+        with patch.object(verify, "command", side_effect=command):
+            passed, detail = verify.hibernate(record, self.root / "state", self.root)
+        self.assertFalse(passed)
+        self.assertIn("после установки", detail)
+        self.assertNotIn(["systemctl", "hibernate"], calls)
 
     def test_refusal_and_fresh_boot_fail(self):
         state = self.root / "state"

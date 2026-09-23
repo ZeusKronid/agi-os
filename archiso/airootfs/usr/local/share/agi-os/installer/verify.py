@@ -144,13 +144,24 @@ def resumed(system_root, boot_id, marker, nonce, gap, started):
     if not same_boot or read(marker) != nonce:
         return False, "После гибернации сеанс не совпадает"
     log = kernel_messages_since(started)
-    aborted = next((line for line in (log or "").splitlines() if any(w in line for w in HIBERNATE_ABORTED)), None)
+    if log is None:
+        return False, "Гибернация не подтверждена: журнал ядра недоступен, откат образа не исключён"
+    aborted = next((line for line in log.splitlines() if any(w in line for w in HIBERNATE_ABORTED)), None)
     if aborted:
         return False, "Гибернация не состоялась, ядро вернуло сеанс без выключения: " + aborted.strip()[:200]
     if gap < RESUME_GAP:
         return False, (f"Гибернация не подтверждена: сеанс был остановлен лишь {gap:.0f} с — "
                        "компьютер не выключался и не загружал образ")
     return True, "Сеанс восстановлен после гибернации"
+
+
+def preview_vm(record):
+    """The installed system runs in the preview VM while its hibernation is set up for the
+    real computer (platform mode): QEMU would roll the image back, so there is nothing to prove."""
+    if (record.get("hibernation") or {}).get("mode", "platform") != "platform":
+        return False
+    code, output = command(["systemd-detect-virt", "--vm"])
+    return code == 0 and output not in ("", "none")
 
 
 def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT):
@@ -164,6 +175,9 @@ def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT
     except (FileNotFoundError, ValueError):
         state = {}
     boot_id = (system_root / "proc/sys/kernel/random/boot_id").read_text().strip()
+    if preview_vm(record):
+        return False, ("Это превью в виртуальной машине: гибернация настроена для компьютера и "
+                       "проверяется после установки на него")
     nonce = secrets.token_hex(8)
     marker = system_root / "dev/shm" / f"agi-os-hibernate-{os.getuid()}"
     marker.write_text(nonce)
