@@ -88,6 +88,26 @@ connect a provider.
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.
 
+## Logs and secrets
+
+The user's password and the disk-encryption passphrase travel only in memory
+and over stdin/virtio (site → preview VM installer → `chpasswd`/`cryptsetup`;
+site → `finalize_worker.py`); API keys stay in the provider object. None of
+them is written to `session.json`, events, the API state or the installed
+system's `installation.json`, and a failing command that was fed a secret on
+stdin never echoes its output (tests: `SecretAuditTests`,
+`test_no_secret_in_events_commands_or_installed_files`).
+
+What Live keeps, all in RAM (lost at power-off):
+
+- `/var/lib/agi-os/session.json`: the conversation, configuration and preview
+  state — no secrets, but whatever the user typed into the chat.
+- `/var/lib/agi-os/vm/web-*/`: `qemu.log`, `guest-console.log` (the installer
+  VM's serial console), UEFI variables and sockets of each preview VM. Kept
+  while the preview exists and after any failure (diagnostics); removed after a
+  successful finalization.
+- The journal (`Storage=volatile`), bounded to 128 MiB (`agi-os-size.conf`).
+
 ## Limits
 
 - Disks with MBR partition tables: only the explicit whole-disk erase.
