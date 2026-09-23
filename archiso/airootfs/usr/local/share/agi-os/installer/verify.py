@@ -44,6 +44,8 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
         checks["Драйверы под железо компьютера"] = set(drivers["packages"]) <= installed
     for service in dict.fromkeys(["NetworkManager.service", *drivers.get("services", []), *config["services"]]):
         checks["Автозапуск: " + service] = command(["systemctl", "is-enabled", service])[0] == 0
+    if record.get("updates"):
+        checks["Проверка обновлений по расписанию"] = command(["systemctl", "is-enabled", record["updates"]["timer"]])[0] == 0
     checks["Сеть: NetworkManager"] = command(["systemctl", "is-active", "NetworkManager.service"])[0] == 0
     try:
         socket.getaddrinfo("archlinux.org", 443)

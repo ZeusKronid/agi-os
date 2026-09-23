@@ -184,6 +184,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(events[-1]["kind"], "installed")
         self.assertEqual(events[-1]["stage"], 7)
 
+    def test_installed_system_gets_the_update_tool(self):
+        calls, events = self.fake_install()
+        chrooted = [c[2:] for c in calls if c[0] == "arch-chroot"]
+        self.assertIn(["systemctl", "enable", "agi-os-update-check.timer"], chrooted)
+        self.assertEqual(events[-1]["record"]["updates"], {"timer": "agi-os-update-check.timer"})
+
     def test_failure_never_reports_installed(self):
         for fail_on, cleanup in (("pacman", 0), ("pacstrap", 0), (None, 1)):
             with self.subTest(fail_on=fail_on, cleanup=cleanup):
@@ -228,6 +234,26 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertTrue(verify.evaluate(record, state, False, root)["complete"])
                 record["root_uuid"] = "wrong-root"
                 self.assertFalse(verify.evaluate(record, state, False, root)["complete"])
+
+    def test_update_timer_is_checked_when_the_record_has_one(self):
+        config = specification()
+        record = {"id": "x", "configuration": config, "root_uuid": "u", "packages": [],
+                  "updates": {"timer": "agi-os-update-check.timer"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "proc/sys/kernel/random").mkdir(parents=True)
+            (root / "proc/sys/kernel/random/boot_id").write_text("b")
+            (root / "etc").mkdir()
+            (root / "etc/locale.conf").write_text("")
+            for enabled in (0, 1):
+                def command(args):
+                    if "agi-os-update-check.timer" in args:
+                        return enabled, ""
+                    return 0, ""
+                with patch.object(verify, "command", side_effect=command), \
+                     patch.object(verify.socket, "getaddrinfo", return_value=[]):
+                    checks = verify.evaluate(record, root / "state", False, root)["checks"]
+                self.assertEqual(checks["Проверка обновлений по расписанию"], enabled == 0)
 
 
 if __name__ == "__main__":

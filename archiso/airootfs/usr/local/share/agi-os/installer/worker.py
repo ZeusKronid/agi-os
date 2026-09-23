@@ -21,6 +21,7 @@ from pathlib import Path
 from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
 from system import Catalog, inventory, live_environment, selected_disk
+import update
 
 
 TARGET = Path("/mnt/agi-os")
@@ -327,7 +328,8 @@ def install(request, runner):
         record = {"id": uuid.uuid4().hex, "configuration": config.as_dict(), "packages": packages,
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
                   "firmware": firmware, "encrypted": encrypted, "swap": "zram",
-                  "hardware": hardware, "drivers": drivers, "status": "first_boot_pending"}
+                  "hardware": hardware, "drivers": drivers, "updates": {"timer": update.TIMER},
+                  "status": "first_boot_pending"}
         write_file("var/lib/agi-os/installation.json", json.dumps(record, ensure_ascii=False, indent=2))
         write_file("usr/local/share/agi-os/verify.py", (HERE / "verify.py").read_text())
         write_file("usr/local/bin/agi-os-verify", '#!/bin/sh\nexec python /usr/local/share/agi-os/verify.py "$@"\n', 0o755)
@@ -336,6 +338,12 @@ def install(request, runner):
                        "Name=AGI OS — First boot\nExec=agi-os-verify --gui\nTerminal=false\n")
             write_file("usr/share/applications/agi-os-verify.desktop", "[Desktop Entry]\nType=Application\n"
                        "Name=AGI OS — Verify installation\nExec=agi-os-verify --gui\nTerminal=false\nCategories=System;\n")
+        # Updates: agi-os-update, a daily check and, with a desktop, a reminder window.
+        files, units = update.target_files(bool(config.session), config.bootloader)
+        for path, content, mode in files:
+            write_file(path, content, mode)
+        for unit in units:
+            runner.run([*chroot, "systemctl", "enable", unit])
         runner.run(["sync"])
     finally:
         request.pop("password", None)
