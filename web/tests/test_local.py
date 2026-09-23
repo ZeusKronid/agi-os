@@ -95,6 +95,20 @@ class LocalApiTests(AioHTTPTestCase):
         response = await self.request('/api/screenshot', {})
         self.assertEqual(response.status, 404)
 
+    async def test_new_vm_keeps_only_the_newest_earlier_vm_directory(self):
+        import os
+        import runtime
+        root = Path(self.directory.name)
+        for age, name in enumerate(('web-old', 'web-older', 'web-newest')):
+            (root / 'vm' / name).mkdir(parents=True)
+            (root / 'vm' / name / 'guest-console.log').write_text('log')
+            os.utime(root / 'vm' / name, (1000 - age * 100 if name != 'web-newest' else 2000,) * 2)
+        with patch.object(runtime, 'DATA_ROOT', root):
+            vm = runtime.VirtualMachine({'format': 'qcow2', 'path': str(root / 'none.qcow2')})
+            restored = runtime.VirtualMachine.restore({'directory': str(root / 'vm/web-newest'), 'image': vm.image})
+        self.assertEqual(sorted(p.name for p in (root / 'vm').iterdir()), sorted(['web-newest', vm.directory.name]))
+        self.assertTrue((restored.directory / 'guest-console.log').exists())  # resuming prunes nothing
+
     async def test_runtime_refuses_to_start_outside_live(self):
         import runtime
         with patch.object(runtime, 'DATA_ROOT', Path(self.directory.name)), \
@@ -380,6 +394,104 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         public = state.public()
         self.assertFalse(public['can_finalize'] or public['can_resume'])
         self.assertTrue(public['can_revert'])
+class SecretAuditTests(LocalApiTests):
+    """No password, passphrase or API key reaches a file of the site, its state or events;
+    the preview's logs are removed after a successful finalization and kept otherwise."""
+    PASSWORD, PASSPHRASE, KEY = 'audit-user-password', 'audit-luks-passphrase', 'sk-audit-api-key'
+
+    def assert_no_secrets(self):
+        state = self.app['state']
+        texts = [json.dumps(state.public(), ensure_ascii=False), json.dumps(state.events, ensure_ascii=False)]
+        for path in Path(self.directory.name).rglob('*'):
+            if path.is_file():
+                texts.append(path.read_bytes().decode(errors='replace'))
+        for secret in (self.PASSWORD, self.PASSPHRASE, self.KEY):
+            for text in texts:
+                self.assertNotIn(secret, text)
+
+    def vm_directory(self):
+        directory = Path(self.directory.name) / 'vm/web-test'
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'qemu.log').write_text('qemu started\n')
+        (directory / 'guest-console.log').write_text('guest journal\n')
+        return directory
+
+    async def built_preview(self):
+        state = self.app['state']
+        config = demo_configuration()
+        state.controller.configuration = config
+        option = self.fake_plan(state)
+        state.controller.installing = True
+
+        async def privileged(script, request):
+            return {'image': {'format': 'qcow2', 'path': '/var/lib/agi-os/preview/ram/preview.qcow2'},
+                    'revert': {'kind': 'ram'}, 'text': 'reverted'}
+        with patch.object(server, 'VirtualMachine', self.fake_vm()), patch.object(server, 'privileged', privileged):
+            await state.build(config, state.current_consent(), option, self.PASSWORD, self.PASSPHRASE, 4096, 4)
+        await state.vm.stop()
+        self.vm_directory()
+        return state, privileged
+
+    def finalizer(self, events, code=0):
+        seen = {}
+
+        class Stream:
+            def __init__(self, lines): self.lines = [json.dumps(e).encode() + b'\n' for e in lines]
+            def __aiter__(self): return self
+            async def __anext__(self):
+                if not self.lines: raise StopAsyncIteration
+                return self.lines.pop(0)
+            async def read(self): return b''
+
+        class Stdin:
+            def write(self, data): seen['stdin'] = data
+            async def drain(self): pass
+            def close(self): pass
+
+        class Process:
+            stdin, stdout, stderr = Stdin(), Stream(events), Stream([])
+            async def wait(self): return code
+
+        async def spawn(*args, **kwargs):
+            return Process()
+        return spawn, seen
+
+    async def test_api_key_is_never_stored_or_published(self):
+        import provider
+        with patch.object(server, 'LiveProvider', provider.LiveProvider):
+            response = await self.request('/api/provider', {'kind': 'openai', 'model': 'gpt-test', 'key': self.KEY})
+        self.assertEqual(response.status, 200)
+        self.assertNotIn(self.KEY, await response.text())
+        self.app['state'].persist()
+        self.assert_no_secrets()
+
+    async def test_successful_finalization_removes_preview_logs_and_keeps_no_secret(self):
+        state, privileged = await self.built_preview()
+        self.assert_no_secrets()
+        spawn, seen = self.finalizer([{'kind': 'final-progress', 'text': 'copying'},
+                                      {'kind': 'finalized', 'mode': 'copy', 'text': 'done'}])
+        payload = {'target': '/dev/vda', 'layout': 'erase', 'passphrase': self.PASSPHRASE}
+        with patch('asyncio.create_subprocess_exec', spawn), patch.object(server, 'privileged', privileged):
+            await server.finalize_task(state, payload)
+        self.assertIn(self.PASSPHRASE.encode(), seen['stdin'])  # the root helper still gets it, over stdin only
+        self.assertEqual(state.final['phase'], 'complete')
+        self.assertNotIn('passphrase', payload)
+        self.assertFalse((Path(self.directory.name) / 'vm/web-test').exists())
+        self.assertIsNone(state.public()['vm'])
+        self.assert_no_secrets()
+
+    async def test_failed_finalization_keeps_preview_logs_for_diagnostics(self):
+        state, privileged = await self.built_preview()
+        spawn, _ = self.finalizer([{'kind': 'final-error', 'text': 'copy failed'}], code=1)
+        with patch('asyncio.create_subprocess_exec', spawn), patch.object(server, 'privileged', privileged):
+            await server.finalize_task(state, {'target': '/dev/vda', 'layout': 'erase', 'passphrase': self.PASSPHRASE})
+        self.assertEqual(state.final['phase'], 'error')
+        self.assertTrue((Path(self.directory.name) / 'vm/web-test/guest-console.log').exists())
+        self.assert_no_secrets()
+
+    def test_journal_of_live_is_bounded(self):
+        conf = Path(__file__).resolve().parents[2] / 'archiso/airootfs/etc/systemd/journald.conf.d/agi-os-size.conf'
+        self.assertIn('RuntimeMaxUse=128M', conf.read_text())
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
