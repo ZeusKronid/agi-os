@@ -142,7 +142,10 @@ def probe(request):
     budget = mem_available() - vm_memory - RESERVE
     options.append({'id': 'ram', 'kind': 'ram', 'title': 'В оперативной памяти',
                     'detail': f'Сжатый образ (zram). Доступно ≈ {budget / GIB:.1f} ГиБ после выделения VM'
-                              + (' — зашифрованные данные не сжимаются' if compression <= 1 else ''),
+                              + (' — зашифрованные данные не сжимаются' if compression <= 1 else '')
+                              + (f'; swap-файл гибернации ({int(request["sparse"]) / GIB:.0f} ГиБ) только зарезервирован: память он займёт, '
+                                 'лишь если превью начнёт в него выгружаться (тогда сработает общий лимит памяти)'
+                                 if int(request.get('sparse', 0)) else ''),
                     'revert': 'Диски не затрагиваются: выключить VM — и всё',
                     'destructive': False, 'confirm': None, 'available': max(0, budget),
                     'fits': in_memory(request) / compression <= budget, 'order': 0})
