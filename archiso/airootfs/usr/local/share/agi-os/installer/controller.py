@@ -2,7 +2,7 @@
 
 import json
 
-from domain import Configuration, PLANNER_PROMPT, ValidationError, default_system_context
+from domain import GIB, Configuration, PLANNER_PROMPT, ValidationError, default_system_context, hibernation_swap_size
 from hardware import describe, driver_plan, profile
 from system import Catalog, selected_disk
 
@@ -31,7 +31,8 @@ class Controller:
                           for d in self.snapshot["disks"]],
                 "computer": describe(hardware), "hardware": hardware,
                 "driver_packages_added_by_app": {"console": console["packages"], "graphical_session": graphical["packages"]},
-                "driver_notes": graphical["notes"], "preview_cannot_verify": graphical["unverified"]}
+                "driver_notes": graphical["notes"], "preview_cannot_verify": graphical["unverified"],
+                "hibernation_swap_file_gib": hibernation_swap_size(hardware["memory"]) // GIB if hardware["memory"] else None}
 
     def report_check_failure(self, text):
         """The installed preview rejected files the model wrote; the model sees the
@@ -76,6 +77,8 @@ class Controller:
                     selected_disk(self.snapshot, config.disk)
                     if self.snapshot["firmware"] == "bios" and config.bootloader != "grub":
                         raise ValidationError("В BIOS нужен GRUB")
+                    if config.swap == "hibernate":
+                        hibernation_swap_size(profile(self.snapshot["hardware"])["memory"])
                     self.catalog.validate([*config.packages, *config.effective_fonts()])
                 except ValidationError as exc:
                     self.history.append({"role": "user", "content": "Application validation rejected proposal: " + str(exc)})
@@ -110,7 +113,7 @@ class DemoProvider:
                     "timezone": "Europe/Moscow", "keyboard_layouts": ["us", "ru"],
                     "desktop": "Sway — демонстрационный пример", "session": "sway",
                     "packages": ["sway", "foot", "firefox", "greetd", "greetd-regreet", "cage"],
-                    "services": ["greetd.service"], "home_files": [], "system_files": [],
+                    "services": ["greetd.service"], "home_files": [], "system_files": [], "swap": "zram",
                     "requirements": ["Рабочая сессия Sway", "Браузер Firefox", "Русская и английская раскладки"],
                     "console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
                 }}

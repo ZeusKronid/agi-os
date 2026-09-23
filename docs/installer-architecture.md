@@ -74,7 +74,9 @@ flowchart TD
    внутренней VM; контроллер отправляет конфигурацию с `disk=/dev/vda`,
    отпечаток, пароль и пароль шифрования; `worker.py` ставит систему партиями
    (`pacman -Scc` + `fstrim` между ними), настраивает LUKS2 (`encrypt` hook,
-   `cryptdevice=`), zram-generator, загрузчик с fallback-записью и запись
+   `cryptdevice=`), zram-generator, при `swap: hibernate` — swap-файл размером
+   с RAM реального компьютера (`resume=`/`resume_offset=`, хук `resume`),
+   загрузчик с fallback-записью и запись
    `installation.json`. После записи файлов настроек `worker.py` запускает в
    chroot проверки самих программ, если они установлены: `foot -C`,
    `sway -C`, `i3 -C`, `Hyprland --verify-config` (от пользователя, со своим
