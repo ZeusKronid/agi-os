@@ -13,7 +13,7 @@ from aiohttp import web
 from settings import SOURCE_ROOT as ROOT, ENGINE, DATA_ROOT, GUACAMOLE_JS
 sys.path.insert(0, str(ENGINE))
 from controller import Controller
-from domain import Configuration, ValidationError
+from domain import Configuration, ValidationError, hibernation_swap_size
 from providers import APIProvider, ProviderError, PROVIDERS
 from worker import packages_for
 from hardware import describe, driver_plan, profile, virtual
@@ -179,6 +179,7 @@ class State:
             self.final = {'phase': 'idle', 'events': []}
             self.persist()
             prepared = await privileged('storage_worker.py', {'op': 'prepare', 'option': option, 'needed': self.plan['needed'],
+                                                              'sparse': self.plan.get('sparse', 0),
                                                               'vm_memory': memory * 2**20, 'target': config.disk,
                                                               'compression': self.plan['compression']})
             self.preview = {'option': option, **prepared}
@@ -317,14 +318,17 @@ async def plan(request):
         except ValidationError as exc:
             raise ValidationError('Ошибка установщика, не вашего выбора — драйверы по железу отсутствуют в репозиториях: ' + str(exc))
         estimate = await asyncio.to_thread(state.controller.catalog.estimate, packages_for(config, hardware))
-        needed = int(estimate['installed'] * 1.2) + 2 * GIB
+        # A hibernation swap file as large as the real computer's RAM needs that much room on
+        # the preview's root, but it is only reserved (never written), so it costs no memory.
+        sparse = hibernation_swap_size(hardware.get('memory')) if config.swap == 'hibernate' else 0
+        needed = int(estimate['installed'] * 1.2) + 2 * GIB + sparse
         # LUKS output is incompressible: an encrypted in-memory preview needs its full size.
         compression = 1.0 if encrypt else 1.3
-        probe = await privileged('storage_worker.py', {'op': 'probe', 'needed': needed, 'target': config.disk,
+        probe = await privileged('storage_worker.py', {'op': 'probe', 'needed': needed, 'target': config.disk, 'sparse': sparse,
                                                        'vm_memory': memory * 2**20, 'compression': compression})
         digest = hashlib.sha256(json.dumps({'consent': consent['digest'], 'needed': needed, 'memory': memory, 'encrypt': encrypt,
                                             'options': [o['id'] for o in probe['options']]}, sort_keys=True).encode()).hexdigest()
-        state.plan = {'digest': digest, 'estimate': estimate, 'needed': needed, 'memory': memory, 'encrypt': encrypt,
+        state.plan = {'digest': digest, 'estimate': estimate, 'needed': needed, 'sparse': sparse, 'memory': memory, 'encrypt': encrypt,
                       'compression': compression, 'options': probe['options'], 'consent': consent['digest']}
         state.status = 'Выберите, где сделать превью, и подтвердите'
         return web.json_response(state.public())
