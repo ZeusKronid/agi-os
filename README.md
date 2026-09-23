@@ -31,8 +31,9 @@ guacd из закреплённого образа `guacamole/guacd:1.6.0` (squa
 графики, поэтому второй образ не нужен. Кэш пакетов хоста и оптимизированные
 под конкретный CPU пакеты не используются.
 
-Воспроизводимая сборка (как в CI): `scripts/ci/build-iso.sh` — mkarchiso в
-закреплённом контейнере Arch, пакеты из одного дня Arch Linux Archive
+Воспроизводимая сборка в CI: `scripts/ci/build-iso.sh` — mkarchiso в
+закреплённом привилегированном контейнере Arch (только для CI или одноразовой
+сборочной VM, не для рабочей станции), пакеты из одного дня Arch Linux Archive
 (`scripts/ci/arch-snapshot`), `SOURCE_DATE_EPOCH` = время коммита; рядом с ISO
 кладутся `.sha256` и `build-info.json`. GitHub Actions запускает юнит-тесты на
 каждый PR, а сборку ISO со smoke-загрузкой в QEMU (UEFI и BIOS) — на `main`,

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Reproducible AGIOS Live ISO build in a privileged Arch Linux container.
 #
+# WARNING: for CI runners and disposable build VMs only. A privileged container shares
+# the host's devices; never run this on a developer workstation. It refuses to start
+# unless CI=true (set by GitHub Actions) or AGIOS_ALLOW_PRIVILEGED_BUILD=1.
+#
 # The host needs Docker, curl, tar, python, rsync and sqfstar (only for the first guacd
 # export); mkarchiso and pacman run inside the pinned container. Every package, the
 # container's own archiso included, comes from one day of the Arch Linux Archive
@@ -17,8 +21,14 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo"
 image_default=archlinux:base-devel-20260920.0.596911@sha256:8745817f349ed24373341ddb92776209eeec3f0364ea48f7f645ac5800d30a50
 
+if [[ ${1:-} != --inside && ${CI:-} != true && ${AGIOS_ALLOW_PRIVILEGED_BUILD:-} != 1 ]]; then
+    echo 'Refusing to run a privileged container outside CI; see the warning at the top of this script.' >&2
+    exit 1
+fi
+
 if [[ ${1:-} == --inside ]]; then
     # Runs as root in the container: /src is the repository, /work the scratch space.
+    [[ -f /.dockerenv ]] || { echo '--inside is only for the build container' >&2; exit 1; }
     snapshot=$AGIOS_ARCH_SNAPSHOT
     echo "Server = https://archive.archlinux.org/repos/$snapshot/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
     # -uu also downgrades the image to the snapshot, so mkarchiso itself is pinned.

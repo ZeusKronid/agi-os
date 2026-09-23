@@ -131,6 +131,15 @@ class PinTests(unittest.TestCase):
                   for image in re.findall(pattern, (ROOT / path).read_text())}
         self.assertEqual(len(images), 1, images)
 
+    def test_privileged_build_refuses_to_start_outside_ci(self):
+        # Static on purpose: this test must never start the build on a workstation.
+        script = (ROOT / 'scripts/ci/build-iso.sh').read_text()
+        guard = script.index('${CI:-} != true && ${AGIOS_ALLOW_PRIVILEGED_BUILD:-} != 1')
+        self.assertLess(guard, script.index('docker'))
+        self.assertLess(guard, script.index('scripts/build-iso.sh --prepare-only'))
+        inside = script.index('if [[ ${1:-} == --inside ]]')
+        self.assertLess(script.index('/.dockerenv', inside), script.index('pacman', inside))
+
     def test_third_party_actions_are_pinned_to_commits(self):
         for workflow in (ROOT / '.github/workflows').glob('*.yml'):
             for action in re.findall(r'uses:\s*(\S+)', workflow.read_text()):

@@ -12,10 +12,16 @@ new `uses:` line is not.
 
 ## Reproducible build
 
-`scripts/ci/build-iso.sh` is the single entry point for CI and for local
-reproduction. The host needs Docker plus the unprivileged preparation tools of
+`scripts/ci/build-iso.sh` is the single entry point for CI and for reproducing a
+CI build. The host needs Docker plus the unprivileged preparation tools of
 `scripts/build-iso.sh` (curl, tar, python, rsync, and sqfstar for the first
 guacd export); `mkarchiso` runs inside a privileged container.
+
+> **Only on CI runners or a disposable build VM.** A privileged container shares
+> the host's devices, so running it on a developer workstation can disturb the
+> desktop session. The script refuses to start unless `CI=true` (GitHub Actions)
+> or `AGIOS_ALLOW_PRIVILEGED_BUILD=1` is set. On a workstation build with
+> `scripts/build-iso.sh` as described in the README instead.
 
 - **Container:** `archlinux:base-devel-<date>` pinned by digest in
   `scripts/ci/build-iso.sh` and `.github/workflows/tests.yml` (a test keeps the
@@ -34,12 +40,16 @@ guacd export); `mkarchiso` runs inside a privileged container.
 - **Outputs in `out/`:** the ISO, `<iso>.sha256` and `build-info.json` (size,
   checksum, source revision, snapshot, container image, `SOURCE_DATE_EPOCH`).
 
-Local reproduction of a CI build of the same commit:
+Reproducing a CI build of the same commit on a disposable build VM:
 
 ```sh
-scripts/ci/build-iso.sh                  # out/ must not contain an older ISO
-AGIOS_ARCH_SNAPSHOT=2026/09/22 scripts/ci/build-iso.sh   # try a newer package set
+AGIOS_ALLOW_PRIVILEGED_BUILD=1 scripts/ci/build-iso.sh   # out/ must not contain an older ISO
+AGIOS_ALLOW_PRIVILEGED_BUILD=1 AGIOS_ARCH_SNAPSHOT=2026/09/22 scripts/ci/build-iso.sh
 ```
+
+The same package set without a container: `AGIOS_ARCH_SNAPSHOT=$(cat scripts/ci/arch-snapshot)
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) scripts/build-iso.sh --prepare-only`, then
+`mkarchiso` as root (the host's own archiso version is then not pinned).
 
 `AGIOS_WORK_DIR` moves the ~8 GB mkarchiso work tree (CI uses `/mnt`), and
 `AGIOS_BUILD_IMAGE` overrides the container.
