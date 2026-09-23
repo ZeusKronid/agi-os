@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import sys
 import tempfile
@@ -174,8 +175,10 @@ class ToolCheckTests(unittest.TestCase):
         self.assertFalse(leftover)
 
     def test_missing_program_is_skipped_and_system_files_run_as_root(self):
-        config = self.config(home_files=[{"path": ".config/sway/config", "content": "set $mod Mod4\n"}],
-                             system_files=[{"path": "etc/profile.d/agi.sh", "content": "export A=1\n"}])
+        # System shell snippets and units are refused by the path rules (CMP-133); the
+        # worker still checks them if a configuration ever carries one.
+        config = dataclasses.replace(self.config(home_files=[{"path": ".config/sway/config", "content": "set $mod Mod4\n"}]),
+                                     system_files=(("etc/profile.d/agi.sh", "export A=1\n"),))
         calls, error, _ = self.run_checks(config, ["usr/bin/bash"])
         self.assertIsNone(error)
         self.assertFalse(any("/usr/bin/sway" in c for c in calls))
@@ -183,8 +186,8 @@ class ToolCheckTests(unittest.TestCase):
         self.assertEqual(bash, ["arch-chroot", bash[1], "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
 
     def test_systemd_failure_explains_file_modes(self):
-        config = self.config(system_files=[{"path": "etc/systemd/user/agi.service",
-                                            "content": "[Service]\nExecStart=/etc/agi/run.sh\n"}])
+        config = dataclasses.replace(self.config(), system_files=(("etc/systemd/user/agi.service",
+                                                                   "[Service]\nExecStart=/etc/agi/run.sh\n"),))
         _, error, _ = self.run_checks(config, ["usr/bin/systemd-analyze"], fail="/usr/bin/systemd-analyze")
         self.assertIn("/etc/systemd/user/agi.service — systemd-analyze", error)
         self.assertIn("0644", error)
