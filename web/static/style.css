@@ -151,7 +151,8 @@ body.has-said { --vm-bottom: 150px; }
 .icon:active { transform: scale(.95); }
 .icon svg { width: 14px; height: 14px; }
 .icon.round { width: 44px; height: 44px; border-radius: 50%; }
-.vm-full { position: fixed; top: calc(var(--horizon) - 42px); left: calc(50% + var(--vm-w) / 2 - 32px); z-index: 6; transition: left .4s var(--ease-drawer); }
+.icon.bare { box-shadow: none; } .icon.bare:hover { box-shadow: none; color: var(--ink); }
+.vmbar > .icon.bare { width: 36px; height: 44px; }
 .said { position: fixed; left: 50%; bottom: 88px; z-index: 6; transform: translateX(-50%); width: min(760px, calc(100% - 56px)); display: flex; align-items: baseline; gap: 10px; margin: 0; padding: 8px 14px; border-radius: 10px; background: var(--canvas); box-shadow: inset 0 0 0 1px var(--line); font: 400 15px/1.45 var(--serif); color: var(--ink-soft); animation: rise .45s var(--ease-out) both; }
 .said .who { flex: none; font: 10px var(--mono); letter-spacing: .16em; color: var(--accent); }
 .vmbar { position: fixed; left: 50%; bottom: 30px; z-index: 12; transform: translateX(-50%); width: min(1000px, calc(100% - 56px)); display: flex; align-items: center; gap: 10px; }
@@ -166,6 +167,9 @@ body.has-said { --vm-bottom: 150px; }
 @keyframes pop { from { opacity: 0; transform: translateY(10px) scale(.97); } }
 .modal h2 { margin: 4px 0 0; font: 400 28px/1.12 var(--serif); letter-spacing: -.02em; }
 .modal .close { position: absolute; top: 12px; right: 12px; }
+.modal-step { display: grid; gap: 14px; }
+.modal .lead { margin: 0; color: var(--ink-soft); font-size: 14.5px; line-height: 1.55; }
+.modal-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
 .blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line-accent); color: var(--ink-soft); font-size: 13.5px; }
 
 /* done */
@@ -228,7 +232,7 @@ dialog form { display: grid; gap: 14px; }
   .talk { top: 96px; width: calc(100% - 32px); }
   body { --vm-w: calc(100vw - 24px); }
   .vm { top: 150px; }
-  .vm-status { top: 118px; left: 16px; transform: none; } .vm-full { top: 108px; }
+  .vm-status { top: 118px; left: 16px; transform: none; }
   .vmbar { flex-wrap: wrap; bottom: 14px; width: calc(100% - 24px); } .vmbar .mid { order: -1; flex-basis: 100%; } .vmbar > .btn { flex: 1; }
   .said { bottom: 130px; width: calc(100% - 24px); }
   .sheet-in { grid-template-columns: 1fr; padding: 28px 18px 22px; }

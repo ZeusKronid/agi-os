@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-4"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-5"></head>
 <body>
 <canvas id="sky" aria-hidden="true"></canvas>
 
@@ -35,6 +35,7 @@
       <div id="suggestions" class="chips"></div>
       <div id="consentError" class="line error" hidden></div>
       <button id="placeButton" class="cta" hidden><span id="placeText">All set — find room for the preview</span><b>↑</b></button>
+      <button id="previewButton" class="cta" hidden>Back to the preview<b>↑</b></button>
       <button id="connectButton" class="cta" hidden>Connect a model to start<b>→</b></button>
       <form id="chatForm" class="ask"><input id="prompt" autocomplete="off" maxlength="16000" placeholder="Describe your system in your own words…" aria-label="Message"><button id="send" class="send" aria-label="Send">↑</button></form>
     </div>
@@ -51,7 +52,6 @@
   </section>
 
   <p id="vmStatus" class="vm-status" hidden><i class="dot"></i><span></span></p>
-  <button id="fullscreen" class="icon vm-full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg></button>
   <section id="vm" class="vm" hidden>
     <div id="screen" tabindex="0" aria-label="Screen of the preview VM"></div>
     <div id="vmState" class="vm-state" hidden>
@@ -62,6 +62,7 @@
   </section>
   <p id="said" class="said" hidden><span class="who">AGIOS</span><span id="saidText"></span></p>
   <div id="vmbar" class="vmbar" hidden>
+    <button id="toChat" class="icon bare" aria-label="Back to the conversation" title="Back to the conversation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 8H3M7 4 3 8l4 4"/></svg></button>
     <button id="putBack" class="btn quiet">Put it back</button>
     <div class="mid">
       <button id="stop" class="icon round" aria-label="Stop VM" title="Stop VM"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
@@ -69,6 +70,7 @@
       <form id="changeForm" class="ask"><input id="changePrompt" autocomplete="off" maxlength="16000" placeholder="Ask for a change while you try it…" aria-label="Ask for a change"><button class="send" aria-label="Send">↑</button></form>
     </div>
     <button id="install" class="btn primary">Install <span class="arr">→</span></button>
+    <button id="fullscreen" class="icon bare" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg></button>
   </div>
 
   <section id="done" class="after" hidden>
@@ -119,23 +121,30 @@
 </section>
 
 <div id="installModal" class="modal-veil" hidden>
-  <form id="finalInstallForm" class="modal" role="dialog" aria-modal="true" aria-labelledby="installTitle">
-    <button type="button" class="btn ghost close" data-close>Back ✕</button>
-    <span class="caps accent">Install on the computer</span>
-    <h2 id="installTitle">Keep it on <em>this computer</em></h2>
-    <p id="finalTarget" class="hint"></p>
-    <div id="finalBlocked" class="blocked" hidden><span>Shut the preview down from its power menu first, or stop the VM here.</span><button type="button" id="stopForFinal" class="btn outline">Stop VM</button></div>
-    <label class="check"><input type="radio" name="layout" value="alongside" checked><span>Install <b>alongside</b> existing data and systems, in free space</span></label>
-    <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the whole disk</b>: the system takes it all, other partitions are deleted</span></label>
-    <p id="layoutWarning" class="hint"></p>
-    <p id="finalHint" class="hint"></p>
-    <label class="field" id="finalPassphraseField" hidden><span>Encryption password (needed to finish)</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
-    <label class="check"><input type="checkbox" id="finalAccepted"><span>I checked the system in the preview and want it on this disk</span></label>
-    <label class="field"><span>Type the disk path</span><input id="targetConfirm" autocomplete="off"></label>
-    <div id="finalNeeds" class="needs"></div>
-    <button type="submit" id="installFinal" class="btn primary">Install on this computer</button>
-    <p id="finalError" class="line error" hidden></p>
-  </form>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Install">
+    <button type="button" class="btn ghost close" data-close aria-label="Close">✕</button>
+    <section id="installStep1" class="modal-step">
+      <span class="caps accent">Install · step 1 of 2</span>
+      <h2>First, turn off the <em>preview</em></h2>
+      <p class="lead">The system is copied from the preview to your disk, so the preview VM has to be turned off first. Nothing is written to the disk yet.</p>
+      <div class="modal-foot"><button type="button" class="btn quiet" data-close>Keep it running</button><button type="button" id="stopForFinal" class="btn primary">Turn off and continue <span class="arr">→</span></button></div>
+    </section>
+    <form id="finalInstallForm" class="modal-step" hidden>
+      <span class="caps accent">Install · step 2 of 2</span>
+      <h2>Install on <em>this computer</em></h2>
+      <p id="finalTarget" class="lead"></p>
+      <label class="check"><input type="radio" name="layout" value="alongside" checked><span><b>Keep what’s on the disk</b> — install next to your files and other systems, in free space</span></label>
+      <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the disk</b> — delete everything on it and install on the whole disk</span></label>
+      <p id="layoutWarning" class="hint"></p>
+      <label class="field" id="finalPassphraseField" hidden><span>Encryption password</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
+      <label class="check"><input type="checkbox" id="finalAccepted"><span>I tried the system in the preview and want to install it</span></label>
+      <label class="field"><span id="targetLabel">Type the disk path to confirm</span><input id="targetConfirm" autocomplete="off"></label>
+      <div id="finalNeeds" class="needs"></div>
+      <p id="finalHint" class="hint"></p>
+      <div class="modal-foot"><button type="button" class="btn quiet" data-close>Back to the preview</button><button type="submit" id="installFinal" class="btn primary">Install</button></div>
+      <p id="finalError" class="line error" hidden></p>
+    </form>
+  </div>
 </div>
 
 <div id="backModal" class="modal-veil" hidden>
@@ -163,5 +172,5 @@
   <div class="row end"><button type="button" id="closeSettings" class="btn ghost">Close</button><button type="submit" id="providerSubmit" class="btn primary">Connect</button></div>
 </form></dialog>
 
-<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-4"></script>
+<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-5"></script>
 </body></html>

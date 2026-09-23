@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 // Like the site, the workspace always plays its motion: the system reduced-motion setting is not honored.
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
-let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
+let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', installStep = 1, stopping = false, chatView = false, changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
 let providerKind = 'chatgpt', shown = 0, placeStep = 1;
 
 async function api(path, data) {
@@ -28,6 +28,8 @@ function scene(s) {
     if (s.final.phase === 'complete') return 'done';
     if (s.final.phase === 'working' || s.final.phase === 'error') return 'install';
     if (['starting', 'installing'].includes(s.phase)) return 'build';
+    // The back arrow of the preview returns to the conversation; the preview keeps running meanwhile.
+    if (chatView) return 'talk';
     if (s.running || s.built || ['stopped', 'error'].includes(s.phase)) return 'preview';
     return 'talk';
 }
@@ -35,6 +37,7 @@ function chapter(s) {
     const place = scene(s);
     if (place === 'done' || place === 'install' || modal === 'install') return 3;
     if (place === 'build' || place === 'preview') return 2;
+    if (chatView) return 0;
     return s.configuration ? 1 : 0;
 }
 // The engine reports texts, not percentages; these are the shares of the sunrise the texts start at.
@@ -167,7 +170,10 @@ function render(state) {
     const consentError = state.consent && state.consent.error;
     $('consentError').hidden = !consentError;
     if (consentError) $('consentError').textContent = 'The target disk is unavailable: ' + consentError;
-    $('placeButton').hidden = !config || place !== 'talk' || busy;
+    const hasPreview = !!(state.built || state.running || ['stopped', 'error'].includes(state.phase));
+    if (!hasPreview) chatView = false;
+    $('previewButton').hidden = !chatView || busy;
+    $('placeButton').hidden = !config || place !== 'talk' || busy || hasPreview;
     $('placeButton').disabled = !!consentError || (!state.plan && !state.can_plan);
     $('placeText').textContent = state.plan ? 'All set — pick where the preview lives' : 'All set — find room for the preview';
     $('connectButton').hidden = !!state.model;
@@ -215,6 +221,7 @@ function render(state) {
         if (changeAsked && !busy && answer) $('saidText').textContent = answer.content;
     }
     if (place !== 'preview') changeAsked = false;
+    $('said').hidden = place !== 'preview' || !changeAsked;
     document.body.classList.toggle('has-said', changeAsked);
     $('vmStatus').hidden = $('vmbar').hidden;
     $('fullscreen').hidden = !(place === 'preview' && state.running);
@@ -237,16 +244,24 @@ function render(state) {
 
     // Decide sheet.
     if (state.built) {
-        $('finalTarget').textContent = 'Target disk: ' + state.built.target + (state.built.encrypted ? ' · root encrypted' : '');
+        $('finalTarget').textContent = 'The system goes on ' + state.built.target + (state.built.encrypted ? ', with the root encrypted' : '') + '.';
+        $('targetLabel').textContent = 'Type ' + state.built.target + ' to confirm';
+        $('installFinal').innerHTML = 'Install on ' + state.built.target + ' <span class="arr">→</span>';
         $('finalPassphraseField').hidden = !state.built.encrypted;
         $('targetConfirm').placeholder = state.built.target;
         $('finalHint').textContent = state.built.on_target
-            ? 'The preview already lives on this disk: its partitions become the system without copying.'
-            : 'The checked system is copied file by file to new partitions and verified by checksums.';
+            ? 'The preview already lives on this disk, so its partitions simply become the system.'
+            : 'The system you tried is copied to the disk and checked file by file.';
         $('revertHint').textContent = 'You tried the system. Installing makes it this computer’s system. Putting it back removes the preview — '
             + (state.built.revert || 'nothing else changes') + '.';
     }
-    $('finalBlocked').hidden = !(state.built && state.running);
+    // Installing needs the preview off: step 1 turns it off, step 2 installs.
+    if (modal === 'install') {
+        if (state.running && !stopping) installStep = 1; else if (!state.running) installStep = 2;
+        $('installStep1').hidden = installStep !== 1; $('finalInstallForm').hidden = installStep !== 2;
+        $('stopForFinal').disabled = stopping;
+        $('stopForFinal').innerHTML = stopping ? '<span class="spin"></span> Turning off…' : 'Turn off and continue <span class="arr">→</span>';
+    }
     $('finalInstallForm').querySelectorAll('input, #installFinal').forEach(el => { el.disabled = !state.can_finalize; });
     // The server stops a running VM before it removes the preview, so putting it back works either way.
     $('revert').disabled = !(state.can_revert || state.running || state.phase === 'error');
@@ -358,15 +373,15 @@ function validateBuild() {
 }
 function validateFinal() {
     if (!current || !current.built) return;
-    const needs = [[$('finalAccepted').checked, 'I checked the preview'], [$('targetConfirm').value.trim() === current.built.target, 'Type ' + current.built.target]];
+    const needs = [[$('finalAccepted').checked, 'Confirm you tried it'], [$('targetConfirm').value.trim() === current.built.target, 'Type ' + current.built.target]];
     if (current.built.encrypted) needs.push([$('finalPassphrase').value.length >= 8, 'Encryption password']);
     $('installFinal').disabled = !needsHTML($('finalNeeds'), needs) || !current.can_finalize;
 }
 function updateLayoutWarning() {
     if (!current || !current.built) return;
     const erase = document.querySelector('input[name=layout]:checked').value === 'erase';
-    $('layoutWarning').textContent = erase ? 'Every other partition and all data on ' + current.built.target + ' will be deleted.'
-        : 'Existing partitions on ' + current.built.target + ' stay; the system takes the free space.';
+    $('layoutWarning').textContent = erase ? 'Everything on ' + current.built.target + ' will be deleted, including other systems.'
+        : 'Your files and other systems on ' + current.built.target + ' stay as they are.';
     $('layoutWarning').className = erase ? 'line error' : 'hint';
 }
 function renderOrphans(orphans) {
@@ -405,8 +420,9 @@ function openSheet(name) {
 // Install and Put it back each open their own modal over the preview.
 function openModal(name) {
     modal = name; revertAsk = false;
+    if (modal === 'install') installStep = current && current.running ? 1 : 2;
     $('installModal').hidden = modal !== 'install'; $('backModal').hidden = modal !== 'back';
-    if (modal) setTimeout(() => (modal === 'install' ? ($('stopForFinal').offsetParent ? $('stopForFinal') : $('finalAccepted')) : $('revert')).focus({preventScroll: true}), 60);
+    if (modal) setTimeout(() => (modal === 'install' ? (installStep === 1 ? $('stopForFinal') : $('finalAccepted')) : $('revert')).focus({preventScroll: true}), 60);
     if (current) render(current);
 }
 function closeAll() { if (sheet) openSheet(''); if (modal) openModal(''); }
@@ -454,7 +470,15 @@ $('buildForm').onsubmit = async event => {
     } catch (error) { showError(error); validateBuild(); }
 };
 const post = path => async () => { try { render(await api(path, {})); } catch (error) { showError(error); } };
-$('stop').onclick = $('stopBuild').onclick = $('stopForFinal').onclick = post('stop');
+$('stop').onclick = $('stopBuild').onclick = post('stop');
+$('stopForFinal').onclick = async () => {
+    stopping = true; render(current);
+    try { render(await api('stop', {})); installStep = 2; setTimeout(() => $('finalAccepted').focus({preventScroll: true}), 60); }
+    catch (error) { showError(error); }
+    finally { stopping = false; render(current); }
+};
+$('toChat').onclick = () => { chatView = true; render(current); setTimeout(() => $('prompt').focus({preventScroll: true}), 60); };
+$('previewButton').onclick = () => { chatView = false; render(current); };
 $('resume').onclick = $('resumeInline').onclick = post('resume');
 async function revert() {
     if (!revertAsk) { revertAsk = true; render(current); return; }
