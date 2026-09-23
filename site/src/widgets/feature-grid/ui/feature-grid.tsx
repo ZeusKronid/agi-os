@@ -19,20 +19,18 @@ interface FeatureCardProps {
   span?: 2 | 4 | 6
   /** Дополнительные классы области визуала, например другая высота. */
   visualClassName?: string
-  /** В визуале есть элементы управления: тогда он не скрыт от ассистивных технологий. */
-  interactive?: boolean
   children: ReactNode
 }
 
 const spans = { 2: 'lg:col-span-2', 4: 'lg:col-span-4', 6: 'lg:col-span-6' } as const
 
-function FeatureCard({ title, text, span = 2, visualClassName, interactive = false, children }: FeatureCardProps) {
+function FeatureCard({ title, text, span = 2, visualClassName, children }: FeatureCardProps) {
   return (
     // Reveal трансформирует внешний узел через GSAP, поэтому hover-сдвиг живёт на внутреннем <article>.
     <Reveal className={cn('col-span-6', spans[span])}>
       <article className="group/card grid h-full content-start gap-[18px] rounded-2xl bg-surface px-2.5 pt-2.5 pb-[26px] inset-ring inset-ring-line transition-[box-shadow,translate] duration-300 ease-out-strong hover:-translate-y-[3px] hover:inset-ring-line-accent">
         <div
-          aria-hidden={interactive ? undefined : true}
+          aria-hidden="true"
           className={cn('relative h-[210px] overflow-hidden rounded-xl bg-canvas', visualClassName)}
         >
           {children}
@@ -92,7 +90,6 @@ export function FeatureGrid() {
             title="Arch was never this easy"
             text="Any window manager, rice, theme or tool: say it out loud and AGIOS puts the system together the way you meant it. Walk through it in the preview before it ever touches your disk."
             visualClassName="h-auto"
-            interactive
           >
             <ArchWayVisual />
           </FeatureCard>
