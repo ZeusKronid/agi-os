@@ -101,7 +101,7 @@ class ProtectedPathTests(unittest.TestCase):
 class LoginReviewTests(unittest.TestCase):
     def test_login_entries_list_exact_commands(self):
         config = config_with(
-            home=[(".config/autostart/sync.desktop", "[Desktop Entry]\nType=Application\nExec=syncthing serve\n"),
+            home=[(".config/autostart/sync.desktop", "[Desktop Entry]\nType=Application\nName=Sync\nExec=syncthing serve\n"),
                   (".config/sway/config", "set $mod Mod4\nexec waybar\nexec_always kanshi\nbindsym $mod+Return exec foot\n"),
                   (".config/hypr/hyprland.conf", "monitor=,preferred,auto,1\nexec-once = mako\n"),
                   (".config/systemd/user/x.service", "[Service]\nExecStart=/usr/bin/x --daemon\n"),

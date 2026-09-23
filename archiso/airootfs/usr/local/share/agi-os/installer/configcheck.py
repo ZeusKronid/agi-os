@@ -157,10 +157,10 @@ def check_desktop(text):
     if not parser.has_section("Desktop Entry"):
         raise ConfigCheckError("нет секции [Desktop Entry]")
     entry = parser["Desktop Entry"]
-    for key in ("Type", "Name"):
-        if not entry.get(key, "").strip():
-            raise ConfigCheckError(f"в [Desktop Entry] нет обязательного ключа {key}")
-    if entry["Type"].strip() == "Application" and not entry.get("Exec", "").strip():
+    # Name is what every reader needs; a missing Type is tolerated (session files often omit it).
+    if not entry.get("Name", "").strip():
+        raise ConfigCheckError("в [Desktop Entry] нет обязательного ключа Name")
+    if entry.get("Type", "Application").strip() == "Application" and not entry.get("Exec", "").strip():
         raise ConfigCheckError("у приложения (Type=Application) нет ключа Exec")
 
 
