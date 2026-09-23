@@ -16,3 +16,7 @@ dist
 *.local
 *.log
 .DS_Store
+
+# design references, not used by the site
+/public/images/*
+!/public/images/agios-logo.svg
