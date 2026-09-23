@@ -5,11 +5,18 @@ import { DocsPage } from '@/pages/docs'
 import { siteConfig } from '@/shared/config'
 
 export const Route = createFileRoute('/docs/')({
-  head: () => ({
-    meta: [
-      { title: `${docIndexPage.short} — ${siteConfig.name} Docs` },
-      { name: 'description', content: docIndexPage.lede },
-    ],
+  // Как в `docs.$slug`: реестр грузится динамически, чтобы тексты документации не попали в entry-чанк.
+  loader: async () => {
+    const { docIndexPage } = await import('@/entities/doc')
+    return { short: docIndexPage.short, lede: docIndexPage.lede }
+  },
+  head: ({ loaderData }) => ({
+    meta: loaderData
+      ? [
+          { title: `${loaderData.short} — ${siteConfig.name} Docs` },
+          { name: 'description', content: loaderData.lede },
+        ]
+      : [],
   }),
   component: DocsIndexRoute,
 })

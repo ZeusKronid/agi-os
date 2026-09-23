@@ -6,7 +6,10 @@ import { siteConfig } from '@/shared/config'
 
 export const Route = createFileRoute('/docs/$slug')({
   // Страницы — статический реестр, поэтому loader только проверяет slug; контент (React-узлы) не сериализуется.
-  loader: ({ params }) => {
+  // Реестр грузится динамически: loader и head не уходят в отдельный чанк, и статический импорт
+  // затащил бы тексты всей документации в entry-чанк каждой страницы сайта.
+  loader: async ({ params }) => {
+    const { findDocPage } = await import('@/entities/doc')
     const page = findDocPage(params.slug)
     if (!page) throw notFound()
     return { slug: page.slug, short: page.short, lede: page.lede }
