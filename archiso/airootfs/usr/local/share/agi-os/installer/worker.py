@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
+from configcheck import tool_checks
 from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
 from system import Catalog, inventory, live_environment, selected_disk
@@ -121,6 +122,51 @@ def write_file(relative, text, mode=0o644):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     path.chmod(mode)
+
+
+CONFIG_CHECK_FAILED = "Проверка файлов настроек, предложенных агентом, не пройдена"
+
+
+def check_generated_files(config, runner):
+    """Run each program's own checker on the files the model wrote (foot -C, sway -C,
+    Hyprland --verify-config…), inside the installed system where the programs exist.
+    A failure stops the preview before it is reported ready; the text goes to the user
+    and back to the model to fix the file."""
+    home = f"/home/{config.username}"
+    problems = []
+    runtime = TARGET / "var/tmp/agi-os-config-check"
+    try:
+        files = [("home", path, f"{home}/{path}") for path, _ in config.home_files]
+        files += [("system", path, "/" + path) for path, _ in config.system_files]
+        for scope, path, absolute in files:
+            for label, binaries, args, as_user in tool_checks(scope, path):
+                binary = next((b for b in binaries if (TARGET / b).is_file()), None)
+                if binary is None:
+                    continue  # The program is not installed: nothing reads this file.
+                command = ["arch-chroot", str(TARGET)]
+                if as_user:
+                    if not runtime.exists():
+                        runtime.mkdir(mode=0o700, parents=True)
+                        runner.run([*command, "chown", f"{config.username}:{config.username}", "/" + str(runtime.relative_to(TARGET))])
+                    # Compositors refuse to start as root and need a runtime directory.
+                    command += ["runuser", "-u", config.username, "--", "env", f"HOME={home}",
+                                "XDG_RUNTIME_DIR=/" + str(runtime.relative_to(TARGET))]
+                try:
+                    runner.run([*command, "/" + binary, *[a.replace("{file}", absolute) for a in args]], timeout=120)
+                except ValidationError as exc:
+                    detail = str(exc).split("\n", 1)[1].strip() if "\n" in str(exc) else str(exc)
+                    where = ("~/" if scope == "home" else "/") + path
+                    problems.append(f"{where} — {label}:\n{detail[-1200:]}")
+        # Keyboard layouts go into the X11/Wayland configuration; an unknown one breaks input.
+        symbols = TARGET / "usr/share/X11/xkb/symbols"
+        if config.session and symbols.is_dir():
+            for layout in config.keyboard_layouts:
+                if not (symbols / layout).is_file():
+                    problems.append(f"Раскладка клавиатуры «{layout}» не найдена в xkeyboard-config")
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+    if problems:
+        raise ValidationError(CONFIG_CHECK_FAILED + ":\n" + "\n\n".join(problems))
 
 
 def preflight(request):
@@ -281,6 +327,7 @@ def install(request, runner):
         for path, content in config.system_files:
             write_file(path, content)
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
+        check_generated_files(config, runner)
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
         kernel_options = "rw"
         if initramfs := initramfs_config(drivers, encrypted):

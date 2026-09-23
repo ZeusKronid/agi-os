@@ -182,6 +182,32 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertFalse(state.public()['can_resume'])
         self.assertTrue(state.public()['can_revert'])
 
+    async def test_failed_file_check_goes_back_to_the_model(self):
+        state = self.app['state']
+        data = DemoProvider().reply('', [])['configuration']
+        data['home_files'] = [{'path': '.config/foot/foot.ini', 'content': '[colors]\nbogus=1\n'}]
+        config = Configuration.parse(data)
+        state.controller.configuration = config
+        state.controller.history = [{'role': 'user', 'content': 'hi'}, {'role': 'assistant', 'content': '{}'}]
+        option = self.fake_plan(state)
+        files = state.public()['files']
+        self.assertEqual(files[0]['display'], '~/.config/foot/foot.ini')
+        self.assertIn('foot', files[0]['checks'])
+        failure = server.CONFIG_CHECK_FAILED + ':\n~/.config/foot/foot.ini — foot:\ninvalid section name: colors'
+        VM = self.fake_vm()
+        async def install(self, *args, **kwargs):
+            raise RuntimeError(failure)
+        async def privileged(script, request):
+            return {'image': {'format': 'qcow2', 'path': '/x.qcow2'}, 'revert': {'kind': 'ram'}}
+        with patch.object(VM, 'install', install), patch.object(server, 'VirtualMachine', VM), \
+             patch.object(server, 'privileged', privileged):
+            await state.build(config, state.current_consent(), option, 'public-test-fixture', '', 4096, 4)
+        self.assertEqual(state.phase, 'error')
+        self.assertEqual(state.error, failure)
+        self.assertEqual(state.controller.history[-1]['role'], 'user')
+        self.assertIn('invalid section name', state.controller.history[-1]['content'])
+        self.assertIn('агента', state.status)
+
     async def test_in_memory_preview_is_forgotten_after_live_restart(self):
         state = self.app['state']
         state.controller.configuration = demo_configuration()
