@@ -8,7 +8,7 @@ ConditionKernelCommandLine=!agios.guest
 Type=simple
 User=agi
 Group=agi
-SupplementaryGroups=kvm render video disk optical
+SupplementaryGroups=kvm render video disk optical systemd-journal
 StateDirectory=agi-os
 Environment=AGIOS_DATA_DIR=/var/lib/agi-os
 Environment=DISPLAY=:0

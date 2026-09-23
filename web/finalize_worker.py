@@ -29,6 +29,7 @@ from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import Configuration, ValidationError
 from hardware import driver_plan, initramfs_config, profile
+from journal import Logger, adopt
 from system import inventory, live_environment, selected_disk
 from worker import CRYPT_NAME, Cancelled, Runner, emit, partition_path
 
@@ -38,6 +39,7 @@ ALIGN = 2048
 SOURCE_MAP = 'agi-final-source'
 TARGET_MAP = 'agi-final-target'
 TYPES = {'bios': 'ef02', 'boot': 'ef00', 'linux': '8300'}
+LOG = Logger('finalize')
 
 
 def run_json(runner, args):
@@ -428,9 +430,14 @@ def main():
     try:
         with open('/run/agi-os-finalize.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            finalize(json.loads(sys.stdin.readline(1000000)), Runner())
+            request = adopt(json.loads(sys.stdin.readline(1000000)))
+            LOG.info('finalize.start', 'Завершение установки', layout=request.get('layout'), target=request.get('target'))
+            finalize(request, Runner(LOG))
+            LOG.info('finalize.done', 'Завершение установки выполнено')
     except Exception as exc:
-        emit('final-error', text=str(exc) if isinstance(exc, ValidationError) else 'Завершение прервано внутренней ошибкой: ' + type(exc).__name__)
+        known = isinstance(exc, ValidationError)
+        LOG.error('finalize.failed', str(exc) if known else 'Внутренняя ошибка завершения', exc=None if known else exc)
+        emit('final-error', text=str(exc) if known else 'Завершение прервано внутренней ошибкой: ' + type(exc).__name__)
         return 1
     return 0
 
