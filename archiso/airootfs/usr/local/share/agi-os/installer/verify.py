@@ -14,8 +14,54 @@ RECORD = Path("/var/lib/agi-os/installation.json")
 
 
 def command(args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 127, ""
     return result.returncode, result.stdout.strip()
+
+
+def conf_values(path):
+    values = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and not key.startswith("#"):
+            values[key] = value.strip().strip('"')
+    return values
+
+
+def normalized_locale(name):
+    # `locale -a` prints ru_RU.utf8 for ru_RU.UTF-8.
+    base, _, codeset = name.partition(".")
+    return base + "." + codeset.lower().replace("-", "") if codeset else base
+
+
+def regional_checks(settings, locale_conf, system_root, graphical):
+    checks = {}
+    formats = [line for line in settings["locale_conf"] if line.startswith("LC_")]
+    if formats:
+        checks["Форматы: " + ", ".join(formats)] = set(formats) <= set(locale_conf)
+    available = {normalized_locale(l) for l in command(["locale", "-a"])[1].splitlines()}
+    checks["Локали сгенерированы: " + ", ".join(settings["locales"])] = all(
+        normalized_locale(l) in available for l in settings["locales"])
+    vconsole = conf_values(system_root / "etc/vconsole.conf")
+    kbd = system_root / "usr/share/kbd"
+    checks["Консоль: раскладка " + settings["keymap"]] = vconsole.get("KEYMAP") == settings["keymap"] and any(
+        kbd.glob(f"keymaps/**/{settings['keymap']}.map.gz"))
+    checks["Консоль: шрифт " + settings["console_font"]] = vconsole.get("FONT") == settings["console_font"] and any(
+        kbd.glob(f"consolefonts/{settings['console_font']}.*"))
+    if graphical and settings["fonts"]:
+        code, families = command(["fc-list", ":", "family"])
+        checks["Шрифты интерфейса установлены"] = code == 0 and bool(families)
+        if settings.get("cyrillic"):
+            checks["Шрифт с кириллицей для интерфейса"] = bool(command(["fc-list", ":lang=ru", "family"])[1])
+    if settings["time_sync"]:
+        checks["Синхронизация времени (NTP)"] = command(["systemctl", "is-enabled", "systemd-timesyncd.service"])[0] == 0
+    return checks
 
 
 def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
@@ -36,7 +82,11 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
     checks["Файловая система"] = command(["findmnt", "-n", "-o", "FSTYPE", "/"])[1] == config["filesystem"]
     checks["Имя компьютера"] = socket.gethostname() == config["hostname"]
     checks["Часовой пояс"] = (system_root / "etc/localtime").resolve() == (system_root / "usr/share/zoneinfo" / config["timezone"]).resolve()
-    checks["Язык системы"] = "LANG=" + config["locale"] in (system_root / "etc/locale.conf").read_text().splitlines()
+    locale_conf = (system_root / "etc/locale.conf").read_text().splitlines()
+    checks["Язык системы"] = "LANG=" + config["locale"] in locale_conf
+    settings = record.get("settings")
+    if settings:
+        checks.update(regional_checks(settings, locale_conf, system_root, bool(config["session"])))
     installed = set(command(["pacman", "-Qq"])[1].splitlines())
     checks["Все выбранные пакеты"] = set(record["packages"]) <= installed
     drivers = record.get("drivers") or {}
