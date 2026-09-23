@@ -81,7 +81,17 @@ flowchart TD
    `XDG_RUNTIME_DIR`), `luac -p`, `bash -n`, `systemd-analyze verify` для
    системных юнитов, а также наличие XKB-раскладок. Ошибка останавливает
    превью до готовности; её текст видит пользователь, и он же уходит модели
-   вместе со следующим сообщением. Для памяти сайт следит за `mm_stat` zram и аккуратно
+   вместе со следующим сообщением.
+   Региональные настройки — поля конфигурации, а не
+   свободный текст: `locale` (LANG) и `locale_overrides` (LC_TIME, LC_NUMERIC…;
+   первый день недели задаёт локаль LC_TIME), `console_keymap`/`console_font`
+   для `vconsole.conf` (пусто — выбор установщика: раскладка с переключением
+   на кириллицу, для русской — Alt+Shift; `cyr-sun16` для кириллических
+   языков, иначе `eurlatgr`; попадают и в initramfs, т.е. в запрос пароля
+   LUKS), `fonts` (пусто при графической сессии — DejaVu + Liberation, Noto
+   CJK для CJK), `time_sync` (systemd-timesyncd). Итоговые значения пишутся в
+   `installation.json` (`settings`) и проверяются `agi-os-verify`.
+   Для памяти сайт следит за `mm_stat` zram и аккуратно
    останавливает установку при нехватке. Запрос установки несёт инвентаризацию
    реального компьютера (`hardware`): `hardware.driver_plan` детерминированно
    выводит из неё микрокод, mesa/vulkan/VA-API по вендору GPU (`nvidia-open`

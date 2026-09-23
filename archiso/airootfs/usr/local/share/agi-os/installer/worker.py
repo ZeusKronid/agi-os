@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 from configcheck import HINTS, tool_checks
-from domain import Configuration, ValidationError, system_path_allowed
+from domain import Configuration, ValidationError, console_font_exists, console_keymap_exists, system_path_allowed
 from hardware import driver_plan, initramfs_config, profile
 from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
@@ -102,7 +102,8 @@ def packages_for(config, hardware, secure_boot=False):
     Secure Boot adds sbctl: own keys, signing and re-signing on every kernel update."""
     packages = [*BASE_PACKAGES, config.filesystem + "-progs" if config.filesystem == "btrfs"
                 else {"ext4": "e2fsprogs", "xfs": "xfsprogs", "f2fs": "f2fs-tools"}[config.filesystem],
-                *config.packages, *driver_plan(hardware, config.packages, config.session)["packages"]]
+                *config.packages, *config.effective_fonts(),
+                *driver_plan(hardware, config.packages, config.session)["packages"]]
     if config.bootloader == "grub":
         packages += ["grub", "efibootmgr"]
     if config.session:
@@ -202,6 +203,15 @@ def check_generated_files(config, runner):
         raise ValidationError(CONFIG_CHECK_FAILED + ":\n" + "\n\n".join(problems))
 
 
+def check_console(config):
+    """The keymap and font must exist in the installed system, not only in Live."""
+    kbd = TARGET / "usr/share/kbd"
+    if not console_keymap_exists(config.effective_keymap(), kbd):
+        raise ValidationError("В установленной системе нет раскладки консоли " + config.effective_keymap())
+    if not console_font_exists(config.effective_console_font(), kbd):
+        raise ValidationError("В установленной системе нет шрифта консоли " + config.effective_console_font())
+
+
 def preflight(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError("Запись дисков разрешена только в загруженной live-системе AGI OS")
@@ -235,8 +245,9 @@ def preflight(request):
             c in passphrase for c in "\n\r\x00"):
         raise ValidationError("Пароль шифрования: от 8 до 512 символов без переносов строк")
     supported = Path("/usr/share/i18n/SUPPORTED").read_text().splitlines()
-    if config.locale + " UTF-8" not in supported:
-        raise ValidationError("Выбранная локаль недоступна")
+    for locale in config.generated_locales():
+        if locale + " UTF-8" not in supported:
+            raise ValidationError("Выбранная локаль недоступна: " + locale)
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("Каталог установки занят предыдущей операцией; нужна проверка её состояния")
     for command in ("sgdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
@@ -351,10 +362,12 @@ def install(request, runner):
         write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]))
         write_file("etc/hostname", config.hostname + "\n")
         write_file("etc/hosts", f"127.0.0.1 localhost\n::1 localhost\n127.0.1.1 {config.hostname}.localdomain {config.hostname}\n")
-        locales = list(dict.fromkeys(["en_US.UTF-8", config.locale]))
-        write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in locales))
-        write_file("etc/locale.conf", "LANG=" + config.locale + "\n")
-        write_file("etc/vconsole.conf", "KEYMAP=us\n")
+        write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in config.generated_locales()))
+        write_file("etc/locale.conf", config.locale_conf())
+        # The console font and keymap also go into the initramfs (keymap/consolefont or
+        # sd-vconsole hooks), so an encryption passphrase is typed with the same keymap.
+        check_console(config)
+        write_file("etc/vconsole.conf", config.vconsole_conf())
         runner.run([*chroot, "ln", "-sf", "/usr/share/zoneinfo/" + config.timezone, "/etc/localtime"])
         runner.run([*chroot, "locale-gen"])
         runner.run([*chroot, "useradd", "--user-group", "--create-home", "--groups", "wheel", "--shell", "/bin/bash", config.username])
@@ -387,8 +400,11 @@ def install(request, runner):
         if encrypted:
             luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip()
             kernel_options = f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME} root={root} rw"
-        for service in dict.fromkeys(["NetworkManager.service", "systemd-timesyncd.service", *drivers["services"], *config.services]):
+        time_sync = ["systemd-timesyncd.service"] if config.time_sync else []
+        for service in dict.fromkeys(["NetworkManager.service", *time_sync, *drivers["services"], *config.services]):
             runner.run([*chroot, "systemctl", "enable", service])
+        if not config.time_sync and "systemd-timesyncd.service" not in config.services:
+            runner.run([*chroot, "systemctl", "disable", "systemd-timesyncd.service"])
         runner.run([*chroot, "systemctl", "set-default", "graphical.target" if config.session else "multi-user.target"])
         if config.session:
             sessions = [TARGET / "usr/share" / directory / (config.session + ".desktop")
@@ -435,7 +451,8 @@ def install(request, runner):
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
                   "firmware": firmware, "encrypted": encrypted, "swap": "zram",
                   "secure_boot": {"signed": True, "enrolled": False} if secure_boot else None,
-                  "hardware": hardware, "drivers": drivers, "status": "first_boot_pending"}
+                  "hardware": hardware, "drivers": drivers, "settings": config.settings_record(),
+                  "status": "first_boot_pending"}
         write_file("var/lib/agi-os/installation.json", json.dumps(record, ensure_ascii=False, indent=2))
         write_file("usr/local/share/agi-os/verify.py", (HERE / "verify.py").read_text())
         write_file("usr/local/bin/agi-os-verify", '#!/bin/sh\nexec python /usr/local/share/agi-os/verify.py "$@"\n', 0o755)

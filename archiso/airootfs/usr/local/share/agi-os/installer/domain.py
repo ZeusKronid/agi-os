@@ -32,7 +32,25 @@ CONFIG_SCHEMA = obj({
         "path": STRING, "content": STRING})},
     "system_files": {"type": "array", "items": obj({"path": STRING, "content": STRING})},
     "requirements": STRINGS,
+    "console_keymap": STRING, "console_font": STRING, "fonts": STRINGS,
+    "locale_overrides": {"type": "array", "items": obj({"variable": STRING, "locale": STRING})},
+    "time_sync": {"type": "boolean"},
 })
+# Fields added after the first release: records and scripted test configurations
+# written before them still parse, with the engine's automatic choices.
+LATER_FIELDS = {"console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True}
+LOCALE = r"(?:[a-z]{2,3}_[A-Z]{2}|C)\.UTF-8"
+LC_VARIABLES = ("LC_ADDRESS", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION", "LC_MEASUREMENT", "LC_MESSAGES",
+                "LC_MONETARY", "LC_NAME", "LC_NUMERIC", "LC_PAPER", "LC_TELEPHONE", "LC_TIME")
+KBD = Path("/usr/share/kbd")
+# Languages and XKB layouts written in Cyrillic: the console needs a Cyrillic font for them.
+CYRILLIC = {"ru", "uk", "ua", "be", "by", "bg", "sr", "rs", "mk", "kk", "kz", "ky", "kg", "mn", "tg", "tj"}
+# UTF-8 console keymaps that keep Latin input and switch to the national layout
+# (ru and mk with Alt+Shift, as on the desktop; ua with Ctrl; bg with Ctrl+Shift).
+CONSOLE_TOGGLE = {"ru": "ruwin_alt_sh-UTF-8", "mk": "mk-utf", "ua": "ua-utf", "bg": "bg_bds-utf8"}
+# XKB layouts whose kbd console keymap has another name.
+XKB_TO_KBD = {"gb": "uk", "se": "sv-latin1", "latam": "la-latin1", "br": "br-abnt2", "pt": "pt-latin1", "jp": "jp106"}
+CJK = {"zh", "ja", "ko"}
 REPLY_SCHEMA = obj({
     "message": STRING, "suggestions": STRINGS, "lookup": STRINGS,
     "configuration": {"anyOf": [CONFIG_SCHEMA, {"type": "null"}]},
@@ -209,6 +227,14 @@ def string_list(value, name, limit=200):
     return [bounded_text(v, name, 2000) for v in value]
 
 
+def console_keymap_exists(name, root=None):
+    return any((root or KBD).glob(f"keymaps/**/{name}.map.gz"))
+
+
+def console_font_exists(name, root=None):
+    return any((root or KBD).glob(f"consolefonts/{name}.psf*")) or ((root or KBD) / f"consolefonts/{name}.gz").is_file()
+
+
 def validate_reply(reply):
     if not isinstance(reply, dict) or set(reply) != set(REPLY_SCHEMA["properties"]):
         raise ValidationError("Провайдер вернул ответ неизвестного формата. Повторите запрос.")
@@ -237,9 +263,16 @@ class Configuration:
     home_files: tuple
     system_files: tuple
     requirements: tuple
+    console_keymap: str = ""
+    console_font: str = ""
+    fonts: tuple = ()
+    locale_overrides: tuple = ()
+    time_sync: bool = True
 
     @classmethod
     def parse(cls, data):
+        if isinstance(data, dict) and set(CONFIG_SCHEMA["properties"]) - set(data) <= set(LATER_FIELDS):
+            data = {**LATER_FIELDS, **data}
         if not isinstance(data, dict) or set(data) != set(CONFIG_SCHEMA["properties"]):
             raise ValidationError("Конфигурация неполна или содержит неизвестные поля")
         for name in ("disk", "filesystem", "bootloader", "hostname", "username", "locale",
@@ -260,20 +293,40 @@ class Configuration:
             raise ValidationError("Некорректное имя компьютера")
         if not re.fullmatch(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8", data["locale"]):
             raise ValidationError("Нужна локаль вида ru_RU.UTF-8 или en_US.UTF-8")
+        for name, kind in (("console_keymap", "раскладка консоли"), ("console_font", "шрифт консоли")):
+            value = data[name]
+            if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,60}", value)):
+                raise ValidationError(f"Некорректное поле: {name}")
+            if value and not (console_keymap_exists if name == "console_keymap" else console_font_exists)(value):
+                raise ValidationError(f"Неизвестная {kind}: {value}. Оставьте пустую строку для выбора установщика")
+        overrides = data["locale_overrides"]
+        if not isinstance(overrides, list) or len(overrides) > len(LC_VARIABLES):
+            raise ValidationError("Некорректный список форматов LC_*")
+        for item in overrides:
+            if not isinstance(item, dict) or set(item) != {"variable", "locale"} or item["variable"] not in LC_VARIABLES:
+                raise ValidationError("Форматы задаются переменными LC_TIME, LC_NUMERIC и другими LC_* (кроме LC_ALL)")
+            if not isinstance(item["locale"], str) or not re.fullmatch(LOCALE, item["locale"]):
+                raise ValidationError("Для LC_* нужна локаль вида en_GB.UTF-8 или C.UTF-8")
+        if len({item["variable"] for item in overrides}) != len(overrides):
+            raise ValidationError("Повторяющиеся переменные LC_*")
+        if not isinstance(data["time_sync"], bool):
+            raise ValidationError("Некорректное поле: time_sync")
         zone = Path("/usr/share/zoneinfo") / data["timezone"]
         if not zone.resolve().is_relative_to(Path("/usr/share/zoneinfo")) or not zone.is_file():
             raise ValidationError("Неизвестный часовой пояс")
         for name, limit in (("packages", 300), ("services", 30), ("keyboard_layouts", 8),
-                            ("requirements", 40)):
+                            ("requirements", 40), ("fonts", 20)):
             string_list(data[name], name, limit)
         if not data["keyboard_layouts"] or any(not re.fullmatch(r"[a-z]{2,5}", k)
                                                 for k in data["keyboard_layouts"]):
             raise ValidationError("Укажите XKB-раскладки, например us и ru")
         if not data["requirements"]:
             raise ValidationError("Нужен список требований для проверки готовой системы")
-        for package in data["packages"]:
+        for package in (*data["packages"], *data["fonts"]):
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@._+:-]{0,120}", package):
                 raise ValidationError("Некорректное имя пакета")
+        if any(not re.fullmatch(r"(?:ttf|otf)-.+|.*fonts?(?:-.+)?", font) for font in data["fonts"]):
+            raise ValidationError("В fonts указываются только пакеты шрифтов (ttf-*, otf-*, *-fonts…); остальное — в packages")
         for service in data["services"]:
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@_.-]{0,120}\.service", service):
                 raise ValidationError("Некорректное имя службы")
@@ -308,16 +361,18 @@ class Configuration:
             if len({p for p, _ in files}) != len(files):
                 raise ValidationError("Повторяющиеся файлы настроек")
             values[name] = tuple(files)
-        for name in ("packages", "services", "keyboard_layouts", "requirements"):
+        for name in ("packages", "services", "keyboard_layouts", "requirements", "fonts"):
             values[name] = tuple(dict.fromkeys(values[name]))
+        values["locale_overrides"] = tuple((item["variable"], item["locale"]) for item in overrides)
         return cls(**values)
 
     def as_dict(self):
         result = dataclasses.asdict(self)
-        for name in ("packages", "services", "keyboard_layouts", "requirements"):
+        for name in ("packages", "services", "keyboard_layouts", "requirements", "fonts"):
             result[name] = list(result[name])
         result["home_files"] = [{"path": p, "content": c} for p, c in self.home_files]
         result["system_files"] = [{"path": p, "content": c} for p, c in self.system_files]
+        result["locale_overrides"] = [{"variable": v, "locale": l} for v, l in self.locale_overrides]
         return result
 
     def login_entries(self):
@@ -338,6 +393,51 @@ class Configuration:
                                         "why": why, "commands": commands})
                     break
         return entries
+    def languages(self):
+        return {self.locale.split("_")[0], *(l.split("_")[0] for _, l in self.locale_overrides), *self.keyboard_layouts}
+
+    def effective_keymap(self):
+        """The console keymap: the user's choice, else one that also types the chosen
+        Cyrillic layout, else the first layout when kbd has a keymap of that name."""
+        if self.console_keymap:
+            return self.console_keymap
+        for layout in self.keyboard_layouts:
+            if layout in CONSOLE_TOGGLE:
+                return CONSOLE_TOGGLE[layout]
+        first = XKB_TO_KBD.get(self.keyboard_layouts[0], self.keyboard_layouts[0])
+        return first if first != "us" and console_keymap_exists(first) else "us"
+
+    def effective_console_font(self):
+        """cyr-sun16 shows Cyrillic in the console; eurlatgr covers Latin and Greek."""
+        return self.console_font or ("cyr-sun16" if self.languages() & CYRILLIC else "eurlatgr")
+
+    def effective_fonts(self):
+        """Font packages. Without an explicit choice a graphical system gets DejaVu (Latin,
+        Cyrillic, Greek) and metric-compatible Liberation, plus Noto CJK for CJK languages."""
+        fonts = list(self.fonts)
+        if self.session and not fonts:
+            fonts = ["ttf-dejavu", "ttf-liberation"]
+            if self.languages() & CJK:
+                fonts.append("noto-fonts-cjk")
+        if self.effective_console_font().startswith("ter-"):
+            fonts.append("terminus-font")
+        return list(dict.fromkeys(fonts))
+
+    def generated_locales(self):
+        return list(dict.fromkeys(["en_US.UTF-8", self.locale, *(l for _, l in self.locale_overrides if l != "C.UTF-8")]))
+
+    def locale_conf(self):
+        return "".join(f"{k}={v}\n" for k, v in (("LANG", self.locale), *self.locale_overrides))
+
+    def vconsole_conf(self):
+        return f"KEYMAP={self.effective_keymap()}\nFONT={self.effective_console_font()}\n"
+
+    def settings_record(self):
+        """Resolved regional settings stored in the installation record for agi-os-verify."""
+        return {"keymap": self.effective_keymap(), "console_font": self.effective_console_font(),
+                "fonts": self.effective_fonts(), "locales": self.generated_locales(),
+                "locale_conf": self.locale_conf().splitlines(), "time_sync": self.time_sync,
+                "cyrillic": bool(self.languages() & CYRILLIC)}
 
     def digest(self):
         return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True).encode()).hexdigest()
@@ -353,6 +453,12 @@ class Configuration:
             f"Окружение: {self.desktop}; сессия: {self.session or 'консоль'}",
             f"Компьютер: {self.hostname}; пользователь: {self.username} (sudo с паролем)",
             f"Язык: {self.locale}; раскладки: {', '.join(self.keyboard_layouts)}; время: {self.timezone}",
+            "Форматы (LC_*): " + (", ".join(f"{v}={l}" for v, l in self.locale_overrides) or "как у языка системы"),
+            f"Синхронизация времени (NTP): {'включена' if self.time_sync else 'выключена'}",
+            f"Консоль: раскладка {self.effective_keymap()}{'' if self.console_keymap else ' (автоматически)'}, "
+            f"шрифт {self.effective_console_font()}{'' if self.console_font else ' (автоматически)'}",
+            "Шрифты: " + (", ".join(self.effective_fonts()) or "не нужны (консоль)")
+            + ("" if self.fonts or not self.session else " (автоматически)"),
             f"Пакеты: {', '.join(self.packages) or 'только базовая система'}",
             f"Службы: {', '.join(self.services) or 'только базовые'}",
             "Требования:\n" + "\n".join(f"• {r}" for r in self.requirements),
@@ -411,6 +517,21 @@ greeter commands) is shown to the user in a separate review they must confirm:
 keep it to what the user asked for and explain each command in your message.
 The engine writes etc/vconsole.conf itself. session is the installed desktop-file
 basename without .desktop, or an empty string for console. Do not add autologin or passwordless sudo.
+Regional settings are structured fields the app applies and verifies, so ask about
+them only when the user's wishes are unclear and put every agreed choice there:
+locale is LANG; locale_overrides sets LC_* variables (LC_TIME, LC_NUMERIC,
+LC_MONETARY, LC_PAPER, LC_MEASUREMENT…) to other UTF-8 locales, e.g. English
+messages with Russian dates and units, or LC_TIME=en_GB.UTF-8 for an English
+calendar whose week starts on Monday (the first day of the week comes from LC_TIME).
+console_keymap and console_font configure the text console (vconsole.conf) and
+the encryption passphrase prompt; use "" to let the app choose: a keymap that also
+types the chosen Cyrillic layout (Russian: Alt+Shift), and cyr-sun16 for Cyrillic
+languages or eurlatgr otherwise. Use kbd names, e.g. de-latin1 or ter-v32n for a
+large HiDPI console. fonts lists font packages for graphical systems (ttf-*,
+otf-*, *-fonts: emoji, CJK, Nerd Fonts…); [] means the app adds DejaVu and
+Liberation, plus Noto CJK for Chinese/Japanese/Korean. Fontconfig preferences go
+to system_files etc/fonts/local.conf. time_sync enables NTP time synchronization
+(true unless the user declines). keyboard_layouts are the desktop XKB layouts.
 The current executable storage handlers support whole-disk erase with GPT;
 ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
 device by default (no swap partition, no hibernation). Full-root LUKS2 encryption

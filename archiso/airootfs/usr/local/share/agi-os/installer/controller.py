@@ -74,7 +74,7 @@ class Controller:
                     selected_disk(self.snapshot, config.disk)
                     if self.snapshot["firmware"] == "bios" and config.bootloader != "grub":
                         raise ValidationError("В BIOS нужен GRUB")
-                    self.catalog.validate(config.packages)
+                    self.catalog.validate([*config.packages, *config.effective_fonts()])
                 except ValidationError as exc:
                     self.history.append({"role": "user", "content": "Application validation rejected proposal: " + str(exc)})
                     self.notify("status", "Уточняю конфигурацию: " + str(exc))
@@ -110,4 +110,5 @@ class DemoProvider:
                     "packages": ["sway", "foot", "firefox", "greetd", "greetd-regreet", "cage"],
                     "services": ["greetd.service"], "home_files": [], "system_files": [],
                     "requirements": ["Рабочая сессия Sway", "Браузер Firefox", "Русская и английская раскладки"],
+                    "console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
                 }}
