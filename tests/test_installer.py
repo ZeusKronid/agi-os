@@ -28,7 +28,7 @@ class ConfigurationTests(unittest.TestCase):
         for environment in ("Hyprland", "Sway", "i3", "Cinnamon", "LXQt", "MATE", "Enlightenment", "custom"):
             data = specification()
             data["desktop"] = environment
-            data["system_files"] = [{"path": "etc/greetd/config.toml", "content": "custom greeter config"}]
+            data["system_files"] = [{"path": "etc/greetd/config.toml", "content": "[terminal]\nvt = 1\n"}]
             config = Configuration.parse(data)
             self.assertEqual(config.desktop, environment)
             self.assertEqual(config, Configuration.parse(json.loads(json.dumps(config.as_dict()))))

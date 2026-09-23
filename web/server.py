@@ -15,7 +15,8 @@ sys.path.insert(0, str(ENGINE))
 from controller import Controller
 from domain import Configuration, ValidationError
 from providers import APIProvider, ProviderError, PROVIDERS
-from worker import packages_for
+from worker import CONFIG_CHECK_FAILED, packages_for
+from configcheck import summary as file_checks
 from hardware import describe, driver_plan, profile, virtual
 from runtime import VirtualMachine
 from guacamole import tunnel
@@ -92,7 +93,10 @@ class State:
             self.messages = data['messages']
             self.controller.history = data['history']
             if data.get('configuration'):
-                self.controller.configuration = Configuration.parse(data['configuration'])
+                try:
+                    self.controller.configuration = Configuration.parse(data['configuration'])
+                except ValidationError:
+                    pass  # Stricter checks of a newer engine: the proposal must be agreed again.
             self.saved_vm = data.get('vm')
             self.disk_ready = data.get('disk_ready', False)
             self.built = data.get('built')
@@ -136,6 +140,7 @@ class State:
                 'firmware': snapshot['firmware'], 'orphans': orphan_previews(snapshot, current),
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
+                'files': config_files(config),
                 'summary': config.summary(consent['disk'], snapshot['hardware']) if config and consent and 'disk' in consent else None,
                 'hardware': self.hardware_public(config),
                 'consent': consent, 'plan': self.plan, 'events': self.events[-100:], 'running': running,
@@ -203,12 +208,27 @@ class State:
         except Exception as exc:
             self.phase, self.status = 'error', 'Установка не завершена'
             self.error = self.error or str(exc) or 'Превышено время ожидания VM'
+            if str(exc).startswith(CONFIG_CHECK_FAILED):
+                # The model wrote these files: it receives the checker output with the next message.
+                self.controller.report_check_failure(str(exc))
+                self.status = 'Файлы настроек не прошли проверку. Попросите агента исправить их — он видит ошибку.'
         finally:
             password = passphrase = None
             if watchdog:
                 watchdog.cancel()
             self.controller.installing = False
             self.persist()
+
+
+def config_files(config):
+    """The files the model wrote, for a separate review block: the user sees exactly
+    what lands on disk and which checks guard it."""
+    if not config:
+        return []
+    return [{'scope': scope, 'path': path, 'display': prefix + path, 'content': content,
+             'checks': file_checks(scope, path)}
+            for scope, prefix, files in (('home', '~/', config.home_files), ('system', '/', config.system_files))
+            for path, content in files]
 
 
 @web.middleware
