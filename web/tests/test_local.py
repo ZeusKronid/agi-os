@@ -291,6 +291,21 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         self.assertTrue(public['can_revert'])
         self.assertEqual(public['found'], [])
         self.assertEqual(state.preview['record']['status'], 'ready')
+        self.assertFalse(state.built['secure_boot'])
+
+    async def test_continue_keeps_the_secure_boot_signature(self):
+        state = self.app['state']
+        entry = self.found('ready', secure_boot=True)
+        state.found = [entry]
+        async def privileged(script, request):
+            if request['op'] == 'adopt':
+                return {'image': {'format': 'raw', 'path': '/dev/vda2'}, 'medium': 'Disk', 'record': entry['record'],
+                        'revert': {'kind': 'partition', 'disk': '/dev/vda', 'device': '/dev/vda2'}}
+            return {'marked': True}
+        with patch.object(server, 'VirtualMachine', self.fake_vm()), patch.object(server, 'privileged', privileged):
+            response = await self.request('/api/previews/continue', {'id': 'partition:/dev/vda2'})
+        self.assertEqual(response.status, 200)
+        self.assertTrue(state.built['secure_boot'])
 
     async def test_continue_refuses_unfinished_or_foreign_previews(self):
         state = self.app['state']

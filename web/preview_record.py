@@ -85,6 +85,8 @@ def clean(record):
         'error': text(record.get('error'), 1500) or None,
         'configuration': config.as_dict(),
         'encrypted': record.get('encrypted') is True,
+        # Signed for Secure Boot in the preview (CMP-121); absent in older records.
+        'secure_boot': record.get('secure_boot') is True,
         'firmware': 'bios' if record.get('firmware') == 'bios' else 'uefi',
         'target': {k: text(target.get(k), 200) if k != 'size' else integer(target.get('size'))
                    for k in ('path', 'size', 'model', 'serial', 'wwn')},
