@@ -176,6 +176,17 @@ $('revert').onclick = async () => {
     try {render(await api('revert', {}));} catch (error) {showError(error);} finally {$('revert').disabled = false;}
 };
 $('settingsButton').onclick = () => $('settings').showModal();
+$('diagnosticsButton').onclick = async () => {
+    const button = $('diagnosticsButton'); button.disabled = true; button.textContent = 'Собираю…';
+    try {
+        const response = await fetch('/api/diagnostics', {method: 'POST', headers: {'X-AGIOS': 'local'}});
+        if (!response.ok) throw new Error('Не удалось собрать диагностику: ' + (await response.text()).slice(0, 300));
+        const name = (response.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/);
+        const link = document.createElement('a'); link.href = URL.createObjectURL(await response.blob());
+        link.download = name ? name[1] : 'agios-diagnostics.tar.gz'; document.body.append(link); link.click();
+        setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+    } catch (error) { showError(error); } finally { button.disabled = false; button.textContent = 'Диагностика'; }
+};
 $('closeSettings').onclick = () => $('settings').close();
 $('providerForm').onsubmit = async event => {
     event.preventDefault();
