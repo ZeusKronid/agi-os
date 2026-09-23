@@ -14,7 +14,7 @@ preview_record.py) so that a restarted Live can find it again: scan lists the
 previews on this computer's media, adopt reattaches one, remove undoes one found
 after a restart and mark updates the record of the active preview.
 
-The caller (the website, user agi) is not trusted: every request is checked
+The caller (the website, user agi-web) is not trusted: every request is checked
 against a strict schema and a fresh inventory, devices are re-derived from the
 option id instead of taken from the request, and only partitions this helper
 labelled AGIOS-PREVIEW are ever deleted. See docs/root-helpers-threat-model.md.
@@ -41,7 +41,7 @@ from preview_record import (FILE_LIMIT, GAP_BYTES, GAP_END, GAP_START, clean, de
                             encode_file, encode_gap)
 
 # Mount points and GPT backups live in a root-owned runtime directory, never in the
-# site's writable data directory: user agi must not be able to swap them for symlinks.
+# site's writable data directory: the site must not be able to swap them for symlinks.
 PREVIEW = Path('/run/agi-os-preview')
 SECTOR = 512
 MIB = 2**20
@@ -177,8 +177,9 @@ def shrink_room(partition):
 # ---- Input validation: the request comes from an unprivileged process ----
 
 REQUEST_KEYS = {
-    'probe': ({'op', 'needed', 'target', 'vm_memory'}, {'compression'}),
-    'prepare': ({'op', 'option', 'needed', 'target', 'vm_memory'}, {'compression'}),
+    # sparse: bytes of a reserved but unwritten hibernation swap file (CMP-120), 0..needed.
+    'probe': ({'op', 'needed', 'target', 'vm_memory'}, {'compression', 'sparse'}),
+    'prepare': ({'op', 'option', 'needed', 'target', 'vm_memory'}, {'compression', 'sparse'}),
     'revert': ({'op', 'state'}, set()),
     'scan': ({'op'}, set()),
     'adopt': ({'op', 'id'}, set()),
@@ -225,6 +226,8 @@ def sizing(request):
     compression = request.get('compression', COMPRESSION)
     if type(compression) not in (int, float) or not math.isfinite(compression) or not 1 <= compression <= 4:
         raise ValidationError('Некорректное значение compression')
+    if 'sparse' in request:
+        whole(request['sparse'], 'sparse', 0, needed)
     return needed, target, vm_memory, float(compression)
 
 
@@ -233,7 +236,9 @@ def private_dir(path):
     path.mkdir(mode=0o755, parents=True, exist_ok=True)
     info = os.lstat(path)
     if stat_module.S_ISDIR(info.st_mode) and os.path.ismount(path):
-        return path  # A medium mounted on our own mount point: its root belongs to the medium.
+        # A medium mounted on our own mount point: its root belongs to the medium. Safe because the
+        # mount point's directory entry lives in root-owned PREVIEW and cannot be swapped by the site.
+        return path
     if not stat_module.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
         raise ValidationError(f'Небезопасный служебный каталог {path}')
     if info.st_mode & 0o777 != 0o755:
@@ -348,7 +353,7 @@ def preview_partition(snapshot, disk_path, device):
 
 
 def checked_state(state, snapshot):
-    """Check a revert record kept by the site (and therefore writable by user agi)."""
+    """Check a revert record kept by the site (and therefore writable by the site's user)."""
     if not isinstance(state, dict) or not isinstance(state.get('kind'), str) or state['kind'] not in STATE_KEYS:
         raise ValidationError('Неизвестный вид хранилища превью')
     kind = state['kind']
