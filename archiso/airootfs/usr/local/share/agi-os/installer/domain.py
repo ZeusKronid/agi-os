@@ -132,6 +132,17 @@ def program_lines(content):
             if line.strip() and not line.lstrip().startswith(("#", "--", "//"))]
 
 
+RUNS_PROGRAM = re.compile(r"\b(?:exec\w*|spawn\w*|popen|execute|system|subprocess|run_process)\b", re.I)
+KEYBINDING = re.compile(r"\bbind\w*\s*\(|\bKey\s*\(|\bawful\.key\b|\bbindsym\b|\bbindcode\b", re.I)
+
+
+def code_run_lines(content):
+    """Lines of a configuration written as a program (Lua/Python) that start other
+    programs, except key bindings, which run only when the user presses them."""
+    return [line.strip() for line in program_lines(content)
+            if RUNS_PROGRAM.search(line) and not KEYBINDING.search(line)]
+
+
 def ini_section(section):
     def extract(content):
         lines, inside = [], False
@@ -154,7 +165,7 @@ LOGIN_RULES = (
     (("~/.config/systemd/user",), "Служба systemd пользователя: запускается от вашего имени",
      exec_lines(r"^\s*(Exec[A-Za-z]*\s*=\s*.+)$")),
     (("~/.config/hypr",), "Hyprland выполняет эти команды при входе",
-     exec_lines(r"^\s*(exec(?:-once|-shutdown)?\s*=\s*.+)$")),
+     lambda content: exec_lines(r"^\s*(exec(?:-once|-shutdown)?\s*=\s*.+)$")(content) + code_run_lines(content)),
     (("~/.config/sway", "etc/sway", "~/.config/i3", "etc/i3"),
      "Оконный менеджер выполняет эти команды при входе", exec_lines(r"^\s*(exec(?:_always)?\s+.+)$")),
     (("~/.config/niri", "etc/niri"), "niri выполняет эти команды при входе",
@@ -163,8 +174,8 @@ LOGIN_RULES = (
     (("~/.config/labwc/autostart", "~/.config/openbox/autostart", "~/.config/river/init",
       "~/.config/bspwm/bspwmrc", "~/.config/plasma-workspace/env", "~/.config/plasma-workspace/shutdown",
       "~/.config/autostart-scripts"), "Сценарий оболочки, выполняемый при входе целиком", program_lines),
-    (("~/.config/awesome", "~/.config/qtile"), "Конфигурация — программа (Lua/Python), выполняется при входе",
-     program_lines),
+    (("~/.config/awesome", "~/.config/qtile"),
+     "Конфигурация — программа (Lua/Python); строки, запускающие программы при входе", code_run_lines),
     (("~/.config/fish",), "Код оболочки fish: выполняется при каждом запуске терминала", program_lines),
     (("etc/greetd",), "Экран входа greetd запускает эту команду при загрузке",
      exec_lines(r"^\s*(command\s*=\s*.+)$")),
@@ -300,7 +311,11 @@ class Configuration:
         for path, content in files:
             for prefixes, why, extract in LOGIN_RULES:
                 if under(path, prefixes):
-                    commands = extract(content)
+                    if path.endswith((".sh", ".bash")):
+                        # A script next to a login configuration is shown whole:
+                        # the configuration may start it and then every line runs.
+                        why, extract = "Сценарий оболочки рядом с настройками входа (показан целиком)", program_lines
+                    commands = list(dict.fromkeys(extract(content)))
                     if commands:
                         entries.append({"path": path if path.startswith("~/") else "/" + path,
                                         "why": why, "commands": commands})
