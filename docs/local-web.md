@@ -86,6 +86,10 @@ connect a provider.
 - `agi-guest.service`: the installer inside the inner VM only.
 - `agi-qa.service`: test instrumentation, active only with the fw_cfg marker
   (runs as root there; it never starts on real hardware).
+- ChatGPT sign-in: `openai-codex` is present only as the provider backend. The
+  site starts `codex app-server` inside bubblewrap with an ephemeral home, no
+  shell tool and a read-only sandbox. The Live image ships no Codex terminal
+  entry, Codex configuration or agent instructions for a terminal session.
 
 Privileges in Live (`etc/sudoers.d/10-agi-live`): only `agi-web` may use sudo,
 and only for the exact command lines the site runs — the two root helpers,
