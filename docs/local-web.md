@@ -97,6 +97,14 @@ autologin of `agi` is the only login, there is no root autologin on a console.
 Because the site has no desktop session, the ChatGPT sign-in page is opened by
 the site's own browser tab (`login_url` in `/api/state`), not by `xdg-open`.
 
+What this does not cover (see the root helpers' threat model): the site's API
+on `127.0.0.1:8787` is local-only, not per-user, so any process of `agi` can
+drive the site — including the consented disk operations — and read
+`login_url`; `agi-web` holds the `disk` group, which QEMU needs for a partition
+preview and which is close to root. With every password locked there is no
+rescue login on a text console of Live; debugging is done on test stands
+(`agi-qa.service`).
+
 Session state lives in `/var/lib/agi-os`. After a Live restart an in-memory
 preview is gone (nothing was on disk); file/partition previews are kept.
 
