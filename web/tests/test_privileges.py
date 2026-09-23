@@ -79,6 +79,11 @@ class SudoersTests(unittest.TestCase):
         state = type('S', (), {})()
         state.final, state.status, state.phase = {}, '', ''
         state.persist = lambda: None
+        state.preview = None
+
+        async def save_record(*args, **kwargs):  # CMP-119: the preview record is written first
+            pass
+        state.save_record = save_record
         state.controller = type('C', (), {'installing': True})()
 
         async def refuse(*argv, **kwargs):

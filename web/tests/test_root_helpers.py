@@ -356,6 +356,51 @@ class PrepareTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls if c[0] == 'sgdisk'])
 
 
+class RestartOperationTests(unittest.TestCase):
+    """scan / adopt / remove / mark (CMP-119) behind the same checks."""
+
+    def test_schemas(self):
+        for request in ({'op': 'scan', 'extra': 1}, {'op': 'adopt'}, {'op': 'remove', 'id': 'x', 'state': {}},
+                        {'op': 'mark', 'record': {}}):
+            with self.assertRaises(ValidationError, msg=request):
+                storage_worker.checked_request(request)
+        for request in ({'op': 'scan'}, {'op': 'adopt', 'id': 'partition:/dev/sda2'}, {'op': 'remove', 'id': 'file:/dev/sdc1'},
+                        {'op': 'mark', 'record': {}, 'revert': {}}):
+            storage_worker.checked_request(request)
+
+    def test_found_ids_must_be_text(self):
+        with Environment():
+            for found in (None, 5, ['partition:/dev/sda2'], {'id': 'x'}):
+                with self.assertRaises(ValidationError):
+                    storage_worker.locate(found)
+
+    def test_mark_writes_only_into_a_free_preview_partition(self):
+        from test_preview_record import sample_record
+        with Environment(), patch.object(storage_worker, 'gap_free', return_value=True), \
+                patch.object(storage_worker, 'write_gap') as write:
+            for revert in ({'kind': 'partition', 'device': '/dev/sdc1'}, {'kind': 'shrink', 'device': '/dev/sdb1'},
+                           {'kind': 'erase', 'device': '/etc/passwd'}, {'kind': 'partition'}, [], 'partition', None):
+                with self.assertRaises(ValidationError, msg=revert):
+                    storage_worker.mark({'record': sample_record(), 'revert': revert})
+            write.assert_not_called()
+            storage_worker.mark({'record': sample_record(), 'revert': {'kind': 'partition', 'device': '/dev/sdc2'}})
+        self.assertEqual(write.call_args.args[0], '/dev/sdc2')
+
+    def test_removing_a_found_file_preview_keeps_other_user_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / 'media/AGIOS-PREVIEW'
+            folder.mkdir(parents=True)
+            for name in ('preview.qcow2', 'preview.json', 'holiday.jpg'):
+                (folder / name).write_bytes(b'x')
+            state = {'kind': 'file', 'device': '/dev/sdc1', 'mount': str(root / 'media'), 'folder': str(folder)}
+            with Environment(), patch.object(storage_worker, 'PREVIEW', root), \
+                    patch.object(storage_worker, 'mount_source', return_value='/dev/sdc1'), \
+                    patch.object(storage_worker, 'sh'), patch.object(storage_worker.subprocess, 'run'):
+                storage_worker.revert({'state': state})
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), ['holiday.jpg'])
+
+
 class BlankDiskTests(unittest.TestCase):
     def test_signature_less_data_is_not_free_space(self):
         with tempfile.NamedTemporaryFile() as image:
@@ -529,6 +574,25 @@ class FuzzTests(unittest.TestCase):
                     self.assertNotIn('no command may run', answer['error'])
                 else:  # only a fully valid preview-partition record gets through, and it deletes that one
                     self.assertTrue(answer['result']['reverted'])
+
+    def test_mark_requests(self):
+        from test_preview_record import sample_record
+        rng = random.Random(1352)
+        record = sample_record()
+        written = []
+        with Environment(), patch.object(storage_worker, 'gap_free', return_value=True), \
+                patch.object(storage_worker, 'write_gap', side_effect=lambda device, frame: written.append(device)), \
+                patch.object(storage_worker.os.path, 'ismount', return_value=False):
+            for _ in range(self.ROUNDS // 3):
+                state = mutate(rng.choice(list(VALID_STATES.values())), rng)
+                try:
+                    storage_worker.mark({'record': record, 'revert': state})
+                except ValidationError:
+                    pass
+                except Exception as exc:
+                    self.fail(f'{type(exc).__name__}: {exc} for {state!r}')
+        self.assertTrue(written)
+        self.assertLessEqual(set(written), ALLOWED['preview'])
 
     def test_finalize_requests(self):
         rng = random.Random(1351)

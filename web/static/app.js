@@ -88,17 +88,7 @@ function render(state) {
     $('stop').disabled = finalizing;
     $('resume').disabled = finalizing;
     renderHardware(state.hardware);
-    $('orphans').hidden = !state.orphans || !state.orphans.length;
-    if (state.orphans && state.orphans.length && $('orphanList').dataset.key !== JSON.stringify(state.orphans)) {
-        $('orphanList').dataset.key = JSON.stringify(state.orphans); $('orphanList').replaceChildren();
-        for (const orphan of state.orphans) {
-            const row = document.createElement('div'); row.className = 'actions';
-            const text = document.createElement('span'); text.textContent = `${orphan.device} · ${gib(orphan.size)} на ${orphan.disk}`;
-            const button = document.createElement('button'); button.className = 'quiet'; button.textContent = 'Убрать раздел превью';
-            button.onclick = async () => { if (!confirm('Удалить временный раздел ' + orphan.device + '?')) return; try { render(await api('orphans/remove', {device: orphan.device})); } catch (error) { showError(error); } };
-            row.append(text, button); $('orphanList').append(row);
-        }
-    }
+    renderFound(state);
     $('previewInfo').hidden = !state.built || state.final.phase === 'complete';
     if (state.built) { $('previewStorage').textContent = state.built.storage || ''; $('previewRevertHint').textContent = 'Превью можно убрать в любой момент: ' + (state.built.revert || '') + '. Диск ' + state.built.target + ' ещё не менялся' + (state.built.on_target ? ', кроме одной временной записи раздела' : '') + '.'; }
     $('revert').disabled = !state.can_revert;
@@ -123,6 +113,37 @@ function render(state) {
     $('finalDone').hidden = state.final.phase !== 'complete';
     $('finalDoneTitle').textContent = warnings.length ? 'Система установлена на диск компьютера — с замечаниями (см. выше)' : 'Система установлена на диск компьютера';
     updateLayoutWarning();
+}
+const foundStatus = {ready: 'Установлено в превью', finalizing: 'Установка на диск была прервана — успех не подтверждён', installing: 'Установка в превью прервана — не завершена', failed: 'Установка в превью не завершена'};
+function foundAction(label, path, item, question, quiet) {
+    const button = document.createElement('button'); button.textContent = label; if (quiet) button.className = 'quiet';
+    button.onclick = async () => { if (question && !confirm(question)) return; try { render(await api(path, {id: item.id})); } catch (error) { showError(error); } };
+    return button;
+}
+function renderFound(state) {
+    const found = state.found || [];
+    $('orphans').hidden = !found.length && !state.scan_error;
+    $('scanError').hidden = !state.scan_error; $('scanError').textContent = state.scan_error || '';
+    const key = JSON.stringify(found);
+    if ($('orphanList').dataset.key === key) return;
+    $('orphanList').dataset.key = key; $('orphanList').replaceChildren();
+    for (const item of found) {
+        const row = document.createElement('div'); row.className = 'found';
+        const title = document.createElement('b');
+        title.textContent = item.title || (item.kind === 'file' ? 'Файл превью' : 'Раздел превью');
+        const where = document.createElement('small');
+        where.textContent = (item.kind === 'file' ? 'Файл AGIOS-PREVIEW/preview.qcow2 на ' : 'Раздел ') + item.device + ' · ' + gib(item.size) + ' · ' + (item.medium || item.disk)
+            + (item.created ? ' · создано ' + item.created.replace('T', ' ').slice(0, 16) : '');
+        const status = document.createElement('small');
+        status.textContent = item.status ? foundStatus[item.status] + (item.target ? ' · конечный диск ' + item.target : '') + (item.encrypted ? ' · корень зашифрован' : '') + (item.error ? ' · ' + item.error : '') : item.problem;
+        row.append(title, where, status);
+        if (item.journal && item.journal.length) { const log = document.createElement('pre'); log.textContent = item.journal.join('\n'); row.append(log); }
+        const actions = document.createElement('div'); actions.className = 'actions';
+        if (item.can_continue) actions.append(foundAction('Продолжить превью', 'previews/continue', item));
+        if (item.can_retry) actions.append(foundAction('Повторить установку', 'previews/retry', item, 'Временное хранилище ' + item.device + ' будет убрано, конфигурация вернётся к расчёту места. Продолжить?'));
+        if (item.can_remove) actions.append(foundAction('Убрать', 'previews/remove', item, (item.kind === 'file' ? 'Удалить папку AGIOS-PREVIEW на ' : 'Удалить временный раздел ') + item.device + '? Остальные данные не меняются.', true));
+        row.append(actions); $('orphanList').append(row);
+    }
 }
 let lastHardware = '';
 function renderHardware(hardware) {
@@ -170,6 +191,7 @@ $('buildForm').onsubmit = async event => {
 };
 $('stop').onclick = async () => {try {render(await api('stop', {}));} catch (error) {showError(error);}};
 $('resume').onclick = async () => {try {render(await api('resume', {}));} catch (error) {showError(error);}};
+$('rescan').onclick = async () => {try {render(await api('previews/scan', {}));} catch (error) {showError(error);}};
 $('revert').onclick = async () => {
     if (!confirm('Убрать превью и вернуть носители в исходное состояние?')) return;
     $('revert').disabled = true;
