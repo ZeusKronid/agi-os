@@ -22,7 +22,7 @@ from pathlib import Path
 from configcheck import HINTS, tool_checks
 from domain import (GIB, SWAPFILE, Configuration, ValidationError, console_font_exists, console_keymap_exists,
                     hibernation_swap_size, system_path_allowed)
-from hardware import driver_plan, initramfs_config, profile
+from hardware import driver_plan, initramfs_config, profile, virtual
 from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
 import update
@@ -164,6 +164,18 @@ def first_extent_offset(filefrag):
     if not block or not first:
         raise ValidationError("Не удалось определить положение swap-файла на диске (resume_offset)")
     return int(first.group(1)) * int(block.group(1)) // PAGE
+
+
+HIBERNATE_MODE_FILE = "etc/systemd/sleep.conf.d/agi-os-hibernate.conf"
+
+
+def hibernate_mode(hardware):
+    """How the computer powers off after writing the hibernation image. QEMU/KVM treat
+    ACPI S4 as an asynchronous power-off request: the guest kernel sees the sleep call
+    return, takes it for a wake-up, rolls the hibernation back and erases the image
+    signature before the VM stops ("PM: Image not found" at the next boot). A virtual
+    machine therefore hibernates in shutdown mode; real firmware keeps platform mode."""
+    return "shutdown" if virtual(hardware) else "platform"
 
 
 def create_swapfile(runner, root, filesystem, size):
@@ -434,12 +446,14 @@ def install(request, runner):
                                       f"{swap_size // GIB} ГиБ свободного места в корне): {exc}") from exc
             filesystem_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
             hibernation = {"file": "/" + SWAPFILE, "size": swap_size, "resume_uuid": filesystem_uuid,
-                           "resume_offset": offset}
+                           "resume_offset": offset, "mode": hibernate_mode(hardware)}
         resume = resume_parameter(hibernation["resume_uuid"], hibernation["resume_offset"]) if hibernation else None
 
         emit("progress", stage=6, text="Настраиваю загрузку, пользователя, сеть и выбранное окружение…")
         chroot = ["arch-chroot", str(TARGET)]
         write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]) + (swap_fstab_line() if hibernation else ""))
+        if hibernation and hibernation["mode"] == "shutdown":
+            write_file(HIBERNATE_MODE_FILE, "[Sleep]\nHibernateMode=shutdown\n")
         write_file("etc/hostname", config.hostname + "\n")
         write_file("etc/hosts", f"127.0.0.1 localhost\n::1 localhost\n127.0.1.1 {config.hostname}.localdomain {config.hostname}\n")
         write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in config.generated_locales()))
