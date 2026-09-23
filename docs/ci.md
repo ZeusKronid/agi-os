@@ -45,6 +45,9 @@ guacd export); `mkarchiso` runs inside a privileged container.
   published by Apache; the guacd image is pinned by digest.
 - **Outputs in `out/`:** the ISO, `<iso>.sha256` and `build-info.json` (size,
   checksum, source revision, snapshot, container image, `SOURCE_DATE_EPOCH`).
+- **Release signing:** the `release` job adds `SHA256SUMS`, detached OpenPGP
+  signatures and the public key (`scripts/release/sign-iso.py`); see
+  [Download and verify](download.md) for the key settings and how users verify.
 
 Reproducing a CI build of the same commit on a disposable build VM:
 
