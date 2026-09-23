@@ -70,7 +70,7 @@ revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, tex
 info = {'iso': iso.name, 'size': iso.stat().st_size,
         'sha256': (iso.parent / (iso.name + '.sha256')).read_text().split()[0],
         'source_revision': revision, 'source_date_epoch': int(os.environ['SOURCE_DATE_EPOCH']),
-        'arch_snapshot': snapshot, 'build_image': image}
+        'arch_snapshot': snapshot, 'build_image': image, 'version': os.environ.get('AGIOS_VERSION') or 'dev'}
 (iso.parent / 'build-info.json').write_text(json.dumps(info, indent=2) + '\n')
 print(json.dumps(info, indent=2))
 PY

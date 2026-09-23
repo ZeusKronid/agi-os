@@ -39,6 +39,9 @@ jobs:
     needs: tests
     runs-on: ${{ vars.AGIOS_ISO_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 180
+    env:
+      # The version the Live reports (web/release.py): the tag for releases, else "dev".
+      AGIOS_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Prepare the GitHub-hosted runner
@@ -68,9 +71,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           (( size < 2147483648 )) || { echo '::error::ISO exceeds the 2 GiB release asset limit'; exit 1; }
       - name: Smoke boot (UEFI)
-        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware uefi --memory 6144 --expect-revision "$(git rev-parse HEAD)" --logs out/smoke-uefi
+        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware uefi --memory 6144 --expect-revision "$(git rev-parse HEAD)" --expect-version "$AGIOS_VERSION" --logs out/smoke-uefi
       - name: Smoke boot (BIOS)
-        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware bios --memory 6144 --expect-revision "$(git rev-parse HEAD)" --logs out/smoke-bios
+        run: python -B scripts/ci/smoke-boot.py out/agi-os-*.iso --firmware bios --memory 6144 --expect-revision "$(git rev-parse HEAD)" --expect-version "$AGIOS_VERSION" --logs out/smoke-bios
       - name: Upload the ISO
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

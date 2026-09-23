@@ -68,7 +68,7 @@ class FakeGuest(threading.Thread):
         connection.sendall(b'noise from the console\n{"ready":true}\n')
         while line := stream.readline():
             request = json.loads(line)
-            key = request['method'] if request['method'] == 'http' else ' '.join(request['args'])
+            key = 'http ' + request['path'] if request['method'] == 'http' else ' '.join(request['args'])
             answer = self.answers.get(key, {'code': 0, 'stdout': '', 'stderr': ''})
             # An unrelated answer first: the client must match answers by id.
             connection.sendall(b'{"id":"other","result":null}\n')
@@ -79,7 +79,7 @@ class FakeGuest(threading.Thread):
 
 
 class SmokeCheckTests(unittest.TestCase):
-    def run_check(self, answers, revision=''):
+    def run_check(self, answers, revision='', version=''):
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory)
         guest = FakeGuest(directory / 'qa.sock', answers)
@@ -89,22 +89,28 @@ class SmokeCheckTests(unittest.TestCase):
         self.enterContext(patch.object(smoke, 'log'))
         try:
             qa.wait_ready(time.monotonic() + 5)
-            return smoke.check(qa, revision, time.monotonic() + 0.2)
+            return smoke.check(qa, revision, time.monotonic() + 0.2, version)
         finally:
             qa.close()
             guest.join(5)
 
     def healthy(self):
         answers = {f'systemctl is-active {unit}': {'code': 0, 'stdout': 'active\n'} for unit in smoke.REQUIRED_UNITS}
-        answers['http'] = {'phase': 'idle'}
+        answers['http /api/state'] = {'phase': 'idle'}
+        answers['http /api/version'] = {'version': 'v0.1.0', 'release': True}
         answers['cat /usr/local/share/agi-os/source-revision'] = {'code': 0, 'stdout': 'abc123\n'}
         answers['systemctl is-system-running'] = {'code': 0, 'stdout': 'running\n'}
         return answers
 
     def test_healthy_live_passes(self):
-        failures, details = self.run_check(self.healthy(), 'abc123')
+        failures, details = self.run_check(self.healthy(), 'abc123', 'v0.1.0')
         self.assertEqual(failures, [])
         self.assertEqual(details['source_revision'], 'abc123')
+        self.assertEqual(details['version'], 'v0.1.0')
+
+    def test_unexpected_version_fails(self):
+        failures, _ = self.run_check(self.healthy(), '', 'v0.2.0')
+        self.assertEqual(failures, ["version 'v0.1.0' != expected 'v0.2.0'"])
 
     def test_inactive_website_and_wrong_revision_fail(self):
         answers = self.healthy()
@@ -123,7 +129,7 @@ class SmokeCheckTests(unittest.TestCase):
 
     def test_website_errors_fail_after_the_deadline(self):
         answers = self.healthy()
-        answers['http'] = {'error': 'Connection refused'}
+        answers['http /api/state'] = {'error': 'Connection refused'}
         failures, _ = self.run_check(answers)
         self.assertEqual(failures, ['/api/state failed: Connection refused'])
 

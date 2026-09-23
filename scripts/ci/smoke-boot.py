@@ -6,7 +6,8 @@ starts its test-only instrumentation (agi-qa.service, after agi-web.service). Th
 check passes when, within the timeout:
   * the QA agent inside the Live answers,
   * agi-web.service, agi-guacd.service and the display manager are active,
-  * the website answers GET /api/state with JSON,
+  * the website answers GET /api/state with JSON and GET /api/version with the
+    expected version (optional),
   * optionally, the image reports the expected source revision.
 No model, no target disk writes; the VM gets a blank scratch disk only so the
 storage view is realistic. Uses KVM when /dev/kvm is usable, otherwise TCG (slow).
@@ -134,7 +135,7 @@ def qmp(path, command, **arguments):
                     break
 
 
-def check(qa, expect_revision, deadline):
+def check(qa, expect_revision, deadline, expect_version=''):
     failures = []
     for unit in REQUIRED_UNITS:
         # agi-web restarts on failure; give units until the deadline to settle as active.
@@ -158,6 +159,14 @@ def check(qa, expect_revision, deadline):
                 failures.append(f'/api/state failed: {error}')
                 break
             time.sleep(POLL)
+    try:
+        version = qa.call('http', path='/api/version', timeout=60).get('version')
+    except RuntimeError as error:
+        version = None
+        failures.append(f'/api/version failed: {error}')
+    log(f'version reported by the Live: {version}')
+    if expect_version and version != expect_version:
+        failures.append(f'version {version!r} != expected {expect_version!r}')
     revision = qa.run('cat', '/usr/local/share/agi-os/source-revision')['stdout'].strip()
     log(f'source revision in the image: {revision or "missing"}')
     if expect_revision and revision != expect_revision:
@@ -171,7 +180,7 @@ def check(qa, expect_revision, deadline):
         # Diagnostics only: the QA agent may lack the rights to read the system journal.
         answer = qa.run('journalctl', '--boot', '--unit', unit, '--no-pager', '--lines', '40')
         journals[unit] = (answer['stdout'] + answer['stderr']).strip()
-    return failures, {'system': system, 'failed_units': failed.splitlines(), 'source_revision': revision,
+    return failures, {'system': system, 'failed_units': failed.splitlines(), 'source_revision': revision, 'version': version,
                       'failed_unit_journals': journals}
 
 
@@ -183,6 +192,7 @@ def main():
     parser.add_argument('--cpus', type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument('--timeout', type=int, default=0, help='seconds; default 600 with KVM, 2400 without')
     parser.add_argument('--expect-revision', default='')
+    parser.add_argument('--expect-version', default='', help='v* tag or dev, as reported by /api/version')
     parser.add_argument('--logs', type=Path, help='directory for serial log, screenshot and result.json')
     args = parser.parse_args()
     if not args.iso.is_file():
@@ -205,7 +215,7 @@ def main():
         qa = QA(workdir / 'qa.sock')
         qa.wait_ready(deadline)
         log(f'QA agent answered after {time.monotonic() - started:.0f}s')
-        failures, details = check(qa, args.expect_revision, deadline)
+        failures, details = check(qa, args.expect_revision, deadline, args.expect_version)
     except (RuntimeError, TimeoutError, OSError) as error:
         failures.append(str(error))
     finally:
