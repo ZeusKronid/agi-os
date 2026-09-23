@@ -7,51 +7,25 @@ import { mountArchWay } from '../lib/mount-arch-way'
 import { archSteps, wikiPages } from '../model/arch-steps'
 import { setups } from '../model/setups'
 
-const ID = 'arch-way'
 const labelById = new Map(tools.map((tool) => [tool.id, tool.label]))
 const label = 'font-mono text-[10.5px] tracking-[0.16em] text-ink-muted uppercase'
 const pane = 'flex min-h-[340px] flex-col rounded-xl px-[18px] py-4 max-md:min-h-0'
 
 /**
- * Визуал карточки «Arch was never this easy»: обычный Arch против одной фразы. Сверху вкладки реальных наборов
- * (`model/setups`, все в один ряд), ниже две панели: слева шаги, которые обычно делают руками (`model/arch-steps`),
- * справа — та же система одной фразой. SSR-разметка — законченная картинка: все наборы в разметке, виден первый,
- * шаги уже вычеркнуты. Смену наборов, автопролистывание и сцену вычёркивания ведёт `mountArchWay`.
+ * Визуал карточки «Arch was never this easy»: обычный Arch против одной фразы. Две панели: слева шаги, которые
+ * обычно делают руками (`model/arch-steps`), справа — та же система одной фразой. Реальные наборы (`model/setups`)
+ * сменяют друг друга сами, без переключателей: визуал декоративный. SSR-разметка — законченная картинка: все наборы
+ * в разметке, виден первый, шаги уже вычеркнуты. Смену наборов и сцену вычёркивания ведёт `mountArchWay`.
  */
 export function ArchWayVisual() {
   return (
     <div ref={mountArchWay} className="p-[18px] max-sm:p-3">
-      <div
-        role="tablist"
-        aria-label="Setups"
-        className="mb-4 flex gap-1 overflow-x-auto [scrollbar-width:none] max-sm:-mx-3 max-sm:px-3 [&::-webkit-scrollbar]:hidden"
-      >
-        {setups.map((setup, index) => (
-          <button
-            key={setup.name}
-            type="button"
-            role="tab"
-            id={`${ID}-tab-${index}`}
-            aria-controls={`${ID}-panel-${index}`}
-            aria-selected={index === 0}
-            tabIndex={index === 0 ? 0 : -1}
-            data-arch-tab=""
-            className="h-[30px] shrink-0 rounded-full px-[11px] font-mono text-[11.5px] whitespace-nowrap text-ink-muted inset-ring inset-ring-line-strong transition-[color,background-color,box-shadow] duration-200 hover:text-ink hover:inset-ring-line-accent aria-selected:bg-accent-soft aria-selected:text-accent aria-selected:inset-ring-line-accent"
-          >
-            {setup.name}
-          </button>
-        ))}
-      </div>
-
       {setups.map((setup, index) => {
         const steps = archSteps(setup)
         const words = setup.ids.map((id) => labelById.get(id) ?? id)
         return (
           <div
             key={setup.name}
-            role="tabpanel"
-            id={`${ID}-panel-${index}`}
-            aria-labelledby={`${ID}-tab-${index}`}
             hidden={index !== 0}
             data-arch-panel=""
             className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] gap-3.5 max-md:grid-cols-1"

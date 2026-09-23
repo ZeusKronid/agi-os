@@ -1,7 +1,7 @@
 import { spokenToolIds, tools } from '@/entities/tool'
 
 export interface Setup {
-  /** Подпись вкладки набора в карточке «Arch was never this easy». Коротко: все вкладки — в один ряд. */
+  /** Имя набора: ключ в разметке, на сайте не показывается. */
   name: string
   ids: readonly string[]
 }
