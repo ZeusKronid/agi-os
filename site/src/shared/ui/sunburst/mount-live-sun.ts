@@ -48,6 +48,8 @@ const noise = (index: number) => {
  * - Солнце слушает демо: пока микрофон включён, энергия волны (сумма изменений столбиков за кадр)
  *   удлиняет лучи. Активный шаг демо подсвечивает свою точку на дуге, пройденные остаются крупными.
  * - Цикл идёт, только пока hero виден и вкладка открыта. SSR-разметка — законченный статичный восход.
+ * - За экраном бесконечное CSS-сияние лучей стоит на паузе (`data-paused`): 97 анимаций закатного солнца
+ *   в футере иначе крутились бы всё время, пока читают страницу выше.
  */
 export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   if (!root) return
@@ -174,6 +176,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
 
   const observer = new IntersectionObserver(([entry]) => {
     visible = !!entry?.isIntersecting
+    sun.dataset.paused = String(!visible)
     wake()
   })
   observer.observe(root)
@@ -185,6 +188,7 @@ export function mountLiveSun(root: HTMLElement | null): void | (() => void) {
   return () => {
     cancelAnimationFrame(frame)
     observer.disconnect()
+    delete sun.dataset.paused
     root.removeEventListener('pointermove', aim)
     root.removeEventListener('pointerdown', aim)
     root.removeEventListener('pointerleave', release)
