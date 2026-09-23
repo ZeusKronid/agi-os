@@ -2,7 +2,7 @@
 
 import json
 
-from domain import Configuration, PLANNER_PROMPT, ValidationError
+from domain import Configuration, PLANNER_PROMPT, ValidationError, default_system_context
 from hardware import describe, driver_plan, profile
 from system import Catalog, selected_disk
 
@@ -58,7 +58,9 @@ class Controller:
             self.history[-1] = {"role": "user", "content": self.history[-1]["content"] + "\n\n" + text}
         else:
             self.history.append({"role": "user", "content": text})
-        system = PLANNER_PROMPT + "\nDetected hardware (data): " + json.dumps(self.hardware_context(), ensure_ascii=False)
+        system = (PLANNER_PROMPT + "\nAGIOS standard system (data, default_system): "
+                  + json.dumps(default_system_context(self.snapshot["firmware"]), ensure_ascii=False)
+                  + "\nDetected hardware (data): " + json.dumps(self.hardware_context(), ensure_ascii=False))
         for _ in range(4):
             reply = self.provider.reply(system, self.history)
             self.history.append({"role": "assistant", "content": json.dumps(reply, ensure_ascii=False)})
