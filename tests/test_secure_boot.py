@@ -122,7 +122,7 @@ class WorkerSigningTests(unittest.TestCase):
     def test_secure_boot_needs_uefi_and_systemd_boot(self):
         grub = specification()
         grub["bootloader"] = "grub"
-        for data, value in ((grub, True), (specification(), "yes")):
+        for data, value in ((grub, True), (specification(), "yes"), (specification(), 1)):
             config = Configuration.parse(data)
             snapshot = demo_inventory()
             disk = snapshot["disks"][0]
@@ -163,8 +163,9 @@ class FinalizeEnrollTests(unittest.TestCase):
                 finalize_worker.checked_request(dict(request))
             with patch.object(finalize_worker, "efi_flag", return_value=True):
                 finalize_worker.checked_request(dict(request))
-            with self.assertRaises(ValidationError):
-                finalize_worker.checked_request({**request, "enroll_keys": "yes"})
+            for value in ("yes", 1):
+                with self.assertRaises(ValidationError):
+                    finalize_worker.checked_request({**request, "enroll_keys": value})
 
     def test_enroll_verifies_signatures_first_and_keeps_microsoft_keys(self):
         import finalize_worker
@@ -185,6 +186,23 @@ class FinalizeEnrollTests(unittest.TestCase):
             self.assertFalse(any("enroll-keys" in c for c in runner.calls))
             with self.assertRaises(ValidationError):
                 finalize_worker.enroll_keys(Runner(SIGNED), ["arch-chroot", "/t"], {"secure_boot": None})
+
+
+    def test_failed_enrollment_is_a_warning_not_a_failed_installation(self):
+        import finalize_worker
+
+        class Runner:
+            def run(self, args, **kw):
+                if "enroll-keys" in args:
+                    raise ValidationError("sbctl: could not enroll keys\nfailed to write PK")
+                return SIGNED if args[-1] == "verify" else ""
+        events, record = [], {"secure_boot": {"signed": True, "enrolled": False}}
+        with patch.object(finalize_worker, "emit", side_effect=lambda kind, **d: events.append((kind, d["text"]))):
+            finalize_worker.enroll_or_warn(Runner(), ["arch-chroot", "/t"], record)
+        self.assertFalse(record["secure_boot"]["enrolled"])
+        self.assertIn("sbctl enroll-keys --microsoft", record["warnings"][0])
+        self.assertIn("failed to write PK", record["warnings"][0])
+        self.assertEqual(events[-1][0], "final-warning")
 
 
 class VerifyTests(unittest.TestCase):

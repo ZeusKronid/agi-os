@@ -60,7 +60,7 @@ def checked_request(request):
     passphrase = request['passphrase']
     if not isinstance(passphrase, str) or any(c in passphrase for c in '\n\r\x00'):
         raise ValidationError('Некорректный пароль шифрования')
-    if request['enroll_keys'] not in (True, False):
+    if type(request['enroll_keys']) is not bool:
         raise ValidationError('Некорректный выбор записи ключей Secure Boot')
     if request['enroll_keys'] and (config.bootloader != 'systemd-boot' or efi_flag(SETUP_MODE_VAR) is not True):
         # Checked before any disk change: the firmware must accept new keys right now.
@@ -347,6 +347,22 @@ def enroll_keys(runner, chroot, record):
     record['secure_boot']['enrolled'] = True
 
 
+def enroll_or_warn(runner, chroot, record):
+    """The system is already on the disk and boots (Setup Mode enforces nothing): a
+    failed enrollment is a warning with the command to finish it later, not a failure."""
+    try:
+        enroll_keys(runner, chroot, record)
+    except Cancelled:
+        raise
+    except Exception as exc:
+        lines = [l for l in str(exc).splitlines() if l.strip()]
+        warning = ('Ключи Secure Boot не записаны — ' + (lines[-1] if lines else type(exc).__name__)[:300]
+                   + '. Система подписана и загрузится; чтобы включить Secure Boot, после входа выполните: '
+                   'sudo sbctl enroll-keys --microsoft, затем включите Secure Boot в настройках UEFI')
+        record['warnings'] = record.get('warnings', []) + [warning]
+        emit('final-warning', text=warning)
+
+
 def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
@@ -415,7 +431,7 @@ def finalize(request, runner):
             runner.run([*chroot, 'grub-install', '--target=i386-pc', target])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         if request['enroll_keys']:
-            enroll_keys(runner, chroot, record)
+            enroll_or_warn(runner, chroot, record)
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
         record['finalization'] = {'preview_id': record['id'], 'target': target, 'mode': 'copy' if moved else 'promote',
                                   'layout': request['layout'], 'target_fingerprint': disk['fingerprint'], 'live_firmware': firmware}
