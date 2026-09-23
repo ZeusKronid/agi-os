@@ -73,6 +73,25 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertNotIn('public-test-fixture', state.record.read_text())
         self.assertNotIn('password', json.dumps(state.public()))
 
+    async def test_login_commands_need_their_own_confirmation(self):
+        state = self.app['state']
+        data = DemoProvider().reply('', [])['configuration']
+        data['home_files'] = [{'path': '.config/autostart/x.desktop', 'content': '[Desktop Entry]\nExec=syncthing serve\n'}]
+        state.controller.configuration = Configuration.parse(data)
+        self.assertEqual(state.public()['login'][0]['commands'], ['Exec=syncthing serve'])
+        self.fake_plan(state)
+        body = {'digest': 'plan-digest', 'option': 'ram', 'accepted': True, 'password': 'public-test-fixture',
+                'passphrase': 'private-passphrase', 'memory': 4096, 'cpus': 4}
+        response = await self.request('/api/build', body)
+        self.assertEqual(response.status, 400)
+        self.assertIn('при входе', (await response.json())['error'])
+        self.assertIsNone(state.build_task)
+        with patch.object(state, 'build', return_value=asyncio.sleep(0)) as build:
+            response = await self.request('/api/build', {**body, 'login_reviewed': True})
+            self.assertEqual(response.status, 202)
+            await state.build_task
+        build.assert_called_once()
+
     async def test_plan_requires_configuration(self):
         response = await self.request('/api/plan', {'memory': 4096})
         self.assertEqual(response.status, 400)
