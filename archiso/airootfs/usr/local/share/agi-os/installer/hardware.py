@@ -39,6 +39,16 @@ NVIDIA_MODULE_PACKAGES = {"nvidia", "nvidia-dkms", "nvidia-lts", "nvidia-open", 
 POWER_MANAGERS = {"tlp", "auto-cpufreq", "tuned", "tuned-ppd"}
 EXTRA_KERNELS = ("linux-lts", "linux-zen", "linux-hardened", "linux-rt", "linux-rt-lts")
 SECURE_BOOT_VAR = "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+# Setup Mode: no platform key is enrolled, so the firmware accepts new Secure Boot keys.
+SETUP_MODE_VAR = "SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
+
+def efi_flag(name, root=None):
+    """A one-byte UEFI global variable (after the 4 attribute bytes) as True/False, None if absent."""
+    try:
+        return ((root or SYS) / "firmware/efi/efivars" / name).read_bytes()[4:5] == b"\x01"
+    except OSError:
+        return None
 SYS = Path("/sys")
 DEVICE_KEYS = ("class", "class_name", "vendor", "vendor_id", "device_id", "name", "driver", "bus")
 
@@ -167,11 +177,6 @@ def detect():
                                         env={"PATH": "/usr/bin:/bin"}).stdout.strip() or "none"
     except (OSError, subprocess.TimeoutExpired):
         virtualization = "unknown"
-    secure_boot = None
-    try:
-        secure_boot = (SYS / "firmware/efi/efivars" / SECURE_BOOT_VAR).read_bytes()[4:5] == b"\x01"
-    except OSError:
-        pass
     return profile({
         # No PCI records while the bus has devices means lspci failed: nothing may claim "verified".
         "detected": bool(pci) or not any(SYS.glob("bus/pci/devices/*")),
@@ -184,7 +189,8 @@ def detect():
                     "portable": chassis_code in PORTABLE_CHASSIS or battery, "battery": battery},
         "gpus": gpus, "network": network, "audio": audio, "bluetooth": bluetooth, "usb": usb,
         "tpm": any(SYS.glob("class/tpm/tpm*")),
-        "secure_boot": secure_boot,
+        "secure_boot": efi_flag(SECURE_BOOT_VAR),
+        "setup_mode": efi_flag(SETUP_MODE_VAR),
     })
 
 
@@ -212,6 +218,7 @@ def profile(data):
         "audio": devices(data.get("audio")), "bluetooth": devices(data.get("bluetooth")), "usb": devices(data.get("usb")),
         "tpm": data.get("tpm") is True,
         "secure_boot": data.get("secure_boot") if data.get("secure_boot") in (True, False) else None,
+        "setup_mode": data.get("setup_mode") if data.get("setup_mode") in (True, False) else None,
     }
 
 
@@ -252,7 +259,8 @@ def describe(hardware):
     if others:
         lines.append("USB: " + "; ".join(f"{u['class_name']} — {named(u)}" for u in others[:8]))
     lines.append("TPM: " + ("есть" if h["tpm"] else "нет") + "; Secure Boot: "
-                 + {True: "включён", False: "выключен", None: "нет данных"}[h["secure_boot"]])
+                 + {True: "включён", False: "выключен", None: "нет данных"}[h["secure_boot"]]
+                 + ("; прошивка в режиме Setup Mode — можно записать свои ключи" if h["setup_mode"] else ""))
     return lines
 
 
@@ -332,7 +340,8 @@ def driver_plan(hardware, packages=(), session=""):
             services.append("power-profiles-daemon.service")  # also when the user chose the package themselves
         unverified.append("батарея, энергосбережение и клавиши ноутбука")
     if h["secure_boot"]:
-        notes.append("Secure Boot включён: установленная система не подписана; для загрузки отключите Secure Boot в UEFI")
+        notes.append("Secure Boot включён: подпишите систему своими ключами (отметка Secure Boot перед превью, "
+                     "ключи записываются при установке в режиме Setup Mode) или отключите Secure Boot в UEFI")
     add = [p for p in dict.fromkeys(add) if p not in chosen]
     return {"packages": add, "services": list(dict.fromkeys(services)), "modules": list(dict.fromkeys(modules)),
             "notes": notes, "unverified": unverified}

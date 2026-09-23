@@ -73,6 +73,28 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertNotIn('public-test-fixture', state.record.read_text())
         self.assertNotIn('password', json.dumps(state.public()))
 
+    async def test_secure_boot_needs_systemd_boot_and_setup_mode(self):
+        state = self.app['state']
+        data = DemoProvider().reply('', [])['configuration']
+        data['bootloader'] = 'grub'
+        state.controller.configuration = Configuration.parse(data)
+        response = await self.request('/api/plan', {'memory': 4096, 'secure_boot': True})
+        self.assertEqual(response.status, 400)
+        self.assertIn('Secure Boot', (await response.json())['error'])
+        self.assertIsNone(state.plan)
+        config = demo_configuration()
+        state.controller.configuration = config
+        state.preview = {'option': {'title': 'RAM', 'revert': 'x'}, 'image': {'format': 'qcow2', 'path': '/p'}, 'revert': {'kind': 'ram'}}
+        state.disk_ready = True
+        body = {'layout': 'erase', 'confirmation': config.disk, 'accepted': True, 'enroll_keys': True}
+        for signed, reason in ((False, 'не подписана'), (True, 'Setup Mode')):
+            state.built = {'configuration': config.as_dict(), 'consent': state.current_consent(), 'encrypted': False,
+                           'secure_boot': signed}
+            response = await self.request('/api/final/finalize', body)
+            self.assertEqual(response.status, 400)
+            self.assertIn(reason, (await response.json())['error'])
+            self.assertIsNone(state.final_task)
+
     async def test_plan_requires_configuration(self):
         response = await self.request('/api/plan', {'memory': 4096})
         self.assertEqual(response.status, 400)
@@ -135,7 +157,7 @@ class LocalApiTests(AioHTTPTestCase):
             async def start(self, install=True):
                 if fail: raise RuntimeError('QEMU failed')
                 self.running = True
-            async def install(self, config, password, passphrase, notify, hardware=None):
+            async def install(self, config, password, passphrase, notify, hardware=None, secure_boot=False):
                 assert hardware is not None and 'gpus' in hardware  # the real computer's inventory reaches the guest
                 notify({'kind': 'progress', 'text': 'Installing'})
                 notify({'kind': 'installed', 'text': 'Installed'})

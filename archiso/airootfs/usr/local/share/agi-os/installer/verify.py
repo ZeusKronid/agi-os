@@ -18,6 +18,33 @@ def command(args):
     return result.returncode, result.stdout.strip()
 
 
+SECURE_BOOT_VAR = "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+SIGNED_BOOT_FILES = ("boot/EFI/BOOT/BOOTX64.EFI", "boot/EFI/systemd/systemd-bootx64.efi", "boot/vmlinuz-linux")
+
+
+def pe_signed(path):
+    """True when a PE/EFI image carries an Authenticode certificate table (data directory 4)."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return False
+    if data[:2] != b"MZ":
+        return False
+    pe = int.from_bytes(data[0x3C:0x40], "little")
+    if data[pe:pe + 4] != b"PE\0\0":
+        return False
+    optional = pe + 24
+    directories = optional + (112 if int.from_bytes(data[optional:optional + 2], "little") == 0x20B else 96)
+    return int.from_bytes(data[directories + 36:directories + 40], "little") > 0
+
+
+def secure_boot_enabled(system_root=Path("/")):
+    try:
+        return (system_root / "sys/firmware/efi/efivars" / SECURE_BOOT_VAR).read_bytes()[4:5] == b"\x01"
+    except OSError:
+        return False
+
+
 def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
     config = record["configuration"]
     state_dir = state_dir or Path.home() / ".local/state/agi-os" / record["id"]
@@ -50,6 +77,11 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
         checks["Сеть: DNS"] = True
     except OSError:
         checks["Сеть: DNS"] = False
+    secure_boot = record.get("secure_boot") or {}
+    if secure_boot.get("signed"):
+        checks["Secure Boot: загрузчик и ядро подписаны"] = all(pe_signed(system_root / f) for f in SIGNED_BOOT_FILES)
+        if secure_boot.get("enrolled"):
+            checks["Secure Boot включён в прошивке"] = secure_boot_enabled(system_root)
     if config["session"]:
         actual = " ".join(os.environ.get(k, "") for k in ("XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "XDG_SESSION_DESKTOP"))
         checks["Выбранная графическая сессия"] = config["session"].casefold() in actual.casefold()
