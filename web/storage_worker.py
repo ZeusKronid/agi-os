@@ -690,13 +690,13 @@ def prepare(request):
         new_size = (part['size'] - needed) // MIB * MIB
         if new_size < GIB:
             raise ValidationError('The partition is too small to free the space needed')
+        backup = gpt_backup(disk)
         if fstype == 'ntfs':
             sh(['ntfsresize', '--no-action', '--force', '--size', str(new_size), device], timeout=1800)
             sh(['ntfsresize', '--force', '--size', str(new_size), device], timeout=7200, input_text='y\n')
         else:
             sh(['e2fsck', '-f', '-y', device], timeout=1800)
             sh(['resize2fs', device, f'{new_size // MIB}M'], timeout=7200)
-        backup = gpt_backup(disk)
         number = partition_number(disk, device)
         start = int(part['start'])
         new_end = start + new_size // SECTOR - 1
