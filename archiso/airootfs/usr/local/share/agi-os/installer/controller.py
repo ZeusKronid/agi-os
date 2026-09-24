@@ -114,6 +114,8 @@ class Controller:
         selected_disk(self.snapshot, config.disk)
         if self.snapshot["firmware"] == "bios" and config.bootloader != "grub":
             raise ValidationError("BIOS needs GRUB")
+        if config.partition_table == "msdos" and self.snapshot["firmware"] != "bios":
+            raise ValidationError("partition_table msdos is only for BIOS computers; this one boots UEFI, use gpt")
         if config.swap == "hibernate":
             hibernation_swap_size(profile(self.snapshot["hardware"])["memory"])
         self.catalog.validate([*config.packages, *config.effective_fonts()])

@@ -19,8 +19,8 @@ class Recorder:
         return ""
 
 
-def config(filesystem="ext4"):
-    return SimpleNamespace(filesystem=filesystem)
+def config(filesystem="ext4", table="gpt", bootloader="grub"):
+    return SimpleNamespace(filesystem=filesystem, partition_table=table, bootloader=bootloader)
 
 
 class PlanTests(unittest.TestCase):
@@ -73,3 +73,52 @@ class PlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MbrTests(unittest.TestCase):
+    """CMP-152: an MBR (msdos) table for BIOS computers."""
+
+    def test_bios_msdos_has_active_boot_and_root_without_a_grub_partition(self):
+        plan = layout.plan_for(config(table="msdos"), "bios")
+        self.assertEqual(plan.table, "msdos")
+        self.assertEqual([(p.number, p.role, p.typecode, p.filesystem) for p in plan.partitions],
+                         [(1, "boot", "83", "ext4"), (2, "root", "83", None)])
+        self.assertEqual(plan.path("/dev/sda", "root"), "/dev/sda2")
+
+    def test_msdos_needs_bios_and_grub(self):
+        for firmware, bootloader in (("uefi", "grub"), ("uefi", "systemd-boot"), ("bios", "systemd-boot")):
+            with self.subTest(firmware=firmware, bootloader=bootloader), self.assertRaises(ValidationError):
+                layout.plan_for(config(table="msdos", bootloader=bootloader), firmware)
+
+    def test_apply_table_writes_an_mbr_through_sfdisk(self):
+        runner = Recorder()
+        layout.apply_table(runner, layout.plan_for(config(table="msdos"), "bios"), "/dev/sda", 500 * GIB)
+        self.assertEqual(runner.calls, [
+            (["sgdisk", "--zap-all", "/dev/sda"], None),
+            (["sfdisk", "--wipe", "always", "--label", "dos", "/dev/sda"], "size=2097152, type=83, bootable\ntype=83\n")])
+
+    def test_mbr_refuses_disks_beyond_2_tib_before_writing(self):
+        runner = Recorder()
+        with self.assertRaises(ValidationError):
+            layout.apply_table(runner, layout.plan_for(config(table="msdos"), "bios"), "/dev/sda", 3 * 1024 * GIB)
+        self.assertEqual(runner.calls, [])
+
+    def test_gpt_apply_table_runs_the_table_commands(self):
+        runner, plan = Recorder(), layout.plan_for(config(), "bios")
+        layout.apply_table(runner, plan, "/dev/vda", 20 * GIB)
+        self.assertEqual([c for c, _ in runner.calls], layout.table_commands(plan, "/dev/vda"))
+
+    def test_configuration_field(self):
+        from controller import DemoProvider
+        from domain import Configuration
+        data = DemoProvider().reply("", [])["configuration"]
+        old = {k: v for k, v in data.items() if k != "partition_table"}
+        self.assertEqual(Configuration.parse(old).partition_table, "gpt")
+        bios = {**data, "bootloader": "grub"}
+        mbr = Configuration.parse({**bios, "partition_table": "msdos"})
+        self.assertNotEqual(mbr.digest(), Configuration.parse(bios).digest())
+        self.assertEqual(Configuration.parse(mbr.as_dict()), mbr)
+        self.assertIn("MBR (msdos)", mbr.summary({"size": 64 * GIB}))
+        for changes in ({"partition_table": "hybrid"}, {"partition_table": "msdos", "bootloader": "systemd-boot"}):
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                Configuration.parse({**bios, **changes})
