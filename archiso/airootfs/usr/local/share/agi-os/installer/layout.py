@@ -249,8 +249,11 @@ def activate_root(runner, device):
     activated, as (group, volume path); None when the device holds no LVM."""
     if runner.run(["blkid", "-s", "TYPE", "-o", "value", device]).strip() != "LVM2_member":
         return None
-    group = runner.run(["pvs", "--noheadings", "-o", "vg_name", device]).strip()
-    if not GROUP_NAME.fullmatch(group):
+    # The runner merges stderr: LVM warnings may come before the name.
+    names = [line.strip() for line in runner.run(["pvs", "--noheadings", "-o", "vg_name", device]).splitlines()
+             if GROUP_NAME.fullmatch(line.strip())]
+    group = names[-1] if names else ""
+    if not group:
         raise ValidationError("The root partition holds an LVM physical volume without a usable volume group")
     runner.run(["vgchange", "--activate", "y", group])
     return group, volume_path(group)

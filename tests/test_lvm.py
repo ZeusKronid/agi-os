@@ -86,6 +86,8 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(layout.activate_root(Recorder({"blkid": "ext4\n"}), "/dev/vda2"))
         with self.assertRaises(ValidationError):
             layout.activate_root(Recorder({"blkid": "LVM2_member\n", "pvs": "\n"}), "/dev/vda2")
+        warned = Recorder({"blkid": "LVM2_member\n", "pvs": "  WARNING: PV /dev/nbd0p2 has an old header.\n  agi00c0ffee\n"})
+        self.assertEqual(layout.activate_root(warned, "/dev/nbd0p2")[0], "agi00c0ffee")
 
     def test_initramfs_activates_the_group_between_encrypt_and_resume(self):
         hooks = initramfs_config({}, True, True, lvm=True).split("HOOKS=(")[1].split(")")[0].split()
