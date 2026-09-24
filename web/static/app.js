@@ -354,7 +354,7 @@ function renderOptions(plan) {
         const radio = document.createElement('span'); radio.className = 'radio';
         const body = document.createElement('div'), title = document.createElement('b'), detail = document.createElement('span'), undo = document.createElement('small');
         title.textContent = option.title;
-        const tags = [option.recommended && 'recommended', !option.fits && 'not enough room', option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
+        const tags = [option.recommended && 'recommended', !option.fits && (option.blocked ? 'not possible now' : 'not enough room'), option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
         for (const tag of tags) { const i = document.createElement('i'); i.textContent = tag; title.append(' ', i); }
         detail.textContent = option.detail; undo.textContent = 'Undo: ' + option.revert;
         body.append(title, detail, undo); card.append(radio, body); box.append(card);
@@ -413,11 +413,31 @@ function validateFinal() {
     if (current.built.encrypted) needs.push([$('finalPassphrase').value.length >= 8, 'Encryption password']);
     $('installFinal').disabled = !needsHTML($('finalNeeds'), needs) || !current.can_finalize;
 }
+const ESP_TYPE = 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b';
+function partitionName(part) {
+    const size = (part.size / 2 ** 30).toFixed(1) + ' GiB';
+    return part.path + ' (' + [part.fstype || 'no file system', part.label || part.partlabel, size].filter(Boolean).join(', ') + ')';
+}
+function diskEffects(built, erase) {
+    // What installing does to each partition of the target disk (CMP-151): shown before the user confirms.
+    const disk = (current.disks || []).find(d => d.path === built.target);
+    const kept = [], shared = [];
+    for (const part of disk ? disk.partitions || [] : []) {
+        if (part.partlabel === 'AGIOS-PREVIEW') continue;
+        const esp = (part.parttype || '').toLowerCase() === ESP_TYPE;
+        (esp && current.firmware === 'uefi' && built.bootloader === 'systemd-boot' ? shared : kept).push(partitionName(part));
+    }
+    if (erase) return [...kept, ...shared].length ? 'Deleted: ' + [...kept, ...shared].join('; ') + '.' : '';
+    return [kept.length && 'Stays untouched: ' + kept.join('; ') + '.',
+            shared.length && 'Shared, not formatted: ' + shared.join('; ') + ' — the boot menu is added there and lists the other system too.']
+        .filter(Boolean).join(' ');
+}
 function updateLayoutWarning() {
     if (!current || !current.built) return;
     const erase = document.querySelector('input[name=layout]:checked').value === 'erase';
-    $('layoutWarning').textContent = erase ? 'Everything on ' + current.built.target + ' will be deleted, including other systems.'
-        : 'Your files and other systems on ' + current.built.target + ' stay as they are.';
+    const effects = diskEffects(current.built, erase);
+    $('layoutWarning').textContent = (erase ? 'Everything on ' + current.built.target + ' will be deleted, including other systems.'
+        : 'Your files and other systems on ' + current.built.target + ' stay as they are.') + (effects ? ' ' + effects : '');
     $('layoutWarning').className = erase ? 'line error' : 'hint';
 }
 const FOUND_STATUS = {ready: 'Installed in the preview', finalizing: 'Installing on the disk was interrupted — success is not confirmed',

@@ -27,12 +27,14 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import SWAPFILE, Configuration, ValidationError, hibernation_swap_size
 from hardware import SETUP_MODE_VAR, driver_plan, efi_flag, initramfs_config, profile
 from journal import Logger, adopt
+import layout
 from system import inventory, live_environment, selected_disk
 from worker import (CRYPT_NAME, Cancelled, Runner, boot_options, create_swapfile, emit, grub_defaults,
                     partition_path, resume_parameter, sbctl_unsigned, swap_fstab_line)
@@ -44,7 +46,9 @@ GIB = 2**30
 ALIGN = 2048
 SOURCE_MAP = 'agi-final-source'
 TARGET_MAP = 'agi-final-target'
-TYPES = {'bios': 'ef02', 'boot': 'ef00', 'linux': '8300'}
+# Partition table backups made before a table is changed (root-only tmpfs).
+BACKUPS = Path('/run')
+TYPES = {'bios': layout.BIOS_BOOT, 'boot': layout.ESP, 'linux': layout.LINUX}
 # The preview's filesystems were written by the preview VM: read them without trusting
 # setuid bits, device nodes or executables on the Live host.
 SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
@@ -61,6 +65,12 @@ UNREADABLE = ('The preview’s system could not be opened: its file system is da
 PAGE = 4096
 HIBERNATION_SIGNATURES = (b'S1SUSPEND', b'S2SUSPEND', b'ULSUSPEND', b'LINHIB0001')
 LOG = Logger('finalize')
+MIB = 2**20
+# systemd-boot on a shared ESP: two copies of its ~150 KiB loader and loader.conf.
+ESP_ROOM = 2 * MIB
+WINDOWS_LOADER = 'EFI/Microsoft/Boot/bootmgfw.efi'
+BITLOCKER_NOTE = ('Windows on this disk uses BitLocker. Keep its recovery key at hand: Windows may ask for it once '
+                  'because the computer now starts through another boot manager.')
 
 
 def run_json(runner, args):
@@ -141,9 +151,11 @@ class Source:
     def __init__(self, runner, image):
         self.runner, self.image = runner, image
         self.device = None
+        self.label = None
         self.nbd = None
         self.scratch = None
         self.opened = False
+        self.group = None  # the preview's LVM volume group while it is active
         self.mount = None
 
     def attach(self):
@@ -160,8 +172,9 @@ class Source:
         self.runner.run(['partprobe', self.nbd])
         self.runner.run(['udevadm', 'settle', '--timeout=30'])
         table = run_json(self.runner, ['sfdisk', '--json', self.device])['partitiontable']
-        if table.get('label') != 'gpt' or not table.get('partitions'):
+        if table.get('label') not in ('gpt', 'dos') or not table.get('partitions'):
             raise ValidationError('The preview has no expected partition table')
+        self.label = table['label']
         self.partitions = table['partitions']
         return self
 
@@ -177,12 +190,32 @@ class Source:
             # Writable like the overlay under it: an ext4 or xfs journal replays through it.
             self.runner.run(['cryptsetup', 'open', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
             self.opened = True
-            return '/dev/mapper/' + SOURCE_MAP, True
-        return device, False
+            return self.volume('/dev/mapper/' + SOURCE_MAP), True
+        return self.volume(device), False
+
+    def volume(self, device):
+        """The root logical volume when the preview's root is LVM (CMP-154)."""
+        if found := layout.activate_root(self.runner, device):
+            self.group, device = found
+        return device
+
+    def close_root(self):
+        """Close the root stack after reading the record: the group, then LUKS."""
+        if self.group:
+            layout.deactivate(self.runner.run, self.group)
+            self.group = None
+        if self.opened:
+            self.runner.run(['cryptsetup', 'close', SOURCE_MAP])
+            self.opened = False
 
     def detach(self):
         if self.mount and self.mount.is_mount():
             subprocess.run(['umount', '-R', str(self.mount)], capture_output=True)
+        # udev may have activated the preview's volume group by itself when nbd showed it.
+        exposed = (self.nbd + 'p', '/dev/mapper/' + SOURCE_MAP) if self.nbd else ('/dev/mapper/' + SOURCE_MAP,)
+        for group in dict.fromkeys([g for g in (self.group, *groups_on(exposed)) if g]):
+            subprocess.run(['vgchange', '--activate', 'n', group], capture_output=True)
+        self.group = None
         if self.opened:
             subprocess.run(['cryptsetup', 'close', SOURCE_MAP], capture_output=True)
             self.opened = False
@@ -200,6 +233,17 @@ class Source:
             self.scratch = None
 
 
+def groups_on(prefixes):
+    """Active LVM volume groups whose physical volumes are on devices with these prefixes."""
+    try:
+        out = subprocess.run(['pvs', '--noheadings', '-o', 'pv_name,vg_name'], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [fields[1] for fields in (line.split() for line in out.splitlines())
+            if len(fields) == 2 and fields[0].startswith(prefixes) and layout.GROUP_NAME.fullmatch(fields[1])]
+
+
 def mount_source_root(runner, device, point):
     """Read-only mount of the preview's root; a journal replays into the overlay first.
     What still refuses to mount is damaged: the user gets a way out, the log the details."""
@@ -209,15 +253,36 @@ def mount_source_root(runner, device, point):
         raise ValidationError(UNREADABLE) from exc
 
 
-def read_record(runner, root_device, mount):
-    mount_source_root(runner, root_device, mount)
+def source_plan(runner, plan, root_device):
+    """The plan as the preview was really built: its root subvolumes are read from the
+    disk, so a flat btrfs root from an earlier installer is finished as it is."""
+    fstype = runner.run(['blkid', '-s', 'TYPE', '-o', 'value', root_device]).strip()
+    try:
+        return replace(plan, subvolumes=layout.existing_subvolumes(runner, root_device, fstype))
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
+
+
+def mount_source(runner, plan, device, point):
+    """mount_source_root for a root with subvolumes (CMP-153): each read-only in place."""
+    try:
+        layout.mount_root(runner, plan, device, point, SOURCE_MOUNT)
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
+
+
+def read_record(runner, root_device, mount, plan=None):
+    if plan and plan.subvolumes:
+        mount_source(runner, replace(plan, subvolumes=plan.subvolumes[:1]), root_device, mount)
+    else:
+        mount_source_root(runner, root_device, mount)
     try:
         return json.loads((mount / 'var/lib/agi-os/installation.json').read_text())
     finally:
         runner.run(['umount', str(mount)])
 
 
-def check_record(record, config, firmware, encrypted):
+def check_record(record, config, firmware, encrypted, lvm=False):
     installed = Configuration.parse({**record['configuration'], 'disk': config.disk})
     if installed.digest() != config.digest():
         raise ValidationError('The preview holds a different configuration than the one you confirmed')
@@ -225,31 +290,80 @@ def check_record(record, config, firmware, encrypted):
         raise ValidationError('The preview was installed for a different boot type than this computer')
     if bool(record.get('encrypted')) != encrypted:
         raise ValidationError('The encryption state does not match the installation record')
+    if lvm != config.lvm:
+        raise ValidationError('The LVM layout of the preview does not match the installation record')
 
 
-def prepare_table(runner, layout, disk):
-    """The target's partition table before the copy: a fresh GPT for "erase"; for
-    "alongside" the existing GPT (backed up first). A brand-new disk has no table at
-    all: with nothing on it to keep, it gets an empty GPT instead of an error."""
+def prepare_table(runner, layout_name, disk, table='gpt'):
+    """The target's partition table before the copy: a fresh GPT (or MBR for an msdos
+    plan) for "erase"; for "alongside" the existing GPT (backed up first). A brand-new
+    disk has no table at all: with nothing on it to keep, it gets an empty GPT instead
+    of an error."""
     target = disk['path']
-    if layout == 'erase':
-        runner.run(['sgdisk', '--zap-all', target])
-        runner.run(['sgdisk', '--clear', target])
+    if layout_name == 'erase':
+        layout.wipe_table(runner, target)
+        if table == 'msdos':
+            runner.run(['sfdisk', '--wipe', 'always', target], input_text='label: dos\n')
+        else:
+            runner.run(['sgdisk', '--clear', target])
         return
     if not disk.get('pttype'):
         if disk.get('fstype') or not storage_worker.looks_blank(target):
             raise ValidationError('The disk has data but no partition table: installing alongside it is not possible. '
                                   'Choose “Erase the disk” if you don’t need that data.')
-        runner.run(['sgdisk', '--clear', target])
-    runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+        if table == 'msdos':
+            runner.run(['sfdisk', '--wipe', 'always', target], input_text='label: dos\n')
+        else:
+            runner.run(['sgdisk', '--clear', target])
+    if table == 'msdos':
+        # The MBR and its entries, restorable with sfdisk DISK < file.
+        (BACKUPS / f'agi-final-{Path(target).name}.sfdisk').write_text(runner.run(['sfdisk', '--dump', target]))
+        return
+    try:
+        runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    except ValidationError as exc:
+        # Another system's table that sgdisk cannot read cleanly (e.g. a damaged main GPT
+        # with an intact backup) is not repaired behind the user's back.
+        detail = next((l.strip() for l in str(exc).splitlines() if l.strip()), '')
+        raise ValidationError(f'The partition table of {target} could not be read cleanly ({detail[:200]}). '
+                              'Nothing was changed. Check it with “sudo sgdisk -v ' + target + '” or repair it in '
+                              'the other system first, or choose “Erase the disk”.') from exc
+
+
+TABLES = {'gpt': 'gpt', 'dos': 'msdos'}
+
+
+def check_table(plan, disk, layout_name):
+    """Next to other systems the disk keeps its table type: the plan must match it."""
+    if plan.table == 'msdos':
+        layout.check_mbr_size(disk['size'])
+    existing = TABLES.get(disk.get('pttype')) if disk.get('pttype') else None
+    if layout_name != 'alongside' or existing in (None, plan.table):
+        return
+    if existing == 'msdos':
+        raise ValidationError('This disk has an MBR (msdos) partition table: to install next to its systems, ask the '
+                              'agent for partition_table msdos (BIOS with GRUB) and build the preview again. Nothing was changed.')
+    raise ValidationError('This disk has a GPT: a system with an MBR (msdos) table can only erase it. '
+                          'Choose “Erase the disk” or ask the agent for GPT. Nothing was changed.')
+
+
+def mbr_slots(runner, target):
+    """Free primary entries of the disk's MBR (logical partitions are not created)."""
+    table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
+    used = {int(p['node'][len(target):].lstrip('p')) for p in table.get('partitions', [])}
+    return 4 - len(used & {1, 2, 3, 4})
 
 
 def free_regions(runner, disk_path, size):
     table = run_json(runner, ['sfdisk', '--json', disk_path])['partitiontable']
-    if table.get('label') != 'gpt':
-        raise ValidationError('Installing alongside other systems needs a GPT disk')
     total = size // SECTOR
-    first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
+    if table.get('label') == 'dos':
+        # MBR sectors are 32-bit; the first partition starts after GRUB's 1 MiB gap.
+        first, last = ALIGN, min(total, layout.MBR_SECTORS) - 1
+    elif table.get('label') != 'gpt':
+        raise ValidationError('Installing alongside other systems needs a GPT disk')
+    else:
+        first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
     used = sorted((int(p['start']), int(p['start']) + int(p['size']) - 1) for p in table.get('partitions', []))
     regions, cursor = [], first
     for start, end in used:
@@ -261,9 +375,102 @@ def free_regions(runner, disk_path, size):
     return [((s + ALIGN - 1) // ALIGN * ALIGN, (e + 1) // ALIGN * ALIGN - 1) for s, e in regions]
 
 
-def promote(runner, request, disk, source, firmware):
+def windows_guard(disk, layout_name, enroll):
+    """Windows next to the new system must be in a state that survives it (CMP-151). A
+    hibernated Windows (Fast Startup included) resumes with a stale view of the disk, so
+    installing alongside it is refused before anything is written. BitLocker measures the
+    Secure Boot keys: enrolling new ones would make Windows ask for its recovery key."""
+    warnings = []
+    if layout_name != 'alongside':
+        return warnings
+    for part in disk['partitions']:
+        if part.get('fstype') == 'ntfs' and not part['mounted']:
+            state = storage_worker.hibernated(part)
+            if state is None:
+                raise ValidationError(f'Windows on {part["path"]} could not be checked, so nothing was installed. '
+                                      'Start Windows, run “chkdsk /f”, shut it down fully and try again.')
+            if state:
+                raise ValidationError(f'Windows on {part["path"]} is hibernated or was shut down with Fast Startup; '
+                                      'installing next to it now could corrupt it. Start Windows, turn off Fast Startup, '
+                                      'hold Shift while you click Shut down, and try again. Nothing was changed.')
+        if part.get('fstype') == 'BitLocker':
+            if enroll:
+                raise ValidationError('Windows on this disk uses BitLocker: enrolling Secure Boot keys would make it ask '
+                                      'for the recovery key at every start. Install without enrolling the keys; after '
+                                      'suspending BitLocker in Windows you can enroll them with sudo sbctl enroll-keys --microsoft.')
+            if BITLOCKER_NOTE not in warnings:
+                warnings.append(BITLOCKER_NOTE)
+    return warnings
+
+
+def existing_esp(runner, disk):
+    """The EFI system partition already on the target (Windows' or another system's), or None."""
+    if disk.get('pttype') != 'gpt':
+        return None
+    table = run_json(runner, ['sfdisk', '--json', disk['path']])['partitiontable']
+    return next((p['node'] for p in table.get('partitions', [])
+                 if str(p.get('type', '')).upper() == layout.ESP_GUID), None)
+
+
+def inspect_esp(runner, node, point):
+    """Free bytes on an existing ESP and whether Windows Boot Manager lives there; read-only."""
+    point.mkdir(exist_ok=True)
+    runner.run(['mount', '-o', SOURCE_MOUNT, node, str(point)])
+    try:
+        stat = os.statvfs(point)
+        return stat.f_bavail * stat.f_frsize, (point / WINDOWS_LOADER).is_file()
+    finally:
+        runner.run(['umount', str(point)])
+
+
+def kept_partitions(runner, target, skip=()):
+    """Identity of every partition of other systems on the target: it must not change."""
+    table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
+    return {(int(p['start']), int(p['size']), str(p.get('type', '')).upper(), str(p.get('uuid', '')).upper())
+            for p in table.get('partitions', []) if p['node'] not in skip}
+
+
+def windows_entry(esp_uuid):
+    """A GRUB menu entry that chainloads Windows Boot Manager from its own ESP."""
+    return ('#!/bin/sh\nexec tail -n +3 "$0"\n'
+            "menuentry 'Windows Boot Manager' --class windows --class os {\n"
+            '    insmod part_gpt\n    insmod fat\n'
+            f'    search --no-floppy --fs-uuid --set=root {esp_uuid}\n'
+            f'    chainloader /{WINDOWS_LOADER}\n}}\n')
+
+
+def bios_windows(disk):
+    """The NTFS partition of a BIOS Windows on this MBR disk (the one holding its boot
+    manager), or None. Read through a temporary read-only mount."""
+    if disk.get('pttype') != 'dos':
+        return None
+    for part in disk.get('partitions', []):
+        if part.get('fstype') != 'ntfs' or part.get('mounted'):
+            continue
+        point = storage_worker.PREVIEW / 'check'
+        if not storage_worker.read_only_mount(part['path'], 'ntfs', point):
+            continue
+        try:
+            if any((point / name).is_file() for name in ('bootmgr', 'BOOTMGR')):
+                return part
+        finally:
+            subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+    return None
+
+
+def bios_windows_entry(uuid):
+    """A GRUB menu entry that starts a BIOS Windows through its partition's boot sector."""
+    return ('#!/bin/sh\nexec tail -n +3 "$0"\n'
+            "menuentry 'Windows' --class windows --class os {\n"
+            '    insmod part_msdos\n    insmod ntfs\n'
+            f'    search --no-floppy --fs-uuid --set=root {uuid}\n'
+            '    chainloader +1\n}\n')
+
+
+def promote(runner, request, disk, source, plan):
     """Turn the nested partitions of the preview partition into real disk partitions."""
     target = disk['path']
+    firmware = plan.firmware
     preview = request['image']['path']
     table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
     entry = next((p for p in table['partitions'] if p['node'] == preview), None)
@@ -274,6 +481,8 @@ def promote(runner, request, disk, source, firmware):
     for part in nested:
         if int(part['start']) % ALIGN:
             raise ValidationError('The preview partitions are not aligned; they can’t be promoted')
+    if plan.table == 'msdos':
+        return promote_mbr(runner, request, disk, source, plan, base, nested)
     emit('final-progress', text='Promoting the preview partitions to disk partitions (no data moves)')
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
     if request['layout'] == 'erase':
@@ -287,7 +496,7 @@ def promote(runner, request, disk, source, firmware):
         start, end = base + int(part['start']), base + int(part['start']) + int(part['size']) - 1
         name = part.get('name', '')
         kind = 'bios' if name == 'BIOS' else 'boot' if name == 'AGI-BOOT' else 'linux'
-        typecode = TYPES[kind] if not (kind == 'boot' and firmware == 'bios') else TYPES['linux']
+        typecode = plan.part('boot').typecode if kind == 'boot' else TYPES[kind]
         args += [f'--new=0:{start}:{end}', f'--typecode=0:{typecode}', f'--change-name=0:{name or "AGI-ROOT"}']
         kinds[kind] = (start, end)
     runner.run(args + [target])
@@ -306,60 +515,119 @@ def promote(runner, request, disk, source, firmware):
     return node('boot'), node('linux'), False
 
 
-def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), reserve=0):
+def promote_mbr(runner, request, disk, source, plan, base, nested):
+    """The preview's MBR entries become the disk's new MBR at the same absolute sectors.
+    The disk's own table was a GPT holding the preview partition; only a whole-disk
+    install converts it (next to other systems the disk keeps its table type)."""
+    target = disk['path']
+    if request['layout'] != 'erase' or source.label != 'dos':
+        raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
+    roles = {p.number: p.role for p in plan.partitions}
+    absolute = []
+    for part in nested:
+        start, size = base + int(part['start']), int(part['size'])
+        if start + size > layout.MBR_SECTORS:
+            raise ValidationError('An MBR (msdos) table covers only the first 2 TiB of the disk; choose GPT')
+        role = roles.get(int(part['node'][len(source.device):].lstrip('p')))
+        if role is None:
+            raise ValidationError('The preview holds an unexpected partition')
+        absolute.append((role, start, size))
+    emit('final-progress', text='Promoting the preview partitions to an MBR partition table (no data moves)')
+    runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    runner.run(['sgdisk', '--zap-all', target])
+    # The new entries lie over the preview's file systems: sfdisk must not wipe them.
+    runner.run(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'never', '--label', 'dos', target],
+               input_text=layout.mbr_script([(start, size, layout.MBR_LINUX, role == 'boot')
+                                             for role, start, size in absolute]))
+    # The preview's own MBR sits in the gap before its first partition now.
+    head = min(int(p['start']) for p in nested)
+    runner.run(['dd', 'if=/dev/zero', f'of={target}', 'bs=512', f'seek={base}', f'count={head}', 'conv=notrunc,fsync'])
+    runner.run(['partprobe', target])
+    runner.run(['udevadm', 'settle', '--timeout=30'])
+    refreshed = run_json(runner, ['sfdisk', '--json', target])['partitiontable']['partitions']
+    def node(role):
+        start = next(s for r, s, _ in absolute if r == role)
+        return next(p['node'] for p in refreshed if int(p['start']) == start)
+    return node('boot'), node('root'), False
+
+
+def gpt_partitions(runner, plan, target, start, end):
+    """The plan's GPT entries in the free region start..end; returns where /boot starts and ends."""
+    args = ['sgdisk']
+    if plan.firmware == 'bios':
+        bios = plan.part('bios')
+        args += [f'--new=0:{start}:{start + 4095}', f'--typecode=0:{bios.typecode}', f'--change-name=0:{bios.name}']
+        start += 4096
+    boot_part, root_part = plan.part('boot'), plan.part('root')
+    boot_end = start + boot_part.size // SECTOR - 1
+    args += [f'--new=0:{start}:{boot_end}', f'--typecode=0:{boot_part.typecode}', f'--change-name=0:{boot_part.name}',
+             f'--new=0:{boot_end + 1}:{end}', f'--typecode=0:{root_part.typecode}', f'--change-name=0:{root_part.name}', target]
+    runner.run(args)
+    return start, boot_end
+
+
+def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserve=0):
     """Create fresh partitions on the target and copy the preview into them file by file.
 
     Paths in skip (root-relative, e.g. the hibernation swap file) are recreated by the
     caller: a copied swap file would sit at other physical blocks than resume_offset says.
     reserve is the space the caller needs for them on the new root."""
     target = disk['path']
-    boot_number = 1 if firmware == 'uefi' else 2
-    root_number = boot_number + 1
-    src_root, encrypted = source.open_root(root_number, passphrase)
+    check_table(plan, disk, request['layout'])  # finalize() checked it already; a GPT write would convert an MBR.
+    if plan.table == 'msdos' and request['layout'] == 'alongside' and disk.get('pttype') and mbr_slots(runner, target) < 2:
+        raise ValidationError('The MBR of this disk has fewer than two free primary entries for /boot and the root '
+                              '(an MBR holds four). Nothing was changed.')
+    boot_number = plan.part('boot').number
+    src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
-    mount_source_root(runner, src_root, src_mount)
+    # The preview's subvolumes (CMP-153) are mounted in place, so rsync copies each into
+    # the same subvolume of the new root.
+    plan = source_plan(runner, plan, src_root)
+    mount_source(runner, plan, src_root, src_mount)
     source.mount = src_mount
     runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
     skipped = [f'--exclude={src_mount / path}' for path in skip]
-    used = int(runner.run(['du', '-sxB1', *skipped, str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
+    # Not -x: subvolumes are other file systems to du; /boot and snapshots are left out here.
+    used = (int(runner.run(['du', '-sB1', *skipped, f'--exclude={src_mount / "boot"}', f'--exclude={src_mount / ".snapshots"}',
+                            str(src_mount)]).split()[0])
+            + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0]))
     needed = used + used // 5 + 2 * GIB + reserve
     emit('final-progress', text=f'Creating partitions on {target} for {used / GIB:.1f} GiB of data')
-    prepare_table(runner, request['layout'], disk)
+    prepare_table(runner, request['layout'], disk, plan.table)
     regions = [r for r in free_regions(runner, target, disk['size']) if (r[1] - r[0] + 1) * SECTOR >= needed]
     if not regions:
         raise ValidationError(f'The disk has no free space for the system ({needed / GIB:.1f} GiB)')
     start, end = max(regions, key=lambda r: r[1] - r[0])
-    args = ['sgdisk']
-    if firmware == 'bios':
-        args += [f'--new=0:{start}:{start + 4095}', '--typecode=0:ef02', '--change-name=0:BIOS']
-        start += 4096
-    boot_end = start + GIB // SECTOR - 1
-    args += [f'--new=0:{start}:{boot_end}', '--typecode=0:' + ('ef00' if firmware == 'uefi' else '8300'), '--change-name=0:AGI-BOOT',
-             f'--new=0:{boot_end + 1}:{end}', '--typecode=0:8300', '--change-name=0:AGI-ROOT', target]
-    runner.run(args)
+    if plan.table == 'msdos':
+        boot_part, root_part = plan.part('boot'), plan.part('root')
+        boot_end = start + boot_part.size // SECTOR - 1
+        # Active flag only on a disk of its own: next to Windows its partition stays the active one.
+        runner.run(['sfdisk', '--append', '--wipe-partitions', 'never', target], input_text=layout.mbr_script(
+            [(start, boot_part.size // SECTOR, boot_part.typecode, request['layout'] == 'erase'),
+             (boot_end + 1, end - boot_end, root_part.typecode, False)]))
+    else:
+        start, boot_end = gpt_partitions(runner, plan, target, start, end)
     runner.run(['partprobe', target])
     runner.run(['udevadm', 'settle', '--timeout=30'])
     refreshed = run_json(runner, ['sfdisk', '--json', target])['partitiontable']['partitions']
     boot = next(p['node'] for p in refreshed if int(p['start']) == start)
     root_partition = next(p['node'] for p in refreshed if int(p['start']) == boot_end + 1)
     fstype = runner.run(['blkid', '-s', 'TYPE', '-o', 'value', src_root]).strip()
-    runner.run(['mkfs.fat', '-F', '32', boot] if firmware == 'uefi' else ['mkfs.ext4', '-F', boot])
-    root = root_partition
+    layout.format_boot(runner, plan, boot)
     if encrypted:
         emit('final-progress', text='Encrypting the root partition of the target disk (LUKS2)')
-        runner.run(['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', root_partition], input_text=passphrase)
-        runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
-        root = '/dev/mapper/' + TARGET_MAP
-    force = {'ext4': '-F', 'btrfs': '-f', 'xfs': '-f', 'f2fs': '-f'}[fstype]
-    runner.run(['mkfs.' + fstype, force, root])
+    # The preview's file system decides, not the plan's: they match unless the record was forged.
+    target_plan = replace(plan, encrypted=encrypted, filesystem=fstype,
+                          group=plan.group if getattr(source, 'group', None) else None)
+    root = layout.create_root(runner, target_plan, root_partition, passphrase, TARGET_MAP)
     dst = mount / 'target'
     dst.mkdir()
-    runner.run(['mount', root, str(dst)])
-    (dst / 'boot').mkdir()
-    runner.run(['mount', boot, str(dst / 'boot')])
+    layout.mount_root(runner, target_plan, root, dst)
+    layout.mount_boot(runner, target_plan, boot, dst)
     emit('final-progress', text='Copying the checked system file by file', step='copy', percent=0)
-    excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
+    # Snapshots of the preview's root are not part of the installed system.
+    excludes = ['--exclude=/boot/*', '--exclude=/.snapshots/*', *[f'--exclude=/{path}' for path in skip]]
     # --no-inc-recursive: rsync counts all files first, so its overall percentage is steady.
     runner.run(['rsync', '-aHAX', '--numeric-ids', '--info=progress2', '--no-inc-recursive', *excludes, f'{src_mount}/', f'{dst}/'],
                timeout=14400, progress=copy_progress('Copying the checked system file by file'))
@@ -370,8 +638,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     differences += runner.run(['rsync', '-rcn', '--no-perms', '--no-owner', '--no-group', '--out-format=%n', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600).strip()
     if differences:
         raise ValidationError('The copy did not pass the check: ' + differences.splitlines()[0])
-    runner.run(['umount', str(src_mount / 'boot')])
-    runner.run(['umount', str(src_mount)])
+    runner.run(['umount', '--recursive', str(src_mount)])
     source.mount = None
     return boot, root_partition, root, encrypted, dst
 
@@ -460,7 +727,7 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
                  + (', '.join(plan['packages']) or 'no extra ones needed'))
         # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
         dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
-        if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation'))):
+        if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation')), config.lvm):
             dropin.parent.mkdir(exist_ok=True)
             dropin.write_text(initramfs)
         elif dropin.exists():
@@ -522,35 +789,59 @@ def enroll_or_warn(runner, chroot, record):
         emit('final-warning', text=warning)
 
 
+def live_firmware():
+    return 'uefi' if Path('/sys/firmware/efi').is_dir() else 'bios'
+
+
 def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
-    firmware = 'uefi' if Path('/sys/firmware/efi').is_dir() else 'bios'
-    boot_number = 1 if firmware == 'uefi' else 2
+    firmware = live_firmware()
+    plan = layout.plan_for(config, firmware)
+    check_table(plan, disk, request['layout'])
     passphrase = request.pop('passphrase')
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])
     opened_target = False
+    target_group = None
     dst = None
+    efi_mounted = False
     try:
+        # Before the preview is even opened: nothing is written while Windows is not safe.
+        notes = windows_guard(disk, request['layout'], request['enroll_keys'])
         emit('final-progress', text='Opening the preview for checking')
         source.attach()
-        src_root, encrypted = source.open_root(boot_number + 1, passphrase)
-        record = read_record(runner, src_root, mount)
-        check_record(record, config, firmware, encrypted)
-        if source.opened:
-            runner.run(['cryptsetup', 'close', SOURCE_MAP]); source.opened = False
+        src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
+        plan = source_plan(runner, plan, src_root)
+        record = read_record(runner, src_root, mount, plan)
+        check_record(record, config, firmware, encrypted, bool(source.group))
+        source.close_root()
+        esp, windows = None, False
+        if request['layout'] == 'alongside' and firmware == 'uefi':
+            esp = existing_esp(runner, disk)
+        if esp:
+            free, windows = inspect_esp(runner, esp, mount / 'esp')
+            if config.bootloader == 'systemd-boot':
+                if free < ESP_ROOM:
+                    raise ValidationError(f'The EFI system partition {esp} has only {free // MIB} MiB free; systemd-boot '
+                                          f'needs {ESP_ROOM // MIB} MiB there. Nothing was changed.')
+                plan = replace(layout.plan_for(config, firmware, shared_esp=True), subvolumes=plan.subvolumes)
+        preview = request['image']['path'] if request['image']['on_target'] else None
+        kept = kept_partitions(runner, target, {preview}) if request['layout'] == 'alongside' and disk.get('pttype') else None
         if request['image']['on_target']:
             source.detach()
-            boot, root_partition, _ = promote(runner, request, disk, source, firmware)
+            boot, root_partition, _ = promote(runner, request, disk, source, plan)
             root = root_partition
             if encrypted:
                 runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
                 opened_target = True
                 root = '/dev/mapper/' + TARGET_MAP
+            # A promoted LVM root keeps the preview's volume group (same name, same UUIDs).
+            if found := layout.activate_root(runner, root):
+                target_group, root = found
             dst = mount / 'target'
             dst.mkdir()
-            runner.run(['mount', root, str(dst)])
+            layout.mount_root(runner, plan, root, dst)
             runner.run(['mount', boot, str(dst / 'boot')])
             if record.get('hibernation'):
                 discard_hibernation_image(runner, dst)
@@ -559,12 +850,23 @@ def finalize(request, runner):
             # The swap directory (a subvolume on btrfs) is recreated, not copied.
             skip = [str(Path(SWAPFILE).parent)] if record.get('hibernation') else []
             swap_size = swapfile_size(record) if skip else 0
-            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, firmware, passphrase, mount,
+            target_group = plan.group  # created by the copy; deactivated even if the copy fails
+            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, plan, passphrase, mount,
                                                               skip, swap_size)
             opened_target = encrypted
             moved = True
         passphrase = None
         chroot = ['arch-chroot', str(dst)]
+        if plan.shared_esp:
+            emit('final-progress', text=f'Sharing the EFI system partition {esp} with the other system (not formatted)')
+            (dst / 'efi').mkdir(exist_ok=True)
+            runner.run(['mount', '-o', 'umask=0077', esp, str(dst / 'efi')])
+            efi_mounted = True
+            if not moved:
+                # genfstab runs only after a copy; a promoted system keeps its fstab and gains /efi.
+                esp_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', esp]).strip()
+                with open(dst / 'etc/fstab', 'a') as fstab:
+                    fstab.write(f'UUID={esp_uuid} /efi vfat umask=0077 0 2\n')
         if moved:
             emit('final-progress', text='Updating partition IDs in the new system')
             root_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root]).strip()
@@ -572,8 +874,8 @@ def finalize(request, runner):
             resume = None
             if record.get('hibernation'):
                 resume = recreate_swapfile(runner, dst, root_uuid, record, swap_size)
-            (dst / 'etc/fstab').write_text(runner.run(['genfstab', '-U', str(dst)]) + (swap_fstab_line() if resume else ''))
-            options = boot_options(root_uuid, luks_uuid, resume)
+            (dst / 'etc/fstab').write_text(layout.fstab(runner.run(['genfstab', '-U', str(dst)])) + (swap_fstab_line() if resume else ''))
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan), bool(target_group))
             defaults = dst / 'etc/default/grub'
             if defaults.exists() and (encrypted or resume):
                 defaults.write_text(grub_defaults(defaults.read_text(), luks_uuid, resume))
@@ -585,13 +887,35 @@ def finalize(request, runner):
         emit('final-progress', text='Rebuilding initramfs for this computer’s hardware')
         runner.run([*chroot, 'mkinitcpio', '-P'])
         emit('final-progress', text='Registering the boot of the installed system')
-        if config.bootloader == 'systemd-boot':
+        if config.bootloader == 'systemd-boot' and plan.shared_esp:
+            # systemd-boot reads loader.conf only from the ESP; kernels and entries stay on
+            # the XBOOTLDR /boot, and Windows Boot Manager on the ESP gets its menu entry.
+            conf = dst / 'efi/loader/loader.conf'
+            if not conf.exists():
+                conf.parent.mkdir(parents=True, exist_ok=True)
+                own = dst / 'boot/loader/loader.conf'
+                conf.write_text(own.read_text() if own.is_file() else 'default agi-os.conf\ntimeout 3\n')
+            runner.run([*chroot, 'bootctl', '--esp-path=/efi', '--boot-path=/boot', 'install'])
+        elif config.bootloader == 'systemd-boot':
             runner.run([*chroot, 'bootctl', '--esp-path=/boot', 'install'])
         elif firmware == 'uefi':
+            if windows:
+                esp_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', esp]).strip()
+                entry = dst / 'etc/grub.d/35_agios_windows'
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_text(windows_entry(esp_uuid))
+                entry.chmod(0o755)
             runner.run([*chroot, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--bootloader-id=AGIOS', '--removable'])
             runner.run([*chroot, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--bootloader-id=AGIOS'])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         else:
+            windows_part = bios_windows(disk) if request['layout'] == 'alongside' else None
+            if windows_part:
+                entry = dst / 'etc/grub.d/35_agios_windows'
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_text(bios_windows_entry(runner.run(['blkid', '-s', 'UUID', '-o', 'value', windows_part['path']]).strip()))
+                entry.chmod(0o755)
+                windows = True
             runner.run([*chroot, 'grub-install', '--target=i386-pc', target])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         if request['enroll_keys']:
@@ -608,6 +932,14 @@ def finalize(request, runner):
                 warning = 'Secure Boot signatures are not confirmed: ' + ', '.join(unsigned)[:300] + '. Run sudo sbctl verify'
                 record['warnings'] = record.get('warnings', []) + [warning]
                 emit('final-warning', text=warning)
+        if kept is not None and kept - kept_partitions(runner, target):
+            raise ValidationError('A partition of another system on the disk changed during the installation. '
+                                  'Do not start that system before checking it; the GPT backup is in /run.')
+        if esp or windows:
+            record['dual_boot'] = {'esp': esp, 'shared_esp': plan.shared_esp, 'windows': windows}
+        for note in notes:
+            emit('final-warning', text=note)
+        record['warnings'] = record.get('warnings', []) + notes
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
         record['finalization'] = {'preview_id': record['id'], 'target': target, 'mode': 'copy' if moved else 'promote',
                                   'layout': request['layout'], 'target_fingerprint': disk['fingerprint'], 'live_firmware': firmware}
@@ -616,9 +948,13 @@ def finalize(request, runner):
         record['status'] = 'final_first_boot_pending'
         (dst / 'var/lib/agi-os/installation.json').write_text(json.dumps(record, ensure_ascii=False, indent=2))
         runner.run(['sync'])
+        if efi_mounted:
+            runner.run(['umount', str(dst / 'efi')])
         runner.run(['umount', str(dst / 'boot')])
-        runner.run(['umount', str(dst)])
+        runner.run(['umount', '--recursive', str(dst)])
         dst = None
+        layout.deactivate(runner.run, target_group)
+        target_group = None
         if opened_target:
             runner.run(['cryptsetup', 'close', TARGET_MAP]); opened_target = False
         emit('finalized', text='The system on ' + target + ' is ready to boot. Shut down Live, remove the stick and power on the computer.',
@@ -628,10 +964,12 @@ def finalize(request, runner):
         request.pop('passphrase', None)
         if dst and dst.exists():
             subprocess.run(['umount', '-R', str(dst)], capture_output=True)
+        if target_group:
+            subprocess.run(['vgchange', '--activate', 'n', target_group], capture_output=True)
         if opened_target:
             subprocess.run(['cryptsetup', 'close', TARGET_MAP], capture_output=True)
         source.detach()
-        for child in ('source', 'target'):
+        for child in ('source', 'target', 'esp'):
             try: (mount / child).rmdir()
             except OSError: pass
         try: mount.rmdir()

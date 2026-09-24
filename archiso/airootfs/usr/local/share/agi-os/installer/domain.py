@@ -35,10 +35,14 @@ CONFIG_SCHEMA = obj({
     "console_keymap": STRING, "console_font": STRING, "fonts": STRINGS,
     "locale_overrides": {"type": "array", "items": obj({"variable": STRING, "locale": STRING})},
     "time_sync": {"type": "boolean"},
+    "partition_table": {"type": "string", "enum": ["gpt", "msdos"]},
+    "lvm": {"type": "boolean"},
 })
 # Fields added after the first release: records and scripted test configurations
 # written before them still parse, with the engine's automatic choices.
-LATER_FIELDS = {"console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True}
+LATER_FIELDS = {"console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
+                "partition_table": "gpt", "lvm": False}
+PARTITION_TABLES = ("gpt", "msdos")
 LOCALE = r"(?:[a-z]{2,3}_[A-Z]{2}|C)\.UTF-8"
 LC_VARIABLES = ("LC_ADDRESS", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION", "LC_MEASUREMENT", "LC_MESSAGES",
                 "LC_MONETARY", "LC_NAME", "LC_NUMERIC", "LC_PAPER", "LC_TELEPHONE", "LC_TIME")
@@ -284,6 +288,8 @@ class Configuration:
     fonts: tuple = ()
     locale_overrides: tuple = ()
     time_sync: bool = True
+    partition_table: str = "gpt"
+    lvm: bool = False
 
     @classmethod
     def parse(cls, data):
@@ -335,6 +341,12 @@ class Configuration:
             raise ValidationError("Duplicate LC_* variables")
         if not isinstance(data["time_sync"], bool):
             raise ValidationError("Invalid field: time_sync")
+        if data["partition_table"] not in PARTITION_TABLES:
+            raise ValidationError("partition_table: gpt or msdos")
+        if data["partition_table"] == "msdos" and data["bootloader"] != "grub":
+            raise ValidationError("An MBR (msdos) disk boots with GRUB on BIOS computers; choose grub or a GPT disk")
+        if not isinstance(data["lvm"], bool):
+            raise ValidationError("Invalid field: lvm")
         zone = Path("/usr/share/zoneinfo") / data["timezone"]
         if not zone.resolve().is_relative_to(Path("/usr/share/zoneinfo")) or not zone.is_file():
             raise ValidationError("Unknown time zone")
@@ -481,10 +493,15 @@ class Configuration:
             f"Erase ALL data: {self.disk} · {disk['size'] / 2**30:.1f} GiB · {disk.get('model') or 'model unknown'}"
             + (f" · {disk.get('tran') or 'disk'} {'HDD' if disk.get('rota') else 'SSD'}" if disk.get('rota') is not None else ""),
             f"Serial number: {disk.get('serial') or 'unknown'}",
-            "Partitions: the whole disk, GPT, a separate boot partition and the root",
+            f"Partitions: the whole disk, {'MBR (msdos)' if self.partition_table == 'msdos' else 'GPT'}, "
+            "a separate boot partition and the root"
+            + (" as an LVM logical volume (volume group on the root partition, inside the encryption when chosen)"
+               if self.lvm else ""),
             self.swap_summary(hardware),
             "Root encryption (LUKS2): you choose when you confirm; the password is entered separately",
-            f"Filesystem: {self.filesystem}; bootloader: {self.bootloader}",
+            f"Filesystem: {self.filesystem}; bootloader: {self.bootloader}"
+            + ("; btrfs subvolumes @, @home, @log, @pkg; a snapshot before every update, undo with "
+               "sudo agi-os-update rollback" if self.filesystem == "btrfs" else ""),
             f"Desktop: {self.desktop}; session: {self.session or 'console'}",
             f"Computer: {self.hostname}; user: {self.username} (sudo with a password)",
             f"Language: {self.locale}; layouts: {', '.join(self.keyboard_layouts)}; time zone: {self.timezone}",
@@ -607,8 +624,19 @@ otf-*, *-fonts: emoji, CJK, Nerd Fonts…); [] means the app adds DejaVu and
 Liberation, plus Noto CJK for Chinese/Japanese/Korean. Fontconfig preferences go
 to system_files etc/fonts/local.conf. time_sync enables NTP time synchronization
 (true unless the user declines). keyboard_layouts are the desktop XKB layouts.
-The current executable storage handlers support whole-disk erase with GPT;
-ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
+lvm=true puts the root file system on an LVM logical volume (a volume group on the
+root partition; with encryption, LVM inside LUKS). Use it only when the user asks for
+LVM; otherwise false.
+The current executable storage handlers support GPT, whole disk or next to other systems;
+partition_table="msdos" writes an MBR table instead: only for BIOS computers with
+GRUB, disks up to 2 TiB; choose it when the user asks for MBR, the computer's firmware
+cannot boot GPT disks (some old BIOS machines) or the system goes next to a BIOS
+Windows on an MBR disk (the disk keeps its table; two free primary entries needed,
+the preview then lives in memory or on another medium); otherwise keep "gpt";
+ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. btrfs gets subvolumes
+(@ root, @home, @log, @pkg, @snapshots): before every system update the app takes a
+snapshot of the root, and `sudo agi-os-update rollback` puts the system back to it
+(files in /home stay) — suggest btrfs when the user wants to be able to undo updates. Swap is a zram
 device by default (swap="zram": no hibernation). swap="hibernate" adds, next to zram,
 a swap file as large as the computer's RAM inside the root filesystem (encrypted with
 it when LUKS is chosen) and configures resume for hibernation; it costs that much disk
@@ -620,9 +648,15 @@ Secure Boot is offered there too for UEFI with systemd-boot: the app creates the
 system's own keys, signs boot loader and kernel (re-signed on updates) and, if the
 firmware is in Setup Mode, enrolls the keys at final installation; recommend
 systemd-boot when the user wants Secure Boot. GRUB is not signed.
-No dual boot or partition preservation handler exists yet. Explain if these are
-requested; never misrepresent or silently omit them. User must agree to a supported
-alternative before you propose a configuration. Applications and environments
+Installing next to Windows or another system (dual boot) is supported on GPT disks:
+the preview goes into free space (or a shrunk NTFS/ext4 partition) and the app's final
+step "Keep what's on the disk" keeps the other partitions; on UEFI with systemd-boot
+it shares the existing EFI partition and its boot menu lists Windows Boot Manager
+(recommend systemd-boot for dual boot on UEFI; GRUB adds a Windows entry too). The
+app refuses while Windows is hibernated or shut down with Fast Startup and never
+shrinks a BitLocker volume: tell the user to turn Fast Startup off and shut Windows
+down fully first, and to keep a BitLocker recovery key at hand. Still ask what data to
+preserve and recommend a backup. Never misrepresent what is supported. Applications and environments
 are open choices from official core/extra repositories, not a fixed catalog.
 Use detected hardware/firmware and eligible disks supplied by the app: the real GPU,
 Wi-Fi, sound, Bluetooth and chassis are listed there. The app itself adds the driver,

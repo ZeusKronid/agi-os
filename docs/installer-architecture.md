@@ -72,7 +72,10 @@ flowchart TD
 4. **Превью.** `runtime.py` запускает QEMU на образе (`discard=unmap`,
    `virtio-balloon` с free-page-reporting). `guest.py` передаёт инвентаризацию
    внутренней VM; контроллер отправляет конфигурацию с `disk=/dev/vda`,
-   отпечаток, пароль и пароль шифрования; `worker.py` ставит систему партиями
+   отпечаток, пароль и пароль шифрования; разметку описывает план
+   `layout.py` (таблица → разделы → стек корня LUKS2 → ФС; сюда же
+   добавляются msdos, LVM, подтома btrfs и dual boot из CMP-123), его же
+   читает `finalize_worker.py`; `worker.py` ставит систему партиями
    (`pacman -Scc` + `fstrim` между ними), настраивает LUKS2 (`encrypt` hook,
    `cryptdevice=`), zram-generator, при `swap: hibernate` — swap-файл размером
    с RAM реального компьютера (`resume=`/`resume_offset=`, хук `resume`),

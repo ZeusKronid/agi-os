@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -129,7 +130,8 @@ class PromoteTests(unittest.TestCase):
             partitions = nested
         request = {'image': {'format': 'raw', 'path': '/dev/vda2'}, 'layout': 'alongside'}
         with patch.object(finalize_worker, 'emit'):
-            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(), 'uefi')
+            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(),
+                                                     finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'uefi'))
         self.assertEqual((boot, root), ('/dev/vda2', '/dev/vda3'))
         sgdisk = [c for c in calls if c[0] == 'sgdisk' and any(a.startswith('--new') for a in c)][0]
         self.assertIn(f'--new=0:{base + 2048}:{base + 2048 + GIB // 512 - 1}', sgdisk)
@@ -140,6 +142,186 @@ class PromoteTests(unittest.TestCase):
         # The nested table and the preview record before the first nested partition are erased.
         self.assertIn(f'seek={base}', zeroing[0])
         self.assertIn('count=2048', zeroing[0])
+
+
+def dos(partitions):
+    return json.dumps({'partitiontable': {'label': 'dos', 'partitions': partitions}})
+
+
+def mbr_plan():
+    return finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4', partition_table='msdos', bootloader='grub'), 'bios')
+
+
+class MbrFinalizeTests(unittest.TestCase):
+    """CMP-152: an msdos preview becomes the disk's MBR."""
+
+    def test_promote_writes_an_mbr_over_the_same_sectors_without_wiping_them(self):
+        calls, inputs = [], []
+        base = 2048
+        outer = gpt([{'node': '/dev/vda1', 'start': base, 'size': 20 * GIB // 512, 'name': 'AGIOS-PREVIEW'}], 64 * GIB)
+        nested = [{'node': '/dev/loop0p1', 'start': 2048, 'size': GIB // 512},
+                  {'node': '/dev/loop0p2', 'start': 2048 + GIB // 512, 'size': 18 * GIB // 512}]
+        boot_start, root_start = base + 2048, base + 2048 + GIB // 512
+        refreshed = dos([{'node': '/dev/vda1', 'start': boot_start, 'size': GIB // 512},
+                         {'node': '/dev/vda2', 'start': root_start, 'size': 18 * GIB // 512}])
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args); inputs.append(input_text)
+                if args[:2] == ['sfdisk', '--json']:
+                    return outer if len([c for c in calls if c[:2] == ['sfdisk', '--json']]) == 1 else refreshed
+                return ''
+        class Source:
+            partitions, device, label = nested, '/dev/loop0', 'dos'
+        request = {'image': {'format': 'raw', 'path': '/dev/vda1'}, 'layout': 'erase'}
+        with patch.object(finalize_worker, 'emit'):
+            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(), mbr_plan())
+        self.assertEqual((boot, root), ('/dev/vda1', '/dev/vda2'))
+        write = calls.index(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'never', '--label', 'dos', '/dev/vda'])
+        self.assertEqual(inputs[write], f'start={boot_start}, size={GIB // 512}, type=83, bootable\n'
+                                        f'start={root_start}, size={18 * GIB // 512}, type=83\n')
+        self.assertLess(calls.index(['sgdisk', '--zap-all', '/dev/vda']), write)
+        zeroing = [c for c in calls if c[0] == 'dd']
+        self.assertEqual(len(zeroing), 1)  # No GPT backup at the end of an MBR preview: its root runs there.
+        self.assertIn(f'seek={base}', zeroing[0])
+
+    def test_promote_refuses_alongside_and_beyond_2_tib(self):
+        nested = [{'node': '/dev/loop0p1', 'start': 2048, 'size': GIB // 512},
+                  {'node': '/dev/loop0p2', 'start': 2048 + GIB // 512, 'size': 18 * GIB // 512}]
+        class Source:
+            partitions, device, label = nested, '/dev/loop0', 'dos'
+        for layout_name, base in (('alongside', 2048), ('erase', 2**32 - 4096)):
+            calls = []
+            outer = gpt([{'node': '/dev/vda1', 'start': base, 'size': 20 * GIB // 512, 'name': 'AGIOS-PREVIEW'}], 4096 * GIB)
+            class Runner:
+                def run(self, args, input_text=None, **kw):
+                    calls.append(args)
+                    return outer if args[:2] == ['sfdisk', '--json'] else ''
+            with self.subTest(layout=layout_name), patch.object(finalize_worker, 'emit'), self.assertRaises(ValidationError):
+                finalize_worker.promote(Runner(), {'image': {'path': '/dev/vda1'}, 'layout': layout_name},
+                                        {'path': '/dev/vda'}, Source(), mbr_plan())
+            self.assertEqual([c for c in calls if c[0] != 'sfdisk'], [])  # Refused before any write.
+
+    def test_copy_creates_an_mbr_with_an_active_boot_partition(self):
+        calls, inputs = [], []
+        empty = dos([])
+        refreshed = dos([{'node': '/dev/sda1', 'start': 2048, 'size': GIB // 512},
+                         {'node': '/dev/sda2', 'start': 2048 + GIB // 512, 'size': 40 * GIB // 512}])
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args); inputs.append(input_text)
+                if args[0] == 'du':
+                    return f'{4 * GIB}\t/x\n'
+                if args[:2] == ['sfdisk', '--json']:
+                    return empty if len([c for c in calls if c[:2] == ['sfdisk', '--json']]) == 1 else refreshed
+                if args[0] == 'blkid':
+                    return 'ext4\n'
+                return ''
+        class Source:
+            mount, group = None, None
+            def open_root(self, number, passphrase):
+                return '/dev/nbd0p2', False
+            def partition(self, number):
+                return f'/dev/nbd0p{number}'
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'):
+            boot, root_partition, *_ = finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/sda', 'size': 64 * GIB},
+                                                            Source(), mbr_plan(), '', Path(tmp))
+        self.assertEqual((boot, root_partition), ('/dev/sda1', '/dev/sda2'))
+        label = calls.index(['sfdisk', '--wipe', 'always', '/dev/sda'])
+        self.assertEqual(inputs[label], 'label: dos\n')
+        append = calls.index(['sfdisk', '--append', '--wipe-partitions', 'never', '/dev/sda'])
+        last = 64 * GIB // 512 - 1
+        self.assertEqual(inputs[append], f'start=2048, size={GIB // 512}, type=83, bootable\n'
+                                         f'start={2048 + GIB // 512}, size={last - (2048 + GIB // 512) + 1}, type=83\n')
+        self.assertIn(['mkfs.ext4', '-F', '/dev/sda1'], calls)
+
+    def test_copy_next_to_windows_on_mbr_appends_two_inactive_primaries(self):
+        windows = [{'node': '/dev/sda1', 'start': 2048, 'size': 100 * 2048, 'type': '7', 'bootable': True},
+                   {'node': '/dev/sda2', 'start': 206848, 'size': 30 * GIB // 512, 'type': '7'}]
+        free = 206848 + 30 * GIB // 512
+        mine = [{'node': '/dev/sda3', 'start': free, 'size': GIB // 512, 'type': '83'},
+                {'node': '/dev/sda4', 'start': free + GIB // 512, 'size': 20 * GIB // 512, 'type': '83'}]
+        for existing, fits in ((windows, True), (windows + [{'node': '/dev/sda3', 'start': free, 'size': 2048, 'type': '83'}], False)):
+            calls, inputs = [], []
+            class Runner:
+                def run(self, args, input_text=None, **kw):
+                    calls.append(args); inputs.append(input_text)
+                    if args[0] == 'du':
+                        return f'{4 * GIB}\t/x\n'
+                    if args[:2] == ['sfdisk', '--json']:
+                        return dos(existing + mine) if any(c[:2] == ['sfdisk', '--append'] for c in calls) else dos(existing)
+                    if args[:2] == ['sfdisk', '--dump']:
+                        return 'label: dos\n'
+                    return 'ext4\n' if args[0] == 'blkid' else ''
+            class Source:
+                mount = None
+                def open_root(self, number, passphrase):
+                    return '/dev/nbd0p2', False
+                def partition(self, number):
+                    return f'/dev/nbd0p{number}'
+            import tempfile
+            with self.subTest(fits=fits), tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'), \
+                    patch.object(finalize_worker, 'BACKUPS', Path(tmp)):
+                (Path(tmp) / 'm').mkdir()
+                disk = {'path': '/dev/sda', 'size': 64 * GIB, 'pttype': 'dos'}
+                if not fits:
+                    with self.assertRaises(ValidationError):
+                        finalize_worker.copy(Runner(), {'layout': 'alongside'}, disk, Source(), mbr_plan(), '', Path(tmp) / 'm')
+                    self.assertFalse([c for c in calls if c[0] in ('sfdisk', 'sgdisk', 'mkfs.ext4') and c[1] != '--json'])
+                    continue
+                boot, root_partition, *_ = finalize_worker.copy(Runner(), {'layout': 'alongside'}, disk, Source(),
+                                                                mbr_plan(), '', Path(tmp) / 'm')
+                self.assertEqual((boot, root_partition), ('/dev/sda3', '/dev/sda4'))
+                self.assertTrue((Path(tmp) / 'agi-final-sda.sfdisk').is_file())
+                append = calls.index(['sfdisk', '--append', '--wipe-partitions', 'never', '/dev/sda'])
+                self.assertNotIn('bootable', inputs[append])  # Windows' partition stays the active one.
+                self.assertTrue(inputs[append].startswith(f'start={free}, size={GIB // 512}, type=83\n'))
+                self.assertFalse([c for c in calls if c[0] == 'sgdisk' or c[:3] == ['sfdisk', '--wipe', 'always']])
+
+    def test_bios_windows_is_found_by_its_boot_manager_and_chainloaded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            preview = Path(tmp)
+            def mount(device, fstype, point):
+                point.mkdir(parents=True, exist_ok=True)
+                if device == '/dev/sda1':
+                    (point / 'bootmgr').write_text('')
+                return device != '/dev/sda3'
+            disk = {'pttype': 'dos', 'partitions': [
+                {'path': '/dev/sda3', 'fstype': 'ntfs', 'mounted': False},
+                {'path': '/dev/sda1', 'fstype': 'ntfs', 'mounted': False},
+                {'path': '/dev/sda2', 'fstype': 'ntfs', 'mounted': False}]}
+            with patch.object(finalize_worker.storage_worker, 'PREVIEW', preview), \
+                    patch.object(finalize_worker.storage_worker, 'read_only_mount', side_effect=mount), \
+                    patch.object(finalize_worker.subprocess, 'run'):
+                self.assertEqual(finalize_worker.bios_windows(disk)['path'], '/dev/sda1')
+                self.assertIsNone(finalize_worker.bios_windows({**disk, 'pttype': 'gpt'}))
+        entry = finalize_worker.bios_windows_entry('1234-ABCD')
+        self.assertIn('search --no-floppy --fs-uuid --set=root 1234-ABCD', entry)
+        self.assertIn('chainloader +1', entry)
+        self.assertIn('insmod part_msdos', entry)
+
+    def test_alongside_keeps_the_table_type(self):
+        for pttype, table in (('dos', 'gpt'), ('gpt', 'msdos')):
+            plan = mbr_plan() if table == 'msdos' else finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'bios')
+            with self.subTest(pttype=pttype), self.assertRaises(ValidationError):
+                finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'alongside')
+            finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'erase')
+        # copy() itself refuses a GPT plan next to an MBR disk before touching anything (sgdisk would convert it).
+        calls = []
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args)
+                return ''
+        gpt_plan = finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'bios')
+        with self.assertRaises(ValidationError):
+            finalize_worker.copy(Runner(), {'layout': 'alongside'}, {'path': '/dev/sda', 'size': 64 * GIB, 'pttype': 'dos'},
+                                 None, gpt_plan, '', Path('/nonexistent-agios-test'))
+        self.assertEqual(calls, [])
+        finalize_worker.check_table(mbr_plan(), {'pttype': 'dos', 'size': 64 * GIB}, 'alongside')
+        finalize_worker.check_table(mbr_plan(), {'pttype': None, 'size': 64 * GIB}, 'alongside')
+        with self.assertRaises(ValidationError):
+            finalize_worker.check_table(mbr_plan(), {'pttype': None, 'size': 4096 * GIB}, 'erase')
 
 
 class HibernationTests(unittest.TestCase):
@@ -176,7 +358,7 @@ class HibernationTests(unittest.TestCase):
                 return ''
 
         class Source:
-            mount = None
+            mount, group = None, None
             def open_root(self, number, passphrase):
                 return '/dev/nbd0p2', False
             def partition(self, number):
@@ -184,7 +366,8 @@ class HibernationTests(unittest.TestCase):
 
         import tempfile
         with tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'):
-            finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/vda', 'size': 64 * GIB}, Source(), 'uefi', '',
+            finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/vda', 'size': 64 * GIB}, Source(),
+                                 finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'uefi'), '',
                                  Path(tmp), ['swap'], 16 * GIB)
             du = [c for c in calls if c[0] == 'du'][0]
             self.assertIn(f'--exclude={Path(tmp) / "source/swap"}', du)
@@ -239,15 +422,29 @@ class CopyTableTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0][1].startswith('--backup='))
 
+    def test_erase_wipes_even_a_damaged_table(self):
+        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual(calls, [['wipefs', '--all', '--force', '/dev/vda'], ['sgdisk', '--zap-all', '/dev/vda'],
+                                 ['sgdisk', '--clear', '/dev/vda']])
+
+    def test_alongside_refuses_a_table_sgdisk_cannot_read_and_writes_nothing(self):
+        calls = []
+        class Runner:
+            def run(self, args, **kw):
+                calls.append(args)
+                raise ValidationError('sgdisk: code 2\nCaution: invalid main GPT header, but valid backup')
+        with self.assertRaises(ValidationError) as caught:
+            finalize_worker.prepare_table(Runner(), 'alongside', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertIn('Nothing was changed', str(caught.exception))
+        self.assertEqual([c[0] for c in calls], ['sgdisk'])
+        self.assertTrue(calls[0][1].startswith('--backup='))
+
     def test_alongside_refuses_data_without_a_table(self):
         for disk, blank in (({'path': '/dev/vda', 'pttype': None, 'fstype': 'ntfs'}, True),
                             ({'path': '/dev/vda', 'pttype': None, 'fstype': None}, False)):
             with self.assertRaises(ValidationError):
                 self.calls('alongside', disk, blank)
 
-    def test_erase_always_starts_from_an_empty_table(self):
-        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
-        self.assertEqual([c[1] for c in calls], ['--zap-all', '--clear'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -59,6 +59,21 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
+   *Alongside* another system (dual boot) on UEFI: with systemd-boot the
+   disk's existing ESP is shared, never formatted — systemd-boot goes to it
+   (`/efi`, with at least 2 MiB free) and lists Windows Boot Manager itself,
+   while the system's own `/boot` becomes an XBOOTLDR partition; GRUB keeps
+   its own ESP and gets a chainload entry for Windows. `bootctl install`
+   also replaces the ESP's fallback `EFI/BOOT/BOOTX64.EFI` (often a copy of
+   Windows Boot Manager): a firmware without boot entries then starts
+   systemd-boot, which still lists Windows. `sbctl verify` ignores
+   Microsoft's own loaders there. A hibernated Windows
+   (Fast Startup included, detected by `hiberfil.sys`) stops the installation
+   before anything is written; it is also never shrunk or used for a preview
+   file. BitLocker volumes are not shrunk; next to one, the page warns about
+   the recovery key and Secure Boot keys are not enrolled. After the
+   installation the entries of the other system's partitions (start, size,
+   type, UUID) are compared with the ones before.
    Before that the preview VM is turned off like a computer: *Stop VM* and
    *Turn off and continue* press its ACPI power button (QMP `system_powerdown`)
    and wait up to 90 s for the guest to shut down; only a guest that does not
@@ -277,7 +292,14 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
 
 ## Limits
 
-- Disks with MBR partition tables: only the explicit whole-disk erase.
+- MBR (msdos) partition tables: `partition_table: "msdos"` (BIOS with GRUB, disks
+  up to 2 TiB) gives an MBR with an active ext4 `/boot` and the root; GRUB's core
+  goes to the gap after the MBR. A disk keeps its table type next to other systems:
+  an MBR disk takes an msdos system, installed by copy (the preview lives in memory
+  or on another medium, no preview partition is made on an MBR disk) into two free
+  primary entries; logical partitions are not created, the backup of the old MBR is
+  `/run/agi-final-<disk>.sfdisk`. A BIOS Windows found there (its `bootmgr`) gets a
+  GRUB chainload entry and keeps the active flag.
 - Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
   hibernation) is refused by `ntfsresize` — shut Windows down fully first.
 - Swap is zram by default. `swap: "hibernate"` adds a swap file `/swap/swapfile`

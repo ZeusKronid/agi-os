@@ -7,11 +7,13 @@ CONTEXT = '''
 AGIOS is running inside a booted Linux Live environment on the user's computer.
 The system is installed directly onto ONE of this computer's physical disks listed
 in the detected hardware (choose only an eligible one; the Live medium is never a
-target). The whole chosen disk is erased after the user's separate explicit consent
-in the app. Before consent, nothing is written. The installed disk is then booted
-as a preview virtual machine inside Live (Apache Guacamole screen in the browser);
-after the user checks it, the app finalizes boot for the real hardware and the
-computer restarts into the new system. The site privately collects the installed
+target). The app first installs the system into a preview (in memory, a file on
+another medium or free space, as the user picks) and boots it as a virtual machine
+inside Live (Apache Guacamole screen in the browser). After the user checks it and
+gives separate explicit consent, the app puts it on the chosen disk: either erasing
+the whole disk or next to the systems already on it (dual boot), then finalizes
+boot for the real hardware and the computer restarts into the new system. Before
+consent, nothing is written. The site privately collects the installed
 user's password and the optional disk-encryption passphrase. Services must include
 .service suffixes; decoded file contents must contain actual newline characters.
 '''
