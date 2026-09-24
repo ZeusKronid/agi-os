@@ -255,6 +255,11 @@ def rollback(name=None, snapshots=None, boot=None, top=None, root=None):
     @rollback-<time> (only the newest such copy stays); the next boot starts the snapshot.
     /home, /var/log and the package cache are subvolumes of their own and do not change."""
     snapshots, boot, top = snapshots or SNAPSHOTS, boot or Path("/boot"), top or TOP
+    status = read_status()
+    current_boot_id = boot_id()
+    if (status.get("rollback") and current_boot_id
+            and status.get("applied_boot_id") == current_boot_id):
+        raise UpdateError("Rollback is waiting for a restart: sudo systemctl reboot first.")
     root = root or {"fstype": mounted("FSTYPE"), "fsroot": mounted("FSROOT"), "source": mounted("SOURCE")}
     if root["fstype"] != "btrfs" or root["fsroot"] != "/" + ROOT_SUBVOLUME:
         raise UpdateError("Rollback needs the btrfs subvolume layout (root in @); this system has no snapshots to go back to.")
@@ -286,7 +291,6 @@ def rollback(name=None, snapshots=None, boot=None, top=None, root=None):
         for image in sorted(images.iterdir()):
             shutil.copy2(image, boot / image.name)
             restored.append(image.name)
-    status = read_status()
     status["rollback"] = {"at": stamp, "snapshot": name, "previous_root": kept.name, "boot": restored}
     status["reboot_required"] = True
     status["applied_boot_id"] = boot_id()
