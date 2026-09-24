@@ -177,6 +177,28 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(seen, [None, 'https://auth.openai.com/oauth/authorize?state=x'])
         self.assertIsNone((await response.json())['login_url'])
 
+    async def test_provider_models_are_listed_without_keeping_the_key(self):
+        """CMP-126: the page offers the provider's models instead of a typed id."""
+        seen = []
+        def models(provider):
+            seen.append((provider.kind, provider.endpoint, provider.key))
+            return ['b-model', 'a-model', 'b-model']
+        with patch.object(server.APIProvider, 'models', models):
+            response = await self.request('/api/provider/models', {'kind': 'anthropic', 'key': 'sk-test'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['models'], ['a-model', 'b-model'])
+        self.assertEqual(seen, [('anthropic', 'https://api.anthropic.com/v1', 'sk-test')])
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'chatgpt'})).status, 400)
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'ollama', 'endpoint': 'http://8.8.8.8'})).status, 400)
+
+    async def test_status_names_the_connected_provider(self):
+        state = self.app['state']
+        api = server.APIProvider('ollama', 'http://127.0.0.1:11434')
+        api.model = 'llama3'
+        import provider as live
+        state.provider = live.LiveProvider(api)
+        self.assertEqual(state.public()['provider'], 'Ollama — local model')
+
     async def test_foreign_origin_cannot_start_vm(self):
         response = await self.request('/api/build', {}, {'Origin': 'https://example.org'})
         self.assertEqual(response.status, 403)

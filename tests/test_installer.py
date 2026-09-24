@@ -113,6 +113,17 @@ class ProviderTests(unittest.TestCase):
                 APIProvider("compatible", url, "secret")
         self.assertIsNone(NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere"))
 
+    def test_plain_http_only_inside_the_local_network(self):
+        """CMP-126: Ollama or an OpenAI-compatible server on another PC at home."""
+        for url in ("http://127.0.0.1:11434", "http://localhost:11434", "http://10.0.2.2:11434",
+                    "http://192.168.1.20:11434", "http://172.16.5.4:8000/v1", "http://[fe80::1]:11434"):
+            self.assertEqual(APIProvider("ollama", url).endpoint, url)
+        for url in ("http://8.8.8.8:11434", "http://nas.local:11434", "http://ollama.example.com"):
+            with self.assertRaises(ProviderError, msg=url):
+                APIProvider("ollama", url)
+        with self.assertRaises(ProviderError):
+            APIProvider("openai", "http://192.168.1.20/v1", "secret")  # API providers always use HTTPS
+
 
 class FakeRunner:
     def __init__(self, fail_on=None, config=None):
