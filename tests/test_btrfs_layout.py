@@ -170,6 +170,17 @@ class RollbackTests(unittest.TestCase):
         self.assertFalse(list(self.top.glob("@rollback-*")))
         self.assertEqual(self.calls[-1], ["umount", str(self.top)])
 
+    def test_second_rollback_before_reboot_preserves_running_root(self):
+        self.take("1")
+        self.rollback()
+        calls_before = list(self.calls)
+        kept = list(self.top.glob("@rollback-*"))
+        with self.assertRaisesRegex(update.UpdateError, "waiting for a restart"):
+            self.rollback()
+        self.assertEqual(self.calls, calls_before)
+        self.assertEqual(list(self.top.glob("@rollback-*")), kept)
+        self.assertTrue(kept[0].is_dir())
+
     def test_rollback_refuses_without_the_layout_or_snapshots(self):
         with self.assertRaises(update.UpdateError):
             self.rollback(root={"fstype": "ext4", "fsroot": "/", "source": "/dev/vda2"})
