@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Open the preferred terminal
+Exec=exo-open --launch TerminalEmulator
+Icon=utilities-terminal
+Terminal=false

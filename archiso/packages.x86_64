@@ -57,8 +57,10 @@ tmux
 ttf-dejavu
 usbutils
 wireless-regdb
+wmctrl
 xdg-utils
 xf86-video-vesa
+xfce4-notifyd
 xfce4-panel
 xfce4-session
 xfce4-settings

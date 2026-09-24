@@ -1,0 +1,59 @@
+#!/bin/sh
+# Helios desktop of the Live session.
+#   agi-desktop backdrop       the sunrise wallpaper on every connected monitor
+#   agi-desktop place IDS...   stand the newest installer window on the wallpaper's horizon,
+#                              ignoring the windows IDS that existed before it was requested
+set -u
+wallpaper=/usr/share/backgrounds/agios/horizon.png
+# Rendered by scripts/live-desktop/render.py: keep these in sync with WIDTH, HEIGHT and HORIZON there.
+image_width=2560 image_height=1440 horizon=0.32
+# Titlebar and bottom border of the Helios xfwm4 frame, and air left under the window.
+frame=35 margin=24
+# Below this client height the installer gets the whole screen instead of the horizon layout.
+min_height=560
+
+backdrop() {
+    xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}' | while read -r monitor; do
+        base=/backdrop/screen0/monitor$monitor/workspace0
+        xfconf-query -c xfce4-desktop -p "$base/last-image" -n -t string -s "$wallpaper"
+        xfconf-query -c xfce4-desktop -p "$base/image-style" -n -t int -s 5
+        xfconf-query -c xfce4-desktop -p "$base/color-style" -n -t int -s 0
+        xfconf-query -c xfce4-desktop -p "$base/rgba1" -n \
+            -t double -s 0.043 -t double -s 0.035 -t double -s 0.031 -t double -s 1
+    done
+}
+
+place() {
+    before=" $* "
+    id=
+    for attempt in $(seq 1 120); do
+        id=$(wmctrl -l 2>/dev/null | awk -v before="$before" \
+            '/AGIOS/ && index(before, " " $1 " ") == 0 {id = $1} END {print id}')
+        [ -n "$id" ] && break
+        sleep 0.5
+    done
+    [ -n "$id" ] || return 0
+    # "0  * DG: 1920x1080  VP: 0,0  WA: 0,32 1920x1048  Workspace 1"
+    set -- $(wmctrl -d | awk '$2 == "*" {sub("x", " ", $4); print $4}')
+    [ $# -eq 2 ] || return 0
+    set -- $(awk -v W="$1" -v H="$2" -v iw="$image_width" -v ih="$image_height" -v hz="$horizon" \
+        -v frame="$frame" -v margin="$margin" 'BEGIN {
+        # xfdesktop zooms the wallpaper to cover the screen and centres it.
+        scale = W / iw > H / ih ? W / iw : H / ih
+        y = int(H / 2 + (hz - 0.5) * ih * scale + 0.5)
+        width = W < 1400 ? int(W * 0.8) : (W * 0.62 < 1240 ? int(W * 0.62) : 1240)
+        print int((W - width) / 2), y, width, H - y - frame - margin
+    }')
+    if [ "$4" -lt "$min_height" ]; then
+        wmctrl -i -r "$id" -b add,maximized_vert,maximized_horz
+    else
+        wmctrl -i -r "$id" -b remove,maximized_vert,maximized_horz
+        wmctrl -i -r "$id" -e "0,$1,$2,$3,$4"
+    fi
+}
+
+case ${1:-} in
+    backdrop) backdrop ;;
+    place) shift; place "$@" ;;
+    *) echo "usage: agi-desktop backdrop | place [window-id...]" >&2; exit 2 ;;
+esac

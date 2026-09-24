@@ -1,0 +1,16 @@
+# Helios: warm black title bar, 1px border, one coral accent on the buttons under the pointer.
+# The images are rendered by scripts/live-desktop/render.py.
+active_text_color=#f6f2ec
+inactive_text_color=#8f887e
+title_shadow_active=false
+title_shadow_inactive=false
+title_alignment=center
+full_width_title=true
+title_horizontal_offset=0
+title_vertical_offset_active=0
+title_vertical_offset_inactive=0
+button_offset=8
+button_spacing=0
+button_layout=|HMC
+show_app_icon=false
+maximized_offset=0
