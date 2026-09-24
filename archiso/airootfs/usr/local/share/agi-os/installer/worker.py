@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -48,12 +49,13 @@ class Runner:
         self.cancel = threading.Event()
         self.log = log or LOG
 
-    def run(self, args, input_text=None, timeout=1800):
+    def run(self, args, input_text=None, timeout=1800, progress=None):
+        """Run a command; progress, if given, receives its output while it runs."""
         if self.cancel.is_set():
             raise Cancelled("Установка остановлена. Диск мог быть частично изменён.")
         started = time.monotonic()
         try:
-            output = self._run(args, input_text, timeout)
+            output = self._stream(args, timeout, progress) if progress else self._run(args, input_text, timeout)
         except Exception as exc:
             # Output of a command that received a secret on stdin is never logged.
             self.log.warning("command.failed", f"{args[0]}: {exc}" if input_text is None else f"{args[0]}: ошибка",
@@ -61,6 +63,36 @@ class Runner:
             raise
         self.log.info("command.done", args[0], args=list(args), seconds=round(time.monotonic() - started, 2))
         return output
+
+    def _stream(self, args, timeout, output):
+        """Like _run without input, handing the output to output() as it arrives."""
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, start_new_session=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        started, tail = time.monotonic(), ""
+        with proc.stdout:
+            while True:
+                if self.cancel.is_set() or time.monotonic() - started > timeout:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                    if self.cancel.is_set():
+                        raise Cancelled("Установка остановлена; на диске осталась частичная установка.")
+                    raise ValidationError(f"Истекло время операции {args[0]}")
+                ready, _, _ = select.select([proc.stdout], [], [], 1)
+                if not ready:
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                text = chunk.decode(errors="replace")
+                tail = (tail + text)[-2500:]
+                output(text)
+        if proc.wait():
+            raise ValidationError(f"Ошибка {args[0]} (код {proc.returncode})\n{tail}")
+        return tail
 
     def _run(self, args, input_text, timeout):
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -65,14 +65,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             controller.respond("Change the disk")
 
-    def test_failed_revision_removes_prior_configuration(self):
+    def test_failed_revision_keeps_prior_configuration(self):
+        # A provider error agrees on nothing new: the configuration agreed earlier stays,
+        # and the unanswered message joins the next turn (CMP-129).
         provider = DemoProvider()
         controller = Controller(demo_inventory(), provider, catalog=DemoCatalog())
         controller.respond("First proposal")
+        agreed = controller.configuration
         with patch.object(provider, "reply", side_effect=ProviderError("offline")):
             with self.assertRaises(ProviderError):
                 controller.respond("Actually use another disk")
-        self.assertIsNone(controller.configuration)
+        self.assertEqual(controller.configuration, agreed)
+        self.assertEqual(controller.history[-1], {"role": "user", "content": "Actually use another disk"})
 
 
 class ProviderTests(unittest.TestCase):

@@ -65,6 +65,7 @@ class ChatGPTProvider:
         self.model = ""
         self.login_id = None
         self.thread_id = None
+        self.turn_lock = threading.Lock()
         self.reader = threading.Thread(target=self._reader, daemon=True)
         self.reader.start()
         try:
@@ -94,10 +95,12 @@ class ChatGPTProvider:
         except (OSError, ValueError):
             raise ProviderError("Соединение ChatGPT закрыто. Подключитесь снова через «Сменить провайдера».") from None
 
-    def next_event(self, timeout=120):
+    def next_event(self, timeout=120, idle=False):
         try:
             event = self.events.get(timeout=timeout)
         except queue.Empty:
+            if idle:
+                return None  # The caller polls: nothing arrived yet.
             raise ProviderError("Истекло время ожидания ChatGPT") from None
         if event.get("closed"):
             raise ProviderError("Служба ChatGPT завершилась. Проверьте поддержку bubblewrap и версию Codex.")
@@ -158,9 +161,17 @@ class ChatGPTProvider:
     def models(self):
         return [model["model"] for model in self.rpc("model/list", {})["data"]]
 
-    def reply(self, system, messages):
+    # The page can cancel a request: reply() then interrupts the turn on the app-server.
+    cancellable = True
+
+    def reply(self, system, messages, cancel=None):
         if not self.model:
             raise ProviderError("Выберите модель ChatGPT")
+        # One turn at a time: a cancelled turn finishes its interrupt before the next starts.
+        with self.turn_lock:
+            return self._reply(system, messages, cancel or threading.Event())
+
+    def _reply(self, system, messages, cancel):
         # Each turn receives the app's bounded conversation; no persisted thread
         # can introduce tools or state from another installer session.
         thread = self.rpc("thread/start", {"model": self.model, "ephemeral": True,
@@ -173,7 +184,15 @@ class ChatGPTProvider:
         text = ""
         end = time.monotonic() + 180
         while time.monotonic() < end:
-            event = self.next_event(max(0.1, end - time.monotonic()))
+            if cancel.is_set():
+                try:
+                    self.rpc("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id})
+                except ProviderError:
+                    pass  # The app-server may have finished the turn meanwhile.
+                raise ProviderError("The request to ChatGPT was cancelled")
+            event = self.next_event(min(0.5, max(0.1, end - time.monotonic())), idle=True)
+            if event is None:
+                continue
             params = event.get("params", {})
             if params.get("threadId") != self.thread_id:
                 continue

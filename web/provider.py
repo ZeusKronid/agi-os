@@ -27,10 +27,16 @@ class LiveProvider:
         elif backend:
             self.model = backend.model
 
-    def reply(self, system, messages):
+    # The controller hands over the page's cancel token. ChatGPT and the bridge stop their
+    # request; an API request cannot be interrupted, so its late answer is discarded.
+    cancellable = True
+
+    def reply(self, system, messages, cancel=None):
         if self.backend is None:
             raise ProviderError('Connect a model: sign in to ChatGPT or add an API in the model settings')
         self.backend.model = self.model
+        if getattr(self.backend, 'cancellable', False):
+            return self.backend.reply(system + CONTEXT, messages, cancel=cancel)
         return self.backend.reply(system + CONTEXT, messages)
 
     def close(self):
