@@ -28,7 +28,7 @@ done
 # .local/live-test/OVMF_VARS-uefi-sb.fd, so --mode disk then boots with Secure Boot on.
 machine=q35
 [[ $firmware == uefi-sb ]] && machine=q35,smm=on
-if [[ -z $iso ]]; then
+if [[ -z $iso && $mode == live ]]; then
     shopt -s nullglob; images=(out/agi-os-20*-x86_64.iso); ((${#images[@]})) || { echo 'Build an ISO first: scripts/build-iso.sh' >&2; exit 1; }
     iso=${images[${#images[@]}-1]}
 fi
@@ -113,7 +113,9 @@ if [[ $mode == live ]]; then
                -device ide-cd,drive=testcache,bus=ide.1)
     fi
 else
-    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)")
+    # The installed system's serial console (add console=ttyS0 to its kernel command line to see it).
+    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"
+           -serial "file:$repo/.local/live-test/serial.log")
 fi
 if [[ ${AGIOS_TEST_HARDWARE:-} == laptop ]]; then
     chassis=.local/live-test/smbios-chassis-notebook.bin

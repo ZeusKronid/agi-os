@@ -1,0 +1,6 @@
+# systemd 261 marks a hybrid ISO9660/GPT boot CD (2048-byte sectors, 512-byte GPT) with
+# ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP=1, and 99-systemd.rules then pulls in systemd-loop@<cd>.service
+# to expose its GPT partitions through a loop device. The Live never uses those partitions: archiso
+# mounts the ISO9660 file system from the drive itself. The unit fails on the boot CD and leaves the
+# Live "degraded" (CMP-148), so clear the property for optical drives before 99-systemd.rules sees it.
+SUBSYSTEM=="block", ENV{ID_CDROM}=="1", ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=="1", ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""

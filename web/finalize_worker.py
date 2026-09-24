@@ -20,9 +20,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import replace
 
@@ -47,6 +50,18 @@ TYPES = {'bios': layout.BIOS_BOOT, 'boot': layout.ESP, 'linux': layout.LINUX}
 # The preview's filesystems were written by the preview VM: read them without trusting
 # setuid bits, device nodes or executables on the Live host.
 SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
+# The throwaway overlay a dirty preview replays its journal into: tmpfs, not the Live's
+# small copy-on-write space under /var/tmp. 4 KiB clusters keep a replay of scattered
+# blocks as small as the journal itself.
+OVERLAY_DIR = '/tmp'
+OVERLAY_CLUSTER = 4096
+UNREADABLE = ('The preview’s system could not be opened: its file system is damaged, most likely because the preview '
+              'was not shut down properly. Start the preview again, shut it down from its power menu, then repeat '
+              'the installation.')
+# The last bytes of a swap area's first page while it holds a hibernation image
+# (the kernel's swsusp signatures and the uswsusp/TuxOnIce ones).
+PAGE = 4096
+HIBERNATION_SIGNATURES = (b'S1SUSPEND', b'S2SUSPEND', b'ULSUSPEND', b'LINHIB0001')
 LOG = Logger('finalize')
 MIB = 2**20
 # systemd-boot on a shared ESP: two copies of its ~150 KiB loader and loader.conf.
@@ -66,7 +81,7 @@ def checked_request(request):
     if not isinstance(request, dict) or set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation', 'enroll_keys'}:
         raise ValidationError('Unknown finishing request')
     if not isinstance(request['configuration'], dict) or not all(isinstance(request[k], str) for k in ('target', 'fingerprint', 'confirmation')):
-        raise ValidationError('Некорректный запрос завершения')
+        raise ValidationError('Invalid finishing request')
     config = Configuration.parse(request['configuration'])
     if config.disk != request['target'] or request['confirmation'] != request['target']:
         raise ValidationError('Type the exact path of the target disk to confirm')
@@ -80,11 +95,11 @@ def checked_request(request):
     if not isinstance(passphrase, str) or len(passphrase) > 1024 or any(c in passphrase for c in '\n\r\x00'):
         raise ValidationError('Invalid encryption password')
     if type(request['enroll_keys']) is not bool:
-        raise ValidationError('Некорректный выбор записи ключей Secure Boot')
+        raise ValidationError('Invalid choice for enrolling the Secure Boot keys')
     if request['enroll_keys'] and (config.bootloader != 'systemd-boot' or efi_flag(SETUP_MODE_VAR) is not True):
         # Checked before any disk change: the firmware must accept new keys right now.
-        raise ValidationError('Прошивка не в режиме Setup Mode: ключи Secure Boot записать нельзя. '
-                              'Сотрите ключи в настройках UEFI или снимите отметку записи ключей')
+        raise ValidationError('The firmware is not in Setup Mode: Secure Boot keys can’t be enrolled. '
+                              'Clear the keys in the UEFI settings or untick enrolling the keys')
     request['image'] = checked_image(request['image'], snapshot, disk)
     return config, disk
 
@@ -99,7 +114,7 @@ def checked_image(image, snapshot, target):
         allowed = {str(storage_worker.PREVIEW / 'ram/preview.qcow2'),
                    str(storage_worker.PREVIEW / 'media' / storage_worker.NAME / 'preview.qcow2')}
         if path not in allowed or os.path.realpath(path) != path or not Path(path).is_file():
-            raise ValidationError('Образ превью находится вне подготовленного хранилища')
+            raise ValidationError('The preview image is outside the prepared storage')
         return {'format': 'qcow2', 'path': path, 'on_target': False}
     if image['format'] == 'raw':
         disk, _ = storage_worker.find_partition(snapshot, path)
@@ -108,30 +123,49 @@ def checked_image(image, snapshot, target):
     raise ValidationError('Invalid preview image description')
 
 
+def free_nbd():
+    return next((f'/dev/nbd{i}' for i in range(16) if Path(f'/sys/class/block/nbd{i}').exists()
+                 and not Path(f'/sys/class/block/nbd{i}/pid').exists()), None)
+
+
+def nbd_server(device):
+    try:
+        return int(Path(f'/sys/class/block/{Path(device).name}/pid').read_text())
+    except (OSError, ValueError):
+        return None
+
+
 class Source:
-    """Read-only access to the preview's partitions and root filesystem."""
+    """The preview's partitions and root filesystem, read through a throwaway overlay.
+
+    A preview that was not shut down properly (power cut, crash, a failed hibernation)
+    leaves a file system journal to replay. A read-only device cannot replay it, and
+    skipping the replay (ext4 noload, xfs norecovery) shows an older and possibly
+    inconsistent tree that a copy would then carry to the disk. So the preview (qcow2
+    image or raw partition) is exported by qemu-nbd through a temporary qcow2 overlay:
+    the kernel replays the journal into the overlay, the preview itself is never
+    written, and the overlay is deleted on detach. Mounts stay read-only."""
 
     def __init__(self, runner, image):
         self.runner, self.image = runner, image
         self.device = None
         self.nbd = None
-        self.loop = None
+        self.scratch = None
         self.opened = False
         self.mount = None
 
     def attach(self):
-        if self.image['format'] == 'qcow2':
-            self.runner.run(['modprobe', 'nbd', 'max_part=16'])
-            self.nbd = next((f'/dev/nbd{i}' for i in range(16) if Path(f'/sys/class/block/nbd{i}').exists()
-                             and not Path(f'/sys/class/block/nbd{i}/pid').exists()), None)
-            if self.nbd is None:
-                raise ValidationError('No free NBD device for the preview image')
-            self.runner.run(['qemu-nbd', '--read-only', '--format=qcow2', '--connect', self.nbd, self.image['path']])
-            self.device = self.nbd
-            self.runner.run(['partprobe', self.nbd])
-        else:
-            self.loop = self.runner.run(['losetup', '--find', '--show', '--read-only', '--partscan', self.image['path']]).strip()
-            self.device = self.loop
+        self.scratch = Path(tempfile.mkdtemp(prefix='agi-final-overlay-', dir=OVERLAY_DIR))
+        overlay = self.scratch / 'overlay.qcow2'
+        self.runner.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-o', f'cluster_size={OVERLAY_CLUSTER}',
+                         '-b', self.image['path'], '-F', self.image['format'], str(overlay)])
+        self.runner.run(['modprobe', 'nbd', 'max_part=16'])
+        nbd = free_nbd()
+        if nbd is None:
+            raise ValidationError('No free NBD device for the preview image')
+        self.runner.run(['qemu-nbd', '--format=qcow2', '--connect', nbd, str(overlay)])
+        self.device = self.nbd = nbd
+        self.runner.run(['partprobe', self.nbd])
         self.runner.run(['udevadm', 'settle', '--timeout=30'])
         table = run_json(self.runner, ['sfdisk', '--json', self.device])['partitiontable']
         if table.get('label') != 'gpt' or not table.get('partitions'):
@@ -148,7 +182,8 @@ class Source:
         if kind == 'crypto_LUKS':
             if not passphrase:
                 raise ValidationError('The root is encrypted: enter the encryption password to finish')
-            self.runner.run(['cryptsetup', 'open', '--readonly', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
+            # Writable like the overlay under it: an ext4 or xfs journal replays through it.
+            self.runner.run(['cryptsetup', 'open', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
             self.opened = True
             return '/dev/mapper/' + SOURCE_MAP, True
         return device, False
@@ -160,15 +195,30 @@ class Source:
             subprocess.run(['cryptsetup', 'close', SOURCE_MAP], capture_output=True)
             self.opened = False
         if self.nbd:
+            server = nbd_server(self.nbd)
             subprocess.run(['qemu-nbd', '--disconnect', self.nbd], capture_output=True)
+            # The server exits after the disconnect, not with it. Until then it holds the
+            # preview open: promote would find the partition busy, a revert its medium.
+            deadline = time.monotonic() + 30
+            while server and Path(f'/proc/{server}').exists() and time.monotonic() < deadline:
+                time.sleep(0.2)
             self.nbd = None
-        if self.loop:
-            subprocess.run(['losetup', '--detach', self.loop], capture_output=True)
-            self.loop = None
+        if self.scratch:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+            self.scratch = None
+
+
+def mount_source_root(runner, device, point):
+    """Read-only mount of the preview's root; a journal replays into the overlay first.
+    What still refuses to mount is damaged: the user gets a way out, the log the details."""
+    try:
+        runner.run(['mount', '-o', SOURCE_MOUNT, device, str(point)])
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
 
 
 def read_record(runner, root_device, mount):
-    runner.run(['mount', '-o', SOURCE_MOUNT, root_device, str(mount)])
+    mount_source_root(runner, root_device, mount)
     try:
         return json.loads((mount / 'var/lib/agi-os/installation.json').read_text())
     finally:
@@ -196,8 +246,8 @@ def prepare_table(runner, layout, disk):
         return
     if not disk.get('pttype'):
         if disk.get('fstype') or not storage_worker.looks_blank(target):
-            raise ValidationError('На диске нет таблицы разделов, но есть данные: установка рядом с ними невозможна. '
-                                  'Выберите «стереть диск», если эти данные не нужны.')
+            raise ValidationError('The disk has data but no partition table: installing alongside it is not possible. '
+                                  'Choose “Erase the disk” if you don’t need that data.')
         runner.run(['sgdisk', '--clear', target])
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
 
@@ -341,7 +391,7 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
-    runner.run(['mount', '-o', SOURCE_MOUNT, src_root, str(src_mount)])
+    mount_source_root(runner, src_root, src_mount)
     source.mount = src_mount
     runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
     skipped = [f'--exclude={src_mount / path}' for path in skip]
@@ -379,9 +429,11 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     dst.mkdir()
     layout.mount_root(runner, target_plan, root, dst)
     layout.mount_boot(runner, target_plan, boot, dst)
-    emit('final-progress', text='Copying the checked system file by file')
+    emit('final-progress', text='Copying the checked system file by file', step='copy', percent=0)
     excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
-    runner.run(['rsync', '-aHAX', '--numeric-ids', *excludes, f'{src_mount}/', f'{dst}/'], timeout=14400)
+    # --no-inc-recursive: rsync counts all files first, so its overall percentage is steady.
+    runner.run(['rsync', '-aHAX', '--numeric-ids', '--info=progress2', '--no-inc-recursive', *excludes, f'{src_mount}/', f'{dst}/'],
+               timeout=14400, progress=copy_progress('Copying the checked system file by file'))
     # The boot partition is FAT on UEFI: copy contents without POSIX ownership or modes.
     runner.run(['rsync', '-rt', '--no-perms', '--no-owner', '--no-group', '--modify-window=2', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600)
     emit('final-progress', text='Verifying the copy by checksums')
@@ -395,6 +447,39 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     return boot, root_partition, root, encrypted, dst
 
 
+def copy_progress(text):
+    """The overall percentage rsync --info=progress2 prints, as a final-progress event for
+    each new whole percent (the site shows the longest step of the copy moving)."""
+    last = [0]
+
+    def output(chunk):
+        found = re.findall(r'(\d{1,3})%', chunk)
+        percent = min(100, int(found[-1])) if found else last[0]
+        if percent > last[0]:
+            last[0] = percent
+            emit('final-progress', text=f'{text}: {percent}%', step='copy', percent=percent)
+    return output
+
+
+def discard_hibernation_image(runner, dst):
+    """A preview hibernated instead of shut down keeps its memory image in the swap file.
+    Promoted as is, the new system would resume that image over a file system the
+    finalization has changed. The swap header is rewritten in place (same blocks, so
+    resume_offset stays valid) and the first boot starts fresh."""
+    path = dst / SWAPFILE
+    try:
+        with open(path, 'rb') as handle:
+            header = handle.read(PAGE)
+    except OSError:
+        return False
+    if len(header) < PAGE or not header[-10:].startswith(HIBERNATION_SIGNATURES):
+        return False
+    emit('final-progress', text='The preview was hibernated, not shut down: its saved session is discarded '
+         'so the installed system starts fresh')
+    runner.run(['mkswap', str(path)])
+    return True
+
+
 def swapfile_size(record):
     """Sized for this computer's RAM (the preview was sized for the same inventory)."""
     try:
@@ -406,7 +491,7 @@ def swapfile_size(record):
 def recreate_swapfile(runner, dst, root_uuid, record, size):
     """The hibernation swap file on the new root filesystem: new UUID, new offset."""
     fstype = runner.run(['findmnt', '-n', '-o', 'FSTYPE', str(dst)]).strip()
-    emit('final-progress', text=f'Создаю swap-файл для гибернации ({size // 2**30} ГиБ) на конечном диске')
+    emit('final-progress', text=f'Creating the hibernation swap file ({size // 2**30} GiB) on the target disk')
     offset = create_swapfile(runner, dst, fstype, size)
     record['hibernation'] = {**record['hibernation'], 'size': size, 'resume_uuid': root_uuid, 'resume_offset': offset}
     return resume_parameter(root_uuid, offset)
@@ -432,18 +517,18 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
         # so a failed top-up stays visible until the user installs the drivers.
         record['hardware'], record['drivers'] = hardware, plan
         if missing:
-            emit('final-progress', text='Доустанавливаю драйверы под железо этого компьютера: ' + ', '.join(missing))
+            emit('final-progress', text='Adding the drivers for this computer’s hardware: ' + ', '.join(missing))
             free = int(runner.run(['df', '--output=avail', '-B1', str(dst)]).split()[-1])
             if free < 2 * GIB:
-                raise ValidationError('на диске меньше 2 ГиБ свободно')
+                raise ValidationError('less than 2 GiB is free on the disk')
             # The target has no sync database (the preview dropped its cache); a plain
             # -Sy would be a partial upgrade, so the whole system is brought to one repository state.
             runner.run([*chroot, 'pacman', '-Syu', '--noconfirm', '--needed', '--', *missing], timeout=3600)
             runner.run([*chroot, 'pacman', '-Scc', '--noconfirm'])
             record['packages'] = list(dict.fromkeys([*record.get('packages', []), *missing]))
         else:
-            emit('final-progress', text='Драйверы для железа этого компьютера уже установлены в превью: '
-                 + (', '.join(plan['packages']) or 'дополнительных не требуется'))
+            emit('final-progress', text='The drivers for this computer’s hardware are already installed in the preview: '
+                 + (', '.join(plan['packages']) or 'no extra ones needed'))
         # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
         dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
         if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation'))):
@@ -455,15 +540,15 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
             try:
                 runner.run([*chroot, 'systemctl', 'enable', service])
             except ValidationError:
-                warnings.append(f'Служба {service} не включена. После входа выполните: sudo systemctl enable --now {service}')
+                warnings.append(f'Service {service} is not enabled. After you log in, run: sudo systemctl enable --now {service}')
     except Cancelled:
         raise
     except Exception as exc:
         lines = [l for l in str(exc).splitlines() if l.strip()]
         reason = next((l for l in reversed(lines) if l.startswith('error:')), lines[0] if lines else type(exc).__name__)
-        warnings.append('Не удалось доустановить драйверы' + (' ' + ', '.join(missing) if missing else '') + ' — ' + reason[:300]
-                        + '. Система загрузится с базовыми драйверами ядра'
-                        + ('; после входа выполните: sudo pacman -Syu ' + ' '.join(missing) if missing else ''))
+        warnings.append('Could not add the drivers' + (' ' + ', '.join(missing) if missing else '') + ' — ' + reason[:300]
+                        + '. The system boots with the kernel’s basic drivers'
+                        + ('; after you log in, run: sudo pacman -Syu ' + ' '.join(missing) if missing else ''))
     for warning in warnings:
         emit('final-warning', text=warning)
     record['warnings'] = record.get('warnings', []) + warnings
@@ -473,7 +558,7 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
 def check_signatures(runner, chroot, record):
     """Root `sbctl verify` of the final disk, kept in the record: after a copy the ESP may be
     unreadable to the user, and agi-os-verify then relies on this result."""
-    emit('final-progress', text='Проверяю подписи загрузчика и ядра (Secure Boot)')
+    emit('final-progress', text='Checking the bootloader and kernel signatures (Secure Boot)')
     unsigned = sbctl_unsigned(runner.run([*chroot, 'sbctl', 'verify']))
     record['secure_boot']['verified'] = not unsigned
     return unsigned
@@ -483,11 +568,11 @@ def enroll_keys(runner, chroot, record):
     """Write this system's own Secure Boot keys into the firmware, keeping Microsoft's
     certificates: option ROMs of graphics cards and other systems still need them."""
     if not (record.get('secure_boot') or {}).get('signed'):
-        raise ValidationError('Система в превью не подписана для Secure Boot; ключи не записаны')
+        raise ValidationError('The system in the preview is not signed for Secure Boot; the keys were not enrolled')
     unsigned = check_signatures(runner, chroot, record)
     if unsigned:
-        raise ValidationError('Не подписаны для Secure Boot: ' + ', '.join(unsigned) + '. Ключи не записаны')
-    emit('final-progress', text='Записываю ключи Secure Boot этой системы в прошивку (вместе с ключами Microsoft)')
+        raise ValidationError('Not signed for Secure Boot: ' + ', '.join(unsigned) + '. The keys were not enrolled')
+    emit('final-progress', text='Enrolling this system’s Secure Boot keys in the firmware (together with Microsoft’s keys)')
     runner.run([*chroot, 'sbctl', 'enroll-keys', '--microsoft'])
     record['secure_boot']['enrolled'] = True
 
@@ -501,9 +586,9 @@ def enroll_or_warn(runner, chroot, record):
         raise
     except Exception as exc:
         lines = [l for l in str(exc).splitlines() if l.strip()]
-        warning = ('Ключи Secure Boot не записаны — ' + (lines[-1] if lines else type(exc).__name__)[:300]
-                   + '. Система подписана и загрузится; чтобы включить Secure Boot, после входа выполните: '
-                   'sudo sbctl enroll-keys --microsoft, затем включите Secure Boot в настройках UEFI')
+        warning = ('Secure Boot keys were not enrolled — ' + (lines[-1] if lines else type(exc).__name__)[:300]
+                   + '. The system is signed and boots; to turn on Secure Boot, log in and run: '
+                   'sudo sbctl enroll-keys --microsoft, then turn on Secure Boot in the UEFI settings')
         record['warnings'] = record.get('warnings', []) + [warning]
         emit('final-warning', text=warning)
 
@@ -557,6 +642,8 @@ def finalize(request, runner):
             dst.mkdir()
             runner.run(['mount', root, str(dst)])
             runner.run(['mount', boot, str(dst / 'boot')])
+            if record.get('hibernation'):
+                discard_hibernation_image(runner, dst)
             moved = False
         else:
             # The swap directory (a subvolume on btrfs) is recreated, not copied.
@@ -633,7 +720,7 @@ def finalize(request, runner):
                 record['secure_boot']['verified'] = False
                 unsigned = [type(exc).__name__]
             if unsigned:
-                warning = 'Подписи Secure Boot не подтверждены: ' + ', '.join(unsigned)[:300] + '. Выполните sudo sbctl verify'
+                warning = 'Secure Boot signatures are not confirmed: ' + ', '.join(unsigned)[:300] + '. Run sudo sbctl verify'
                 record['warnings'] = record.get('warnings', []) + [warning]
                 emit('final-warning', text=warning)
         if kept is not None and kept - kept_partitions(runner, target):
@@ -681,12 +768,12 @@ def main():
         with open('/run/agi-os-finalize.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             request = adopt(json.loads(sys.stdin.readline(1000000)))
-            LOG.info('finalize.start', 'Завершение установки', layout=request.get('layout'), target=request.get('target'))
+            LOG.info('finalize.start', 'Finishing the installation', layout=request.get('layout'), target=request.get('target'))
             finalize(request, Runner(LOG))
-            LOG.info('finalize.done', 'Завершение установки выполнено')
+            LOG.info('finalize.done', 'Installation finished')
     except Exception as exc:
         known = isinstance(exc, ValidationError)
-        LOG.error('finalize.failed', str(exc) if known else 'Внутренняя ошибка завершения', exc=None if known else exc)
+        LOG.error('finalize.failed', str(exc) if known else 'Internal finishing error', exc=None if known else exc)
         emit('final-error', text=str(exc) if known else 'Finishing stopped on an internal error: ' + type(exc).__name__)
         return 1
     return 0

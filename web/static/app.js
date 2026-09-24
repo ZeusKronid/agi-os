@@ -6,6 +6,7 @@ const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
 let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', installStep = 1, stopping = false, chatView = false, changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
 let providerKind = 'chatgpt', shown = 0, placeStep = 1, foundAsk = '', lastFound = '', lastFiles = '', lastHardware = '', lastLogin = '';
+let sentAt = 0, cancelling = false, rebuildAsk = false, rebuilding = false;
 
 async function api(path, data) {
     const response = await fetch('/api/' + path, data === undefined ? {} : {
@@ -60,13 +61,17 @@ function installShare(s) {
     const marks = [[/^Opening the preview/, .05], [/^Creating partitions/, .15], [/^Encrypting the root/, .22], [/^Promoting/, .3],
                    [/^Copying the checked system/, .35], [/^Verifying the copy/, .65], [/^Updating partition IDs/, .75],
                    [/^Rebuilding initramfs/, .85], [/^Registering the boot/, .93], [/^The system on/, 1]];
-    for (const event of s.final.events) for (const [pattern, value] of marks) if (pattern.test(event.text || '')) share = Math.max(share, value);
+    for (const event of s.final.events) {
+        for (const [pattern, value] of marks) if (pattern.test(event.text || '')) share = Math.max(share, value);
+        // The copy reports its own percentage: the longest step moves continuously.
+        if (event.step === 'copy' && typeof event.percent === 'number') share = Math.max(share, .35 + .3 * Math.min(100, event.percent) / 100);
+    }
     return share;
 }
 const BUILD_STEPS = [['Storage', 0], ['VM', .05], ['Base', .12], ['Packages', .3], ['Boot', .84]];
 const INSTALL_STEPS = [['Check', 0], ['Partitions', .15], ['Copy', .35], ['Verify', .65], ['Boot', .85]];
 
-/* ── the sun: the site's «Восход», drawn on a canvas behind everything ───────── */
+/* ── the sun: the site's “Sunrise”, drawn on a canvas behind everything ───────── */
 function mulberry(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const random = mulberry(11);
 const RAYS = Array.from({length: 98}, (_, i) => ({f: i / 97, major: i % 4 === 0, len: i % 4 === 0 ? .62 : .16 + random() * .28,
@@ -164,6 +169,7 @@ function render(state) {
     $('welcome').hidden = state.messages.length > 0 || busy;
     $('thinking').hidden = !busy;
     if (busy) $('thinkingText').textContent = state.status;
+    renderTurn(state);
     $('error').hidden = !state.error || place !== 'talk';
     if (state.error) $('error').textContent = state.error;
 
@@ -179,7 +185,18 @@ function render(state) {
     $('connectButton').hidden = !!state.model;
     $('chatForm').hidden = !state.model;
     $('send').disabled = busy;
-    $('suggestions').hidden = busy || !!config;
+    // A question after the agreement keeps the configuration, so its suggested answers stay useful.
+    $('suggestions').hidden = busy || (!!config && !state.configuration_kept);
+    $('kept').hidden = !state.configuration_kept || busy || place !== 'talk' || !!state.rebuild_needed;
+    $('changedNote').hidden = !state.rebuild_needed || busy || place !== 'talk';
+    $('rebuildButton').hidden = !state.rebuild_needed || busy || place !== 'talk';
+    $('rebuildSaid').hidden = !state.rebuild_needed || busy;
+    for (const button of [$('rebuildButton'), $('rebuildSaid')]) {
+        button.disabled = rebuilding || state.final.phase === 'working';
+        button.querySelector('.rebuild-text').textContent = rebuilding ? 'Removing the preview…'
+            : rebuildAsk ? 'Confirm: remove this preview and build the changed system' : 'Rebuild the preview with the changes';
+        button.classList.toggle('danger', rebuildAsk && button.id === 'rebuildSaid');
+    }
 
     // Scenes.
     $('talk').hidden = place !== 'talk';
@@ -216,13 +233,16 @@ function render(state) {
         $('vmStatus').querySelector('.dot').className = 'dot ' + dot; $('vmStatus').querySelector('span').textContent = label;
         // The agent's answer to a change asked for during the preview stands above the bar.
         const answer = [...state.messages].reverse().find(message => message.role !== 'user');
-        $('said').hidden = !changeAsked;
         if (changeAsked) $('saidText').innerHTML = busy ? '<span class="typing"><i></i><i></i><i></i></span>' : '';
+        if (changeAsked && busy && state.status) $('saidText').append(' ' + state.status + elapsed());
         if (changeAsked && !busy && answer) $('saidText').textContent = answer.content;
+        if (!changeAsked && state.rebuild_needed) $('saidText').textContent = 'The configuration changed after this preview was built.';
     }
     if (place !== 'preview') changeAsked = false;
-    $('said').hidden = place !== 'preview' || !changeAsked;
-    document.body.classList.toggle('has-said', changeAsked);
+    $('said').hidden = place !== 'preview' || !(changeAsked || state.rebuild_needed);
+    $('cancelSaid').hidden = !busy || !state.turn;
+    $('cancelSaid').disabled = cancelling;
+    document.body.classList.toggle('has-said', !$('said').hidden);
     $('vmStatus').hidden = $('vmbar').hidden;
     $('fullscreen').hidden = !(place === 'preview' && state.running);
     $('stop').hidden = !state.running;
@@ -271,6 +291,7 @@ function render(state) {
     $('keep').hidden = !revertAsk;
     $('finalError').hidden = !state.final.error || place === 'install';
     if (state.final.error) $('finalError').textContent = state.final.error;
+    $('changedWarning').hidden = !state.rebuild_needed;
     updateLayoutWarning(); validateFinal();
     if (sheet === 'place' && (place !== 'talk' || !state.plan)) openSheet('');
     if (modal === 'install' && !state.built) openModal('');
@@ -516,6 +537,44 @@ function renderFinalNotes(state) {
     $('finalWarnings').replaceChildren(...warnings.map(text => { const p = document.createElement('p'); p.className = 'line warn'; p.textContent = text; return p; }));
 }
 
+// The request to the model: the seconds it takes and each step the installer took (CMP-129).
+const elapsed = () => sentAt ? ' · ' + Math.round((Date.now() - sentAt) / 1000) + ' s' : '';
+let lastTurn = '';
+function renderTurn(state) {
+    $('thinkingTime').textContent = busy ? elapsed().slice(3) : '';
+    $('cancelChat').hidden = !busy || !state.turn;
+    $('cancelChat').disabled = cancelling;
+    $('cancelChat').textContent = cancelling ? 'Cancelling…' : 'Cancel';
+    const steps = busy && state.turn ? state.turn.steps : [], key = JSON.stringify(steps);
+    if (key === lastTurn) return; lastTurn = key;
+    // The newest step is already the status line above; the list shows what came before it.
+    $('thinkingSteps').replaceChildren(...steps.slice(0, -1).map(step => {
+        const li = document.createElement('li'); li.textContent = step.text + ' · ' + Math.round(step.at) + ' s'; return li;
+    }));
+}
+setInterval(() => { if (busy && current) { renderTurn(current); if (changeAsked) render(current); } }, 1000);
+async function cancelChat() {
+    if (!busy || cancelling) return;
+    cancelling = true; render(current);
+    try { render(await api('chat/cancel', {})); } catch (error) { showError(error); }
+    finally { cancelling = false; if (current) render(current); }
+}
+$('cancelChat').onclick = $('cancelSaid').onclick = cancelChat;
+// The agent changed the system after the preview was built: the preview is removed and the changed
+// system measured again, only after a second, explicit click.
+async function rebuild() {
+    if (!rebuildAsk) { rebuildAsk = true; render(current); return; }
+    rebuildAsk = false; rebuilding = true; render(current);
+    try {
+        render(await api('revert', {}));
+        chatView = false; changeAsked = false;
+        $('placeButton').disabled = true; $('placeText').innerHTML = '<span class="spin"></span> Measuring the system…';
+        if (await plan()) openSheet('place');
+    } catch (error) { showError(error); }
+    finally { rebuilding = false; if (current) render(current); }
+}
+$('rebuildButton').onclick = $('rebuildSaid').onclick = rebuild;
+
 /* ── sheets and modals ────────────────────────────────── */
 // Placing the preview goes one step at a time: first where it lives, then its settings and the password.
 function showPlaceStep(step) {
@@ -554,10 +613,16 @@ document.addEventListener('keydown', event => {
 async function refresh() { try { render(await api('state')); } catch (error) { showError(error); } }
 async function send(text) {
     text = text.trim(); if (!text || busy) return;
-    busy = true; $('prompt').value = ''; $('changePrompt').value = '';
+    busy = true; sentAt = Date.now(); rebuildAsk = false; $('prompt').value = ''; $('changePrompt').value = '';
+    const box = changeAsked ? $('changePrompt') : $('prompt');
     current.messages = [...current.messages, {role: 'user', content: text}]; render(current);
-    try { render(await api('chat', {text})); } catch (error) { showError(error); $('prompt').value = text; }
-    finally { busy = false; if (current) render(current); }
+    try {
+        const result = await api('chat', {text});
+        // A cancelled request leaves no trace: the message comes back to be edited or sent again.
+        if (result.cancelled) { box.value = result.cancelled; changeAsked = false; }
+        render(result);
+    } catch (error) { showError(error); box.value = text; }
+    finally { busy = false; sentAt = 0; if (current) render(current); }
 }
 $('chatForm').onsubmit = event => { event.preventDefault(); send($('prompt').value); };
 $('changeForm').onsubmit = event => { event.preventDefault(); if ($('changePrompt').value.trim()) changeAsked = true; send($('changePrompt').value); };

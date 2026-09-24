@@ -25,25 +25,26 @@ JOURNAL_FIELDS = ('SYSLOG_IDENTIFIER', '_SYSTEMD_UNIT', 'PRIORITY', 'MESSAGE', '
                   'AGIOS_EVENT', 'AGIOS_OPERATION', 'AGIOS_DATA', 'AGIOS_ERROR')
 LOG_TAIL = 256 * 1024
 JOURNAL_LINES = 20_000
-README = '''Диагностика AGIOS
+README = '''AGIOS diagnostics
 
-Этот архив создан кнопкой «Диагностика» на сайте Live-среды AGIOS. Он нужен,
-чтобы разработчики поняли, что произошло. Пароли пользователя и шифрования
-сайт не сохраняет; ключи API, токены, хэши паролей и значения полей с
-«секретными» именами заменены на *** автоматически, серийные номера дисков
-сокращены. Фильтр узнаёт секреты только по виду: диалог с агентом (session.json)
-включён целиком — если вы писали в чат пароль или ключ обычным текстом,
-удалите его. Перед отправкой откройте файлы и проверьте содержимое.
+This archive was made with the “Diagnostics” button on the AGIOS Live website.
+It helps the developers understand what happened. The website does not keep
+the user and encryption passwords; API keys, tokens, password hashes and the
+values of fields with “secret” names are replaced with *** automatically, and
+disk serial numbers are shortened. The filter recognizes secrets only by their
+form: the conversation with the agent (session.json) is included in full — if
+you typed a password or key into the chat as plain text, delete it. Before
+sending, open the files and check what they contain.
 
-Файлы:
-  versions.json          — версия образа, ревизия исходников, ядро, пакеты
-  state.json             — состояние сайта: этап, конфигурация, события, ошибки
-  session.json           — запись сеанса: диалог с агентом, конфигурация, этапы
-  inventory.json         — диски и железо компьютера
-  journal-agios.jsonl    — журнал компонентов AGIOS за эту загрузку
-  journal-services.jsonl — журнал служб Live (сайт, guacd, зеркала, сеть)
-  journal-warnings.jsonl — предупреждения и ошибки всей системы за загрузку
-  vm/<VM>/qemu.log, vm/<VM>/guest-console.log — хвосты журналов VM превью
+Files:
+  versions.json          — image version, source revision, kernel, packages
+  state.json             — website state: step, configuration, events, errors
+  session.json           — session record: conversation with the agent, configuration, steps
+  inventory.json         — the computer’s disks and hardware
+  journal-agios.jsonl    — log of the AGIOS components for this boot
+  journal-services.jsonl — log of the Live services (website, guacd, mirrors, network)
+  journal-warnings.jsonl — warnings and errors of the whole system for this boot
+  vm/<VM>/qemu.log, vm/<VM>/guest-console.log — log tails of the preview VMs
 '''
 
 
@@ -64,7 +65,7 @@ def read_text(path, tail=None):
                 size = stream.tell()
                 stream.seek(max(0, size - tail))
                 data = stream.read()
-                prefix = f'[… начало обрезано, показаны последние {tail} байт]\n' if size > tail else ''
+                prefix = f'[… beginning cut, showing the last {tail} bytes]\n' if size > tail else ''
                 return prefix + data.decode('utf-8', 'replace')
             return stream.read().decode('utf-8', 'replace')
     except OSError:
@@ -100,7 +101,7 @@ def journal_records(args):
                 entry[key] = value
         lines.append(json.dumps(redact(entry), ensure_ascii=False))
     if err and not lines:
-        lines.append(json.dumps({'note': 'Журнал недоступен: ' + redact(err)[:500]}, ensure_ascii=False))
+        lines.append(json.dumps({'note': 'Journal unavailable: ' + redact(err)[:500]}, ensure_ascii=False))
     return '\n'.join(lines) + '\n'
 
 

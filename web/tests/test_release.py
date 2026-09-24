@@ -87,13 +87,13 @@ class CheckTests(unittest.TestCase):
         result = release.check(offline, self.installed)
         self.assertIn('Network is unreachable', result['error'])
         result = release.check(lambda: {'message': 'Not Found'}, self.installed)
-        self.assertIn('неожиданный ответ', result['error'])
+        self.assertIn('unexpected response', result['error'])
 
     def test_no_releases_yet(self):
         import urllib.error
         def missing():
             raise urllib.error.HTTPError(release.RELEASES, 404, 'Not Found', {}, None)
-        self.assertEqual(release.check(missing, self.installed)['error'], 'Опубликованных выпусков AGIOS пока нет')
+        self.assertEqual(release.check(missing, self.installed)['error'], 'No AGIOS releases are published yet')
 
     def test_notes_are_bounded(self):
         result = release.check(lambda: github_release('v0.2.0', body='x' * 100_000), self.installed)
