@@ -316,6 +316,7 @@ class State:
                 'can_plan': bool(config and consent and 'digest' in consent and not running and not busy and not self.preview),
                 'can_resume': bool(self.disk_ready and not running and not busy and self.final['phase'] != 'complete'),
                 'can_revert': bool(self.preview and not busy and not running and self.final['phase'] != 'complete'),
+                'preview_revert': self.preview['option']['revert'] if self.preview else None,
                 'built': built,
                 'can_finalize': bool(self.disk_ready and self.built and self.preview and not running and not busy and self.final['phase'] != 'complete'),
                 'final': self.final}
