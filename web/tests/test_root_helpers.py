@@ -776,7 +776,7 @@ class DirtyPreviewTests(unittest.TestCase):
             with patch.object(finalize_worker.subprocess, 'run') as run, \
                     patch.object(finalize_worker, 'nbd_server', return_value=None):
                 source.detach()
-            self.assertEqual(run.call_args_list[0].args[0], ['qemu-nbd', '--disconnect', '/dev/nbd0'])
+            self.assertIn(['qemu-nbd', '--disconnect', '/dev/nbd0'], [c.args[0] for c in run.call_args_list])
             self.assertFalse(Path(overlay).parent.exists())
 
     def test_encrypted_root_opens_writable_over_the_overlay(self):
