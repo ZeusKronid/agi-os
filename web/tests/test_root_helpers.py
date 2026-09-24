@@ -383,6 +383,39 @@ class PrepareTests(unittest.TestCase):
             room.assert_called_once()
             self.assertEqual(self.calls, [], fstype)
 
+    def test_shrink_refuses_space_below_installer_disk_minimum(self):
+        # The package estimate can be smaller than the installer VM's 12 GiB
+        # minimum disk; accepting that estimate creates a VM that cannot install.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=10 * GIB):
+                with self.assertRaisesRegex(ValidationError, 'shrinkable space'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual(self.calls, [], fstype)
+
+    def test_probe_marks_small_raw_partition_unfit_and_hides_small_shrink(self):
+        snapshot = fixture()
+        start = 2048 + 100 * GIB // S
+        short = [(start, start + 10 * GIB // S - 1)]
+        with Environment(snapshot), patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
+                patch.object(storage_worker, 'free_regions', return_value=short), \
+                patch.object(storage_worker, 'fs_free', return_value=0), \
+                patch.object(storage_worker, 'shrink_room', return_value=10 * GIB):
+            options = {o['id']: o for o in storage_worker.probe(
+                {'needed': 8 * GIB, 'target': '/dev/sda', 'vm_memory': 4 * GIB})['options']}
+        self.assertFalse(options[f'part:/dev/sda:{start}']['fits'])
+        self.assertNotIn('shrink:/dev/sda1', options)
+
+    def test_partition_prepare_rechecks_installer_disk_minimum(self):
+        start = 2048 + 100 * GIB // S
+        short = [(start, start + 10 * GIB // S - 1)]
+        with patch.object(storage_worker, 'free_regions', return_value=short):
+            with self.assertRaisesRegex(ValidationError, 'too small for the installer VM'):
+                self.prepare({'id': f'part:/dev/sda:{start}'})
+        self.assertEqual([call[0] for call in self.calls], ['sgdisk'])  # GPT backup only
+
     def test_shrink_refuses_failed_gpt_backup_before_writing(self):
         # Recovery needs the original table. If it cannot be backed up, leave
         # the filesystem at its original size as well.
