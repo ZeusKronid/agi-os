@@ -1,7 +1,7 @@
 """Providers run in the Live environment. The serial bridge is test-only."""
 from bridge import BridgeProvider, PORT
 from chatgpt import ChatGPTProvider
-from providers import ProviderError
+from providers import PROVIDERS, ProviderError
 
 CONTEXT = '''
 AGIOS is running inside a booted Linux Live environment on the user's computer.
@@ -44,6 +44,17 @@ class LiveProvider:
     def close(self):
         if self.backend:
             self.backend.close()
+
+    @property
+    def label(self):
+        """Which service answers, for the page's status line."""
+        if self.backend is None:
+            return ''
+        if isinstance(self.backend, ChatGPTProvider):
+            return PROVIDERS['chatgpt'][0]
+        if isinstance(self.backend, BridgeProvider):
+            return 'Test bridge'
+        return PROVIDERS.get(getattr(self.backend, 'kind', ''), ('',))[0]
 
 
 def connect_chatgpt(model=None, show_login=lambda url: None):

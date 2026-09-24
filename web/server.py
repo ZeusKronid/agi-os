@@ -298,7 +298,8 @@ class State:
                                        and self.preview['image']['path'].startswith(self.built['consent']['target'])),
                      'revert': self.preview['option']['revert'] if self.preview else None}
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
-                'error': self.error, 'model': self.provider.model, 'login_url': self.login_url,
+                'error': self.error, 'model': self.provider.model, 'provider': getattr(self.provider, 'label', ''),
+                'login_url': self.login_url,
                 'firmware': snapshot['firmware'], 'found': self.found_public(),
                 'scanning': bool(self.scan_task and not self.scan_task.done()), 'scan_error': self.scan_error,
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
@@ -316,6 +317,7 @@ class State:
                 'can_plan': bool(config and consent and 'digest' in consent and not running and not busy and not self.preview),
                 'can_resume': bool(self.disk_ready and not running and not busy and self.final['phase'] != 'complete'),
                 'can_revert': bool(self.preview and not busy and not running and self.final['phase'] != 'complete'),
+                'preview_revert': self.preview['option']['revert'] if self.preview else None,
                 'built': built,
                 'can_finalize': bool(self.disk_ready and self.built and self.preview and not running and not busy and self.final['phase'] != 'complete'),
                 'final': self.final}
@@ -568,6 +570,21 @@ async def configure(request):
     return web.json_response(state.public())
 
 
+async def provider_models(request):
+    """The models an API provider offers to this key, so the user picks one instead of typing
+    its id. The key is used for this one request and not kept."""
+    data = await request.json()
+    kind = data.get('kind')
+    if kind not in PROVIDERS or kind == 'chatgpt':
+        raise ValidationError('Pick an API provider')
+    provider = APIProvider(kind, data.get('endpoint') or PROVIDERS[kind][1], data.get('key', ''))
+    try:
+        models = await asyncio.to_thread(provider.models)
+    finally:
+        provider.close()
+    return web.json_response({'models': sorted(set(models))[:500]})
+
+
 def vm_size(data):
     memory, cpus = data.get('memory', 4096), data.get('cpus', 4)
     if type(memory) is not int or not 2048 <= memory <= 32768 or type(cpus) is not int or not 1 <= cpus <= 16:
@@ -668,13 +685,26 @@ async def stop(request):
     if state.lock.locked() or state.final['phase'] == 'working':
         raise web.HTTPConflict(text='Wait for the current operation to finish')
     async with state.lock:
-        if state.build_task and not state.build_task.done():
+        building = bool(state.build_task and not state.build_task.done())
+        if building:
             state.build_task.cancel()
             await asyncio.gather(state.build_task, return_exceptions=True)
+        clean = True
         if state.vm:
-            await state.vm.stop()
+            if building or not state.vm.running:
+                # Cancelling a build stops the installer VM at once; the preview is unfinished anyway.
+                await state.vm.stop()
+            else:
+                # A preview the user keeps is turned off like a computer, never cut off: a power cut
+                # leaves its file systems dirty and loses what the guest has not written yet.
+                state.status = ('Turning off the preview, as with its power button… If the preview asks to confirm, '
+                                'confirm there; it is stopped after 90 seconds')
+                clean = await state.vm.shutdown()
+                if not clean:
+                    log.warning('vm.stop.forced', 'The preview did not turn itself off in time and was stopped')
         if state.disk_ready:
-            state.phase, state.status = 'stopped', 'VM stopped. The preview is kept'
+            state.phase, state.status = 'stopped', ('VM turned off. The preview is kept' if clean else
+                                                    'The preview did not turn itself off in time and was stopped. The preview is kept')
         if state.record_dirty:
             await state.save_record('Preview VM stopped')
         state.persist()
@@ -962,11 +992,16 @@ async def cleanup(app):
         state.scan_task.cancel()
     if state.final_task and not state.final_task.done():
         await asyncio.shield(state.final_task)
-    if state.build_task and not state.build_task.done():
+    building = bool(state.build_task and not state.build_task.done())
+    if building:
         state.build_task.cancel()
         await asyncio.gather(state.build_task, return_exceptions=True)
     if state.vm:
-        await state.vm.stop()
+        if building:
+            await state.vm.stop()
+        else:
+            # The Live is shutting down: give a kept preview a short chance to turn itself off.
+            await state.vm.shutdown(timeout=30)
     await asyncio.to_thread(state.provider.close)
 
 
@@ -978,6 +1013,7 @@ def application(port=8787, guacd_port=14822):
     app.router.add_post('/api/chat', chat)
     app.router.add_post('/api/chat/cancel', chat_cancel)
     app.router.add_post('/api/provider', configure)
+    app.router.add_post('/api/provider/models', provider_models)
     app.router.add_post('/api/plan', plan)
     app.router.add_post('/api/build', build)
     app.router.add_post('/api/stop', stop)

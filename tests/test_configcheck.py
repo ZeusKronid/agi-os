@@ -167,6 +167,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertEqual(foot[:6], ["arch-chroot", foot[1], "runuser", "-u", "tester", "--"])
         self.assertIn("/home/tester/.config/foot/foot.ini", foot)
         self.assertIn("XDG_RUNTIME_DIR=/var/tmp/agi-os-config-check", foot)
+        self.assertIn("LC_ALL=C.UTF-8", foot)  # no "'C' is not a UTF-8 locale" noise in the error
         self.assertTrue(any("/usr/bin/Hyprland" in c and "--verify-config" in c for c in calls))
         self.assertTrue(error.startswith(worker.CONFIG_CHECK_FAILED))
         self.assertIn("~/.config/foot/foot.ini — foot", error)
@@ -183,7 +184,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertFalse(any("/usr/bin/sway" in c for c in calls))
         bash = next(c for c in calls if "/usr/bin/bash" in c)
-        self.assertEqual(bash, ["arch-chroot", bash[1], "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
+        self.assertEqual(bash, ["arch-chroot", bash[1], "env", "LC_ALL=C.UTF-8", "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
 
     def test_systemd_failure_explains_file_modes(self):
         config = dataclasses.replace(self.config(), system_files=(("etc/systemd/user/agi.service",

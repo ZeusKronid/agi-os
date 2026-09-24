@@ -1,6 +1,7 @@
 """Static checks of the Live image profile: no Codex/GTK-era entry points remain."""
 
 import configparser
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -81,6 +82,28 @@ class BootMediaTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn('ENV{ID_CDROM}=="1"', lines[0])
         self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
+
+
+class FirefoxPolicyTests(unittest.TestCase):
+    def test_live_browser_neither_saves_passwords_nor_opens_extra_tabs(self):
+        # The website asks for the new system's passwords: the Live Firefox must not offer to
+        # save or generate them, and no privacy-notice tab should open next to the website.
+        policies = json.loads((AIROOTFS / "usr/lib/firefox/distribution/policies.json").read_text())["policies"]
+        self.assertIs(policies["PasswordManagerEnabled"], False)
+        self.assertIs(policies["OfferToSaveLogins"], False)
+        self.assertIs(policies["DisableTelemetry"], True)
+        self.assertEqual(policies["OverrideFirstRunPage"], "")
+        self.assertIs(policies["Preferences"]["signon.generation.enabled"]["Value"], False)
+
+
+class WebsiteLayoutTests(unittest.TestCase):
+    def test_found_previews_stay_in_one_column(self):
+        # Sunrise E2E: .notice is a flex column with max-height; with flex-wrap: wrap the list of
+        # found previews moved into a second column past the right edge and its buttons vanished.
+        css = (ROOT / "web/static/style.css").read_text()
+        rules = [line for line in css.splitlines() if line.startswith(".notice {")]
+        self.assertIn("flex-wrap: nowrap", rules[-1])
+        self.assertIn("#orphanList { display: block; }", css)
 
 
 class ChatGPTIsolationTests(unittest.TestCase):
