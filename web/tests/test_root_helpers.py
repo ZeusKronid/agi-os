@@ -77,6 +77,7 @@ class Environment:
             patch.object(finalize_worker, 'inventory', side_effect=lambda: copy.deepcopy(self.snapshot)),
             patch.object(storage_worker, 'live_source', return_value='/dev/sdb1'),
             patch.object(storage_worker, 'mount_source', return_value=None),
+            patch.object(storage_worker, 'hibernated', return_value=False),
         ]
 
     def __enter__(self):
@@ -481,6 +482,65 @@ class FinalizeImageTests(unittest.TestCase):
             (record / 'installation.json').write_text('{}')
             finalize_worker.read_record(Runner(), '/dev/mapper/x', Path(tmp))
         self.assertEqual(calls[0][:3], ['mount', '-o', 'ro,nosuid,nodev,noexec'])
+
+
+
+class WindowsSafetyTests(unittest.TestCase):
+    """CMP-151: a hibernated (Fast Startup) or BitLocker Windows is never written or resized."""
+
+    def probe(self, snapshot, state):
+        with Environment(snapshot), patch.object(storage_worker, 'hibernated', return_value=state), \
+                patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
+                patch.object(storage_worker, 'fs_free', return_value=50 * GIB), \
+                patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                patch.object(storage_worker, 'free_regions', return_value=[]):
+            return {o['id']: o for o in storage_worker.probe({'needed': 8 * GIB, 'target': '/dev/sda', 'vm_memory': 4 * GIB})['options']}
+
+    def test_hibernated_windows_is_offered_neither_for_shrinking_nor_for_a_file(self):
+        snapshot = fixture()
+        snapshot['disks'][2]['partitions'][0].update(fstype='ntfs')  # a Windows data disk
+        options = self.probe(snapshot, True)
+        for option_id in ('shrink:/dev/sda1', 'file:/dev/sdc1'):
+            option = options[option_id]
+            self.assertFalse(option['fits'], option_id)
+            self.assertIn('Fast Startup', option['blocked'])
+            self.assertEqual(option['detail'], option['blocked'])
+        self.assertTrue(self.probe(snapshot, False)['shrink:/dev/sda1']['fits'])
+        self.assertNotIn('blocked', self.probe(snapshot, False)['file:/dev/sdc1'])
+
+    def test_unreadable_windows_is_left_alone(self):
+        self.assertIn('could not be checked', self.probe(fixture(), None)['shrink:/dev/sda1']['blocked'])
+
+    def test_bitlocker_volume_is_explained_not_hidden(self):
+        snapshot = fixture()
+        snapshot['disks'][0]['partitions'][0].update(fstype='BitLocker')
+        option = self.probe(snapshot, False)['shrink:/dev/sda1']
+        self.assertFalse(option['fits'])
+        self.assertIn('BitLocker', option['blocked'])
+
+    def test_forged_choice_of_a_blocked_volume_is_refused(self):
+        with Environment() as env, patch.object(storage_worker, 'hibernated', return_value=True):
+            for option in ({'id': 'shrink:/dev/sda1'}, {'id': 'file:/dev/sdc1'}):
+                env.snapshot['disks'][2]['partitions'][0]['fstype'] = 'ntfs'
+                with self.assertRaises(ValidationError) as caught:
+                    storage_worker.resolve_option(option, '/dev/sda', env.snapshot)
+                self.assertIn('Fast Startup', str(caught.exception))
+
+    def test_hiberfil_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = {'path': '/dev/sda3', 'fstype': 'ntfs', 'mounted': False}
+            with patch.object(storage_worker, 'PREVIEW', root), \
+                    patch.object(storage_worker, 'read_only_mount', return_value=True), \
+                    patch.object(storage_worker.subprocess, 'run'):
+                self.assertFalse(storage_worker.hibernated(part))  # no hiberfil.sys at all
+                (root / 'check').mkdir()
+                for head, state in ((b'HIBR' + b'\0' * 60, True), (b'hibr' + b'\0' * 60, True),
+                                    (b'\0' * 64, False), (b'wake' + b'\0' * 60, False)):
+                    (root / 'check/hiberfil.sys').write_bytes(head)
+                    self.assertEqual(storage_worker.hibernated(part), state, head[:4])
+            with patch.object(storage_worker, 'read_only_mount', return_value=False):
+                self.assertIsNone(storage_worker.hibernated(part))
 
 
 # ---- Fuzzing: mutated requests must be refused cleanly or resolve to allowed devices only ----

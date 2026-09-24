@@ -325,7 +325,7 @@ function renderOptions(plan) {
         const radio = document.createElement('span'); radio.className = 'radio';
         const body = document.createElement('div'), title = document.createElement('b'), detail = document.createElement('span'), undo = document.createElement('small');
         title.textContent = option.title;
-        const tags = [option.recommended && 'recommended', !option.fits && 'not enough room', option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
+        const tags = [option.recommended && 'recommended', !option.fits && (option.blocked ? 'not possible now' : 'not enough room'), option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
         for (const tag of tags) { const i = document.createElement('i'); i.textContent = tag; title.append(' ', i); }
         detail.textContent = option.detail; undo.textContent = 'Undo: ' + option.revert;
         body.append(title, detail, undo); card.append(radio, body); box.append(card);

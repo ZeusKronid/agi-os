@@ -152,6 +152,50 @@ def fs_free(partition):
     return mounted_free(partition['path'], fstype)
 
 
+def hibernated(partition):
+    """Whether an NTFS volume holds a hibernated Windows, Fast Startup's hybrid shutdown
+    included: hiberfil.sys then starts with "hibr". None when the volume can't be read."""
+    point = PREVIEW / 'check'
+    if not read_only_mount(partition['path'], 'ntfs', point):
+        return None
+    try:
+        with open(point / 'hiberfil.sys', 'rb') as handle:
+            return handle.read(4).lower() == b'hibr'
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    finally:
+        subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+
+
+def windows_blocker(partition):
+    """Why a Windows volume must not be written or resized now (CMP-151), or None.
+
+    Windows resuming from hibernation, or starting after a Fast Startup shutdown, trusts
+    its cached view of the volume: anything written or moved meanwhile is lost or
+    corrupts it. A BitLocker volume can't be read from Live at all, so it can't shrink."""
+    fstype = partition.get('fstype')
+    if fstype == 'BitLocker':
+        return (f'{partition["path"]} is encrypted with BitLocker, so it can’t be shrunk here. Shrink it in Windows '
+                '(Disk Management → Shrink Volume) and then use the free space.')
+    if fstype != 'ntfs' or partition['mounted']:
+        return None
+    state = hibernated(partition)
+    if state is None:
+        return (f'Windows on {partition["path"]} could not be checked, so it is left alone. Start Windows, run '
+                '“chkdsk /f”, shut it down fully and try again.')
+    if state:
+        return (f'Windows on {partition["path"]} is hibernated or was shut down with Fast Startup, so it must not be '
+                'changed now. Start Windows, turn off Fast Startup (Control Panel → Power Options → Choose what the '
+                'power buttons do), then hold Shift while you click Shut down, and try again.')
+    return None
+
+
+def blocked_option(option, reason):
+    return {**option, 'detail': reason, 'blocked': reason, 'fits': False, 'available': 0}
+
+
 def shrink_room(partition):
     """How far an unmounted NTFS/ext4 filesystem can shrink safely, in bytes (or None)."""
     fstype = partition.get('fstype')
@@ -319,6 +363,8 @@ def resolve_option(option, target, snapshot):
             raise ValidationError('Файл превью размещается только на другом носителе')
         if part.get('fstype') not in FILE_FS or part['mounted']:
             raise ValidationError(f'На {part["path"]} нельзя разместить файл превью')
+        if reason := windows_blocker(part):
+            raise ValidationError(reason)
         return {'kind': 'file', 'device': part['path'], 'fstype': part['fstype']}
     if kind == 'part':
         disk_path, _, start = rest.rpartition(':')
@@ -333,6 +379,8 @@ def resolve_option(option, target, snapshot):
         if disk['path'] != target:
             raise ValidationError('Ужимать можно только раздел целевого диска')
         selected_disk(snapshot, target)
+        if reason := windows_blocker(part):
+            raise ValidationError(reason)
         if disk.get('pttype') != 'gpt' or part.get('fstype') not in SHRINK_FS or part['mounted']:
             raise ValidationError(f'Раздел {part["path"]} нельзя ужать')
         return {'kind': 'shrink', 'disk': disk['path'], 'device': part['path'], 'fstype': part['fstype']}
@@ -439,6 +487,12 @@ def probe(request):
             for part in disk['partitions']:
                 if part['path'] == live_medium:
                     continue
+                if part.get('fstype') == 'ntfs' and not part['mounted'] and (reason := windows_blocker(part)):
+                    options.append(blocked_option({'id': 'file:' + part['path'], 'kind': 'file',
+                                                   'title': f'File on {part["path"]}', 'revert': 'nothing is changed',
+                                                   'destructive': False, 'confirm': None, 'device': part['path'],
+                                                   'fstype': 'ntfs', 'order': 1 if tran != 'usb' else 2}, reason))
+                    continue
                 free = fs_free(part)
                 if free is None:
                     continue
@@ -460,6 +514,12 @@ def probe(request):
                             'available': size, 'fits': needed <= size, 'order': 1 if disk['path'] == target else 2})
         if disk['path'] == target and disk.get('pttype') == 'gpt':
             for part in disk['partitions']:
+                if part.get('fstype') in ('ntfs', 'BitLocker') and not part['mounted'] and (reason := windows_blocker(part)):
+                    options.append(blocked_option({'id': 'shrink:' + part['path'], 'kind': 'shrink',
+                                                   'title': f'Shrink partition {part["path"]}', 'revert': 'nothing is changed',
+                                                   'destructive': True, 'confirm': part['path'], 'disk': disk['path'],
+                                                   'device': part['path'], 'fstype': part['fstype'], 'order': 3}, reason))
+                    continue
                 room = shrink_room(part)
                 if room is None or room < needed:
                     continue
