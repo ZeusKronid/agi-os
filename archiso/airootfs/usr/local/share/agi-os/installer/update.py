@@ -51,7 +51,7 @@ def run(args, timeout=600, input_text=None):
                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     if result.returncode:
         detail = (result.stdout + result.stderr).strip()[-2000:]
-        raise UpdateError(f"Ошибка {args[0]} (код {result.returncode})\n{detail}")
+        raise UpdateError(f"{args[0]} failed (code {result.returncode})\n{detail}")
     return result.stdout
 
 
@@ -65,8 +65,8 @@ def stream(args):
         tail = (tail + [line])[-40:]
     if proc.wait():
         detail = "".join(tail).strip()[-2000:]
-        log(f"{args[0]}: код {proc.returncode}\n{detail}")
-        raise UpdateError(f"Ошибка {args[0]} (код {proc.returncode})\n{detail}")
+        log(f"{args[0]}: code {proc.returncode}\n{detail}")
+        raise UpdateError(f"{args[0]} failed (code {proc.returncode})\n{detail}")
 
 
 def boot_id(proc=Path("/proc")):
@@ -116,13 +116,13 @@ def notice_text(status):
     lines = []
     count = len(status.get("updates", []))
     if count:
-        lines.append(f"AGI OS: доступно обновлений: {count}" + (" (включая ядро)" if status.get("kernel") else "")
-                     + ". Установить: sudo agi-os-update apply")
+        lines.append(f"AGI OS: updates available: {count}" + (" (including the kernel)" if status.get("kernel") else "")
+                     + ". Install: sudo agi-os-update apply")
     if status.get("reboot_required"):
-        lines.append("AGI OS: обновление установлено; перезагрузите компьютер, чтобы применить его полностью.")
+        lines.append("AGI OS: an update is installed; restart the computer to apply it fully.")
     if status.get("pacnew"):
-        lines.append("AGI OS: есть новые версии файлов настроек (.pacnew): " + ", ".join(status["pacnew"][:5])
-                     + ". Сравните их с текущими файлами и перенесите нужные изменения.")
+        lines.append("AGI OS: new versions of settings files are available (.pacnew): " + ", ".join(status["pacnew"][:5])
+                     + ". Compare them with the current files and carry over the changes you need.")
     return "".join(line + "\n" for line in lines)
 
 
@@ -139,7 +139,7 @@ def write_status(status, state=None):
 
 def require_root():
     if os.geteuid() != 0:
-        raise UpdateError("Нужны права администратора: sudo agi-os-update " + " ".join(sys.argv[1:]))
+        raise UpdateError("Administrator rights needed: sudo agi-os-update " + " ".join(sys.argv[1:]))
 
 
 def locked():
@@ -148,7 +148,7 @@ def locked():
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise UpdateError("Уже идёт проверка или установка обновлений") from None
+        raise UpdateError("An update check or installation is already running") from None
     return handle
 
 
@@ -159,14 +159,14 @@ def check(db=None, pacman_db=None):
     local = db / "local"
     if not local.is_symlink():
         if local.exists():
-            raise UpdateError("Служебная база проверки обновлений повреждена: " + str(local))
+            raise UpdateError("The update check’s private database is damaged: " + str(local))
         local.symlink_to(pacman_db / "local")
     run(["pacman", "-Sy", "--dbpath", str(db), "--logfile", "/dev/null"], timeout=600)
     result = subprocess.run(["pacman", "-Qu", "--dbpath", str(db)], capture_output=True, text=True,
                             timeout=120, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     # pacman -Qu exits 1 when nothing is outdated.
     if result.returncode not in (0, 1):
-        raise UpdateError("Не удалось сравнить версии пакетов")
+        raise UpdateError("Could not compare package versions")
     updates = parse_updates(result.stdout)
     return {"updates": updates, "kernel": any(u["name"] in KERNELS for u in updates)}
 
@@ -210,7 +210,7 @@ def snapshot(stamp, snapshots=None, keep=KEEP_SNAPSHOTS):
         try:
             run(["btrfs", "subvolume", "delete", str(path)])
         except UpdateError:
-            log("Не удалось удалить старый снимок " + str(path))
+            log("Could not delete the old snapshot " + str(path))
     return str(target)
 
 
@@ -238,7 +238,7 @@ def refresh_bootloader(kind, changed, firmware=None):
             source = run(["findmnt", "-n", "-o", "SOURCE", "/boot"]).strip()
             disk = run(["lsblk", "-n", "-d", "-o", "PKNAME", source]).strip()
             if not disk:
-                raise UpdateError("Не удалось определить диск загрузчика GRUB")
+                raise UpdateError("Could not find the GRUB bootloader disk")
             run(["grub-install", "--target=i386-pc", "/dev/" + disk])
         run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
         done.append("grub")
@@ -268,52 +268,52 @@ def apply(force=False):
     try:
         if (PACMAN_DB / "db.lck").exists():
             if subprocess.run(["pgrep", "-x", "pacman"], capture_output=True).returncode == 0:
-                raise UpdateError("Менеджер пакетов занят другой операцией. Дождитесь её окончания и повторите.")
+                raise UpdateError("The package manager is busy with another operation. Wait for it to finish and try again.")
             # The lock lives on disk and survives a reboot; removing it is the user's decision.
-            raise UpdateError("Осталась блокировка от прерванной операции pacman (/var/lib/pacman/db.lck). "
-                              "Если никакой менеджер пакетов сейчас не запущен, удалите её: "
-                              "sudo rm /var/lib/pacman/db.lck — и повторите.")
+            raise UpdateError("An interrupted pacman operation left a lock (/var/lib/pacman/db.lck). "
+                              "If no package manager is running now, remove it: "
+                              "sudo rm /var/lib/pacman/db.lck — and try again.")
         low = on_battery_below()
         if low is not None and not force:
-            raise UpdateError(f"Заряд батареи {low}% без зарядки. Подключите питание: обрыв во время "
-                              "обновления ядра может помешать загрузке.")
+            raise UpdateError(f"Battery at {low}% and not charging. Plug in the power: losing power during "
+                              "a kernel update can stop the computer from booting.")
         if free_bytes("/") < MIN_FREE:
-            raise UpdateError("На системном разделе меньше 2 ГиБ свободного места. Освободите место "
-                              "(например, sudo pacman -Sc) и повторите.")
+            raise UpdateError("Less than 2 GiB free on the system partition. Free up space "
+                              "(for example, sudo pacman -Sc) and try again.")
         stamp = time.strftime("%Y%m%d-%H%M%S")
         status = read_status()
         status.pop("error", None)
         taken = None
         if root_filesystem() == "btrfs":
-            emit("Создаю снимок системы перед обновлением…")
+            emit("Taking a system snapshot before the update…")
             try:
                 taken = snapshot(stamp)
-                emit("Снимок: " + taken)
+                emit("Snapshot: " + taken)
             except UpdateError as exc:
                 # For example an active swap file in the root subvolume; the update itself is still safe.
-                emit("Снимок не создан, обновляю без него: " + str(exc).splitlines()[-1])
+                emit("No snapshot taken, updating without one: " + str(exc).splitlines()[-1])
         before = installed_versions()
-        emit("Обновляю ключи репозиториев…")
+        emit("Updating the repository keys…")
         stream(["pacman", "-Sy", "--needed", "--noconfirm", "archlinux-keyring"])
-        emit("Устанавливаю обновления…")
+        emit("Installing updates…")
         try:
             stream(["pacman", "-Su", "--noconfirm"])
         except UpdateError as exc:
-            hint = ("Часть пакетов могла обновиться. Не перезагружайтесь и не устанавливайте отдельные "
-                    "пакеты до повторной попытки: sudo agi-os-update apply. Если pacman задаёт вопрос "
-                    "(конфликт пакетов), выполните в терминале sudo pacman -Syu и ответьте на него")
+            hint = ("Some packages may be updated already. Do not restart or install single "
+                    "packages before you try again: sudo agi-os-update apply. If pacman asks a question "
+                    "(a package conflict), run sudo pacman -Syu in a terminal and answer it")
             if taken:
-                hint += f". Снимок системы до обновления: {taken}"
+                hint += f". System snapshot from before the update: {taken}"
             raise UpdateError(hint + "\n" + str(exc)) from None
         changed = changed_packages(before, installed_versions())
-        emit(f"Обновлено пакетов: {len(changed)}")
+        emit(f"Packages updated: {len(changed)}")
         refreshed = refresh_bootloader(bootloader(), changed)
         if refreshed:
-            emit("Загрузчик обновлён: " + ", ".join(refreshed))
+            emit("Bootloader updated: " + ", ".join(refreshed))
             if shutil.which("sbctl"):
                 # Secure Boot: the freshly copied loader must be signed again before the next boot.
                 run(["sbctl", "sign-all"])
-                emit("Загрузчик подписан заново (sbctl)")
+                emit("Bootloader signed again (sbctl)")
         status.update({"checked_at": stamp, "updates": [], "kernel": False,
                        "reboot_required": reboot_required(changed), "applied_boot_id": boot_id(),
                        "pacnew": pacnew_files(),
@@ -321,10 +321,10 @@ def apply(force=False):
                                       "bootloader": refreshed, "result": "ok"}})
         write_status(status)
         if status["reboot_required"]:
-            emit("Перезагрузите компьютер, чтобы запустить обновлённое ядро и службы.")
+            emit("Restart the computer to run the updated kernel and services.")
         if status["pacnew"]:
-            emit("Новые версии файлов настроек ждут сравнения (.pacnew): " + ", ".join(status["pacnew"]))
-        emit("Обновление завершено.")
+            emit("New versions of settings files are waiting to be compared (.pacnew): " + ", ".join(status["pacnew"]))
+        emit("Update finished.")
         return status
     except UpdateError as exc:
         status = read_status()
@@ -334,7 +334,7 @@ def apply(force=False):
             write_status(status)
         except OSError:
             pass
-        log("Ошибка обновления: " + str(exc))
+        log("Update failed: " + str(exc))
         raise
     finally:
         handle.close()
@@ -350,13 +350,13 @@ def run_check():
             status.update(check(), checked_at=stamp)
             status.pop("error", None)
         except UpdateError as exc:
-            status.update(error="Проверка обновлений не удалась: " + str(exc).splitlines()[0], checked_at=stamp)
+            status.update(error="Update check failed: " + str(exc).splitlines()[0], checked_at=stamp)
         # The reminder to reboot ends with the first boot after the update.
         if status.get("reboot_required") and status.get("applied_boot_id") != boot_id():
             status["reboot_required"] = False
         status["pacnew"] = pacnew_files()
         write_status(status)
-        log(f"Проверка: обновлений {len(status.get('updates', []))}" + (", " + status["error"] if status.get("error") else ""))
+        log(f"Check: {len(status.get('updates', []))} updates" + (", " + status["error"] if status.get("error") else ""))
         return status
     finally:
         handle.close()
@@ -364,12 +364,12 @@ def run_check():
 
 def describe(status):
     if not status:
-        return "Обновления ещё не проверялись. Проверить: sudo agi-os-update check"
-    lines = [f"Последняя проверка: {status.get('checked_at', 'нет')}"]
+        return "Updates have not been checked yet. Check: sudo agi-os-update check"
+    lines = [f"Last check: {status.get('checked_at', 'never')}"]
     if status.get("error"):
         lines.append(status["error"])
     updates = status.get("updates", [])
-    lines.append(f"Доступно обновлений: {len(updates)}" + (" (включая ядро)" if status.get("kernel") else ""))
+    lines.append(f"Updates available: {len(updates)}" + (" (including the kernel)" if status.get("kernel") else ""))
     lines += [f"  {u['name']} {u['old']} → {u['new']}" for u in updates[:200]]
     notice = notice_text({k: v for k, v in status.items() if k != "updates"})
     if notice:
@@ -403,7 +403,7 @@ def gui():
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk
-    window = Gtk.Window(title="AGI OS — Обновления")
+    window = Gtk.Window(title="AGI OS — Updates")
     window.set_default_size(680, 520)
     window.set_border_width(20)
     window.connect("destroy", Gtk.main_quit)
@@ -413,11 +413,11 @@ def gui():
     scroll = Gtk.ScrolledWindow()
     scroll.add(output)
     box.pack_start(scroll, True, True, 0)
-    password = Gtk.Entry(visibility=False, placeholder_text="Ваш пароль (как для sudo)")
+    password = Gtk.Entry(visibility=False, placeholder_text="Your password (the one for sudo)")
     box.pack_start(password, False, False, 0)
     row = Gtk.Box(spacing=10)
-    check_button = Gtk.Button(label="Проверить сейчас")
-    apply_button = Gtk.Button(label="Обновить систему")
+    check_button = Gtk.Button(label="Check now")
+    apply_button = Gtk.Button(label="Update the system")
     apply_button.get_style_context().add_class("suggested-action")
     row.pack_end(apply_button, False, False, 0)
     row.pack_end(check_button, False, False, 0)
@@ -432,14 +432,14 @@ def gui():
     def finished(code):
         for widget in (check_button, apply_button, password):
             widget.set_sensitive(True)
-        append("\n" + ("Готово." if code == 0 else "Не выполнено: проверьте пароль и сообщения выше.") + "\n\n")
+        append("\n" + ("Done." if code == 0 else "Not done: check the password and the messages above.") + "\n\n")
         append(describe(read_status()) + "\n")
 
     def start(args):
         secret = password.get_text()
         password.set_text("")
         if not secret:
-            append("\nВведите пароль, чтобы продолжить.\n")
+            append("\nEnter your password to continue.\n")
             return
         for widget in (check_button, apply_button, password):
             widget.set_sensitive(False)
@@ -523,7 +523,7 @@ def main(argv=None):
             require_root()
             if not args.yes:
                 print(describe(read_status()))
-                if input("Установить все обновления сейчас? [y/N] ").strip().lower() not in ("y", "yes", "д", "да"):
+                if input("Install all updates now? [y/N] ").strip().lower() not in ("y", "yes"):
                     return 1
             apply(force=args.force)
             return 0

@@ -66,7 +66,7 @@ function installShare(s) {
 const BUILD_STEPS = [['Storage', 0], ['VM', .05], ['Base', .12], ['Packages', .3], ['Boot', .84]];
 const INSTALL_STEPS = [['Check', 0], ['Partitions', .15], ['Copy', .35], ['Verify', .65], ['Boot', .85]];
 
-/* ── the sun: the site's «Восход», drawn on a canvas behind everything ───────── */
+/* ── the sun: the site's “Sunrise”, drawn on a canvas behind everything ───────── */
 function mulberry(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const random = mulberry(11);
 const RAYS = Array.from({length: 98}, (_, i) => ({f: i / 97, major: i % 4 === 0, len: i % 4 === 0 ? .62 : .16 + random() * .28,
