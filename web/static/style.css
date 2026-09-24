@@ -241,7 +241,9 @@ dialog form { display: grid; gap: 14px; }
 }
 
 /* ── swarm features in the sunrise workspace: found previews, hardware, agent files, login review, Secure Boot, version ── */
-.notice { flex-direction: column; align-items: stretch; max-height: 60vh; overflow: auto; }
+.notice { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 60vh; overflow: auto; }
+/* A column that wraps would move the found previews into a second column past the edge (max-height). */
+#orphanList { display: block; }
 .found-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .found { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); }
 .found b { font: 400 16px var(--serif); color: var(--ink); }
