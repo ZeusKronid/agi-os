@@ -66,9 +66,9 @@ def kind(scope, path):
     return None
 
 
-FORMATS = {"json": "JSON", "jsonc": "JSON с комментариями", "toml": "TOML", "xml": "XML",
-           "desktop": "desktop-файл", "python": "Python", "systemd": "формат systemd",
-           "xorg": "формат xorg.conf", "braces": "парность скобок", "ini": "INI", "ini-any": "INI"}
+FORMATS = {"json": "JSON", "jsonc": "JSON with comments", "toml": "TOML", "xml": "XML",
+           "desktop": "desktop file", "python": "Python", "systemd": "systemd format",
+           "xorg": "xorg.conf format", "braces": "matching braces", "ini": "INI", "ini-any": "INI"}
 
 
 def strip_jsonc(text):
@@ -89,7 +89,7 @@ def strip_jsonc(text):
         elif text.startswith("/*", i):
             end = text.find("*/", i + 2)
             if end < 0:
-                raise ConfigCheckError("незакрытый комментарий /*")
+                raise ConfigCheckError("unclosed comment /*")
             out.append("\n" * text.count("\n", i, end))
             i = end + 2
         else:
@@ -135,14 +135,14 @@ def check_ini(text, sections_required, delimiters="="):
             continue
         if line.startswith("["):
             if not re.fullmatch(r"\[[^\[\]]+\]", line):
-                raise ConfigCheckError(f"строка {number}: некорректный заголовок секции {line[:80]}")
+                raise ConfigCheckError(f"line {number}: invalid section header {line[:80]}")
             section = line
             continue
         position = min((line.find(d) for d in delimiters if d in line), default=-1)
         if position <= 0 or not line[:position].strip():
-            raise ConfigCheckError(f"строка {number}: ожидается «ключ=значение», получено {line[:80]}")
+            raise ConfigCheckError(f"line {number}: expected “key=value”, got {line[:80]}")
         if sections_required and section is None:
-            raise ConfigCheckError(f"строка {number}: параметр вне секции [..]")
+            raise ConfigCheckError(f"line {number}: setting outside a [..] section")
         continued = sections_required and line.endswith("\\")
 
 
@@ -155,13 +155,13 @@ def check_desktop(text):
     except configparser.Error as exc:
         raise ConfigCheckError(str(exc).splitlines()[0])
     if not parser.has_section("Desktop Entry"):
-        raise ConfigCheckError("нет секции [Desktop Entry]")
+        raise ConfigCheckError("no [Desktop Entry] section")
     entry = parser["Desktop Entry"]
     # Name is what every reader needs; a missing Type is tolerated (session files often omit it).
     if not entry.get("Name", "").strip():
-        raise ConfigCheckError("в [Desktop Entry] нет обязательного ключа Name")
+        raise ConfigCheckError("[Desktop Entry] has no required Name key")
     if entry.get("Type", "Application").strip() == "Application" and not entry.get("Exec", "").strip():
-        raise ConfigCheckError("у приложения (Type=Application) нет ключа Exec")
+        raise ConfigCheckError("the application (Type=Application) has no Exec key")
 
 
 def check_xorg(text):
@@ -174,9 +174,9 @@ def check_xorg(text):
         elif keyword in ("endsection", "endsubsection"):
             depth -= 1
             if depth < 0:
-                raise ConfigCheckError(f"строка {number}: {word[0]} без открывающей секции")
+                raise ConfigCheckError(f"line {number}: {word[0]} without an opening section")
     if depth:
-        raise ConfigCheckError("не закрыта секция (нет EndSection)")
+        raise ConfigCheckError("a section is not closed (no EndSection)")
 
 
 def check_braces(text, inline_comments=False):
@@ -194,9 +194,9 @@ def check_braces(text, inline_comments=False):
         for char in line:
             depth += {"{": 1, "}": -1}.get(char, 0)
             if depth < 0:
-                raise ConfigCheckError(f"строка {number}: лишняя закрывающая скобка }}")
+                raise ConfigCheckError(f"line {number}: extra closing brace }}")
     if depth:
-        raise ConfigCheckError("не закрыт блок { … }: не хватает закрывающей скобки }")
+        raise ConfigCheckError("a block { … } is not closed: a closing brace } is missing")
 
 
 def static(scope, path, content):
@@ -226,21 +226,21 @@ def static(scope, path, content):
         elif syntax == "ini-any":
             check_ini(content, False, "=:")
     except ConfigCheckError as exc:
-        raise ConfigCheckError(f"Файл {display(scope, path)} ({FORMATS[syntax]}): {exc}")
+        raise ConfigCheckError(f"File {display(scope, path)} ({FORMATS[syntax]}): {exc}")
     except json.JSONDecodeError as exc:
-        raise ConfigCheckError(f"Файл {display(scope, path)} ({FORMATS[syntax]}): строка {exc.lineno}: {exc.msg}")
+        raise ConfigCheckError(f"File {display(scope, path)} ({FORMATS[syntax]}): line {exc.lineno}: {exc.msg}")
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigCheckError(f"Файл {display(scope, path)} (TOML): {exc}")
+        raise ConfigCheckError(f"File {display(scope, path)} (TOML): {exc}")
     except ElementTree.ParseError as exc:
-        raise ConfigCheckError(f"Файл {display(scope, path)} (XML): {exc}")
+        raise ConfigCheckError(f"File {display(scope, path)} (XML): {exc}")
     except SyntaxError as exc:
-        raise ConfigCheckError(f"Файл {display(scope, path)} (Python): строка {exc.lineno}: {exc.msg}")
+        raise ConfigCheckError(f"File {display(scope, path)} (Python): line {exc.lineno}: {exc.msg}")
     return syntax
 
 
-HINTS = {"systemd-analyze": "Файлы из system_files записываются с правами 0644: скрипт в ExecStart не будет "
-                              "исполняемым — вызывайте его через интерпретатор (ExecStart=/usr/bin/bash /путь) "
-                              "или используйте программу из пакета."}
+HINTS = {"systemd-analyze": "Files from system_files are written with mode 0644: a script in ExecStart will not be "
+                              "executable — run it through an interpreter (ExecStart=/usr/bin/bash /path) "
+                              "or use a program from a package."}
 
 
 def tool_checks(scope, path):

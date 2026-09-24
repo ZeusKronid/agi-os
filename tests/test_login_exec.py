@@ -121,7 +121,7 @@ class LoginReviewTests(unittest.TestCase):
         self.assertEqual(entries["/usr/local/share/wayland-sessions/my.desktop"], ["Exec=sway --unsupported-gpu"])
         self.assertNotIn("~/.config/foot/foot.ini", entries)
         summary = config.summary({"size": 2**34})
-        self.assertIn("ЗАПУСКАЕТСЯ ПРИ ВХОДЕ", summary)
+        self.assertIn("RUNS WHEN YOU LOG IN", summary)
         self.assertIn("syncthing serve", summary)
 
     def test_lua_hyprland_start_hooks_and_scripts_are_listed(self):
@@ -136,7 +136,7 @@ class LoginReviewTests(unittest.TestCase):
     def test_plain_configuration_needs_no_login_review(self):
         config = config_with(home=[(".config/hypr/hyprland.conf", "monitor=,preferred,auto,1\n")])
         self.assertEqual(config.login_entries(), [])
-        self.assertNotIn("ЗАПУСКАЕТСЯ ПРИ ВХОДЕ", config.summary({"size": 2**34}))
+        self.assertNotIn("RUNS WHEN YOU LOG IN", config.summary({"size": 2**34}))
 
 
 if __name__ == "__main__":

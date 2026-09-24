@@ -52,7 +52,7 @@ class FreeSpaceTests(unittest.TestCase):
         table = gpt([{'node': '/dev/sda1', 'start': 2048, 'size': 2 * GIB // 512},
                      {'node': '/dev/sda2', 'start': 10 * GIB // 512 + 5, 'size': 20 * GIB // 512}], size)
         disk = {'path': '/dev/sda', 'size': size, 'pttype': 'gpt', 'fstype': None}
-        with patch.object(storage_worker, 'sh', return_value=table):
+        with patch.object(storage_worker, 'partition_table', return_value=json.loads(table)['partitiontable']):
             regions = storage_worker.free_regions(disk)
         self.assertEqual(len(regions), 2)
         for start, end in regions:
@@ -69,7 +69,7 @@ class FreeSpaceTests(unittest.TestCase):
 
     def test_mbr_disk_offers_no_partition_space(self):
         disk = {'path': '/dev/sdc', 'size': 8 * GIB, 'pttype': 'dos', 'fstype': None}
-        with patch.object(storage_worker, 'sh', return_value=json.dumps({'partitiontable': {'label': 'dos', 'partitions': []}})):
+        with patch.object(storage_worker, 'partition_table', return_value={'label': 'dos', 'partitions': []}):
             self.assertEqual(storage_worker.free_regions(disk), [])
 
 

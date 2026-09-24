@@ -51,16 +51,36 @@ class LiveImageTests(unittest.TestCase):
         for path in (AIROOTFS / "usr/local/bin").iterdir():
             self.assertNotIn("codex", path.read_text().lower(), path)
 
-    def test_live_opens_the_website_not_the_native_installer(self):
-        # The native GTK installer stays in the image for the native mode (scripts/run-native-installer.sh);
-        # whether it remains at all is decided separately (CMP-147). The Live entry point is the website.
+    def test_gtk_installer_is_gone(self):
+        # CMP-147: the website is the only Live interface; the native GTK installer was removed.
+        self.assertFalse((APP / "app.py").exists())
+        self.assertFalse((ROOT / "scripts/run-native-installer.sh").exists())
+        self.assertFalse((ROOT / "tests/gui_smoke.py").exists())
         self.assertFalse((AIROOTFS / "usr/local/share/agi-os/welcome.html").exists())
+        self.assertFalse({"python-gobject", "python-cairo"} & packages())
         launcher = (AIROOTFS / "usr/local/bin/agi-installer").read_text()
         self.assertIn("http://localhost:8787", launcher)
         self.assertNotIn("app.py", launcher)
 
+    def test_website_keeps_the_sunrise_fonts(self):
+        # The native installer is gone, but the website still serves these fonts.
+        fonts = AIROOTFS / "usr/share/fonts/agios"
+        for name in ("Geist.ttf", "GeistMono.ttf", "Newsreader.ttf", "Newsreader-Italic.ttf"):
+            self.assertTrue((fonts / name).is_file(), name)
+
     def test_chatgpt_backend_packages_remain(self):
         self.assertTrue({"openai-codex", "bubblewrap"} <= packages())
+
+
+class BootMediaTests(unittest.TestCase):
+    def test_boot_cd_does_not_get_a_failing_loop_unit(self):
+        # CMP-148: systemd-loop@<cd>.service for the hybrid ISO failed and left the Live "degraded".
+        rule = AIROOTFS / "etc/udev/rules.d/98-agi-no-cdrom-loop.rules"
+        self.assertLess(rule.name, "99-systemd.rules")
+        lines = [line for line in rule.read_text().splitlines() if line and not line.startswith("#")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('ENV{ID_CDROM}=="1"', lines[0])
+        self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
 
 
 class ChatGPTIsolationTests(unittest.TestCase):

@@ -47,9 +47,9 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(update.notice_text({"updates": []}), "")
         text = update.notice_text({"updates": [{"name": "linux"}], "kernel": True, "reboot_required": True,
                                    "pacnew": ["/etc/pacman.conf.pacnew"]})
-        self.assertIn("доступно обновлений: 1 (включая ядро)", text)
+        self.assertIn("updates available: 1 (including the kernel)", text)
         self.assertIn("sudo agi-os-update apply", text)
-        self.assertIn("перезагрузите", text)
+        self.assertIn("restart the computer", text)
         self.assertIn("/etc/pacman.conf.pacnew", text)
 
     def test_status_files_are_world_readable_and_atomic(self):
@@ -167,7 +167,7 @@ class ApplyTests(unittest.TestCase):
 
     def test_busy_package_manager_is_refused(self):
         (self.pacman / "db.lck").write_text("")
-        for running, expected in ((0, "занят"), (1, "sudo rm /var/lib/pacman/db.lck")):
+        for running, expected in ((0, "busy with another operation"), (1, "sudo rm /var/lib/pacman/db.lck")):
             with patch.object(update.subprocess, "run", return_value=subprocess.CompletedProcess([], running)):
                 with self.assertRaises(update.UpdateError) as caught:
                     update.apply()
@@ -190,7 +190,7 @@ class ApplyTests(unittest.TestCase):
         def fail(args):
             self.calls.append(args)
             if args[:2] == ["pacman", "-Su"]:
-                raise update.UpdateError("Ошибка pacman (код 1)\nerror: failed to commit transaction")
+                raise update.UpdateError("pacman failed (code 1)\nerror: failed to commit transaction")
         with patch.object(update, "stream", side_effect=fail):
             with self.assertRaises(update.UpdateError) as caught:
                 update.apply()
@@ -294,7 +294,7 @@ class TargetFilesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.object(update, "STATUS", Path(tmp) / "missing.json"), \
              patch("builtins.print") as printed:
             self.assertEqual(update.main(["status"]), 0)
-        self.assertIn("ещё не проверялись", printed.call_args.args[0])
+        self.assertIn("not been checked yet", printed.call_args.args[0])
 
 
 if __name__ == "__main__":

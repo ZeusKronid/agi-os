@@ -65,14 +65,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             controller.respond("Change the disk")
 
-    def test_failed_revision_removes_prior_configuration(self):
+    def test_failed_revision_keeps_prior_configuration(self):
+        # A provider error agrees on nothing new: the configuration agreed earlier stays,
+        # and the unanswered message joins the next turn (CMP-129).
         provider = DemoProvider()
         controller = Controller(demo_inventory(), provider, catalog=DemoCatalog())
         controller.respond("First proposal")
+        agreed = controller.configuration
         with patch.object(provider, "reply", side_effect=ProviderError("offline")):
             with self.assertRaises(ProviderError):
                 controller.respond("Actually use another disk")
-        self.assertIsNone(controller.configuration)
+        self.assertEqual(controller.configuration, agreed)
+        self.assertEqual(controller.history[-1], {"role": "user", "content": "Actually use another disk"})
 
 
 class ProviderTests(unittest.TestCase):
@@ -137,10 +141,10 @@ class WorkerTests(unittest.TestCase):
         request = {"configuration": config.as_dict(), "fingerprint": "wrong", "consent_digest": "wrong", "password": "private-password"}
         with patch.object(worker.os, "geteuid", return_value=0), patch.object(worker, "live_environment", return_value=True), \
              patch.object(worker, "inventory", return_value=snapshot):
-            with self.assertRaisesRegex(ValidationError, "Конфигурация"):
+            with self.assertRaisesRegex(ValidationError, "configuration changed after you confirmed"):
                 worker.preflight(request)
             request["consent_digest"] = config.digest()
-            with self.assertRaisesRegex(ValidationError, "Диск изменился"):
+            with self.assertRaisesRegex(ValidationError, "disk changed after you confirmed"):
                 worker.preflight(request)
 
     def test_worker_refuses_host_before_reading_request(self):
@@ -284,7 +288,7 @@ class AcceptanceTests(unittest.TestCase):
                 with patch.object(verify, "command", side_effect=command), \
                      patch.object(verify.socket, "getaddrinfo", return_value=[]):
                     checks = verify.evaluate(record, root / "state", False, root)["checks"]
-                self.assertEqual(checks["Проверка обновлений по расписанию"], enabled == 0)
+                self.assertEqual(checks["Scheduled update checks"], enabled == 0)
 
 
 if __name__ == "__main__":

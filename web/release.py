@@ -56,7 +56,7 @@ def newer(candidate, installed):
 
 def fetch(url=RELEASES, timeout=15):
     if not url.startswith('https://api.github.com/'):
-        raise ValueError('Адрес проверки обновлений должен вести на api.github.com')
+        raise ValueError('The update check URL must point to api.github.com')
     request = urllib.request.Request(url, headers={
         'Accept': 'application/vnd.github+json', 'User-Agent': 'AGIOS-Live-update-check'})
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -66,7 +66,7 @@ def fetch(url=RELEASES, timeout=15):
 def summary(release):
     """Only the fields the page shows, validated; links must stay on github.com."""
     if not isinstance(release, dict) or not isinstance(release.get('tag_name'), str):
-        raise ValueError('Сервер обновлений вернул неожиданный ответ')
+        raise ValueError('The update server returned an unexpected response')
 
     def link(value):
         return value if isinstance(value, str) and value.startswith('https://github.com/') else None
@@ -90,10 +90,10 @@ def check(fetcher=None, installed=None):
         latest = summary((fetcher or fetch)())
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            return {'installed': installed, 'error': 'Опубликованных выпусков AGIOS пока нет'}
-        return {'installed': installed, 'error': f'Не удалось проверить обновления: сервер ответил {error.code}'}
+            return {'installed': installed, 'error': 'No AGIOS releases are published yet'}
+        return {'installed': installed, 'error': f'Could not check for updates: the server answered {error.code}'}
     except Exception as error:  # network, TLS, JSON, unexpected answer: the page shows it
-        return {'installed': installed, 'error': f'Не удалось проверить обновления: {error}'}
+        return {'installed': installed, 'error': f'Could not check for updates: {error}'}
     if not installed['release']:
         verdict = 'development'
     elif newer(latest['version'], installed['version']):
