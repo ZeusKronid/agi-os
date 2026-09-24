@@ -1,8 +1,17 @@
 # Download and verify AGIOS
 
-AGIOS is published as a Live ISO on the
-[GitHub releases page](https://github.com/ZeusKronid/agi-os/releases). Every
-release is built by CI from a tagged commit (`docs/ci.md`) and carries:
+No versioned release has been published yet. For now, download a tested build
+from the [Live ISO workflow](https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml?query=branch%3Amain):
+open a successful `main` run and select **agi-os-iso** under **Artifacts**.
+Sign in to GitHub to download it. The ZIP contains the ISO, its `.sha256` file,
+and `build-info.json`; CI artifacts expire after seven days. After extracting
+the ZIP, check the image with `sha256sum --check agi-os-*.iso.sha256`.
+This checksum detects a damaged download but is not a signature.
+
+Versioned images will be published on the
+[GitHub releases page](https://github.com/ZeusKronid/agi-os/releases). A release
+is built by CI from a `v*` tag (`docs/ci.md`) and, once the signing key is
+configured, carries:
 
 | File | What it is |
 | --- | --- |
@@ -21,8 +30,8 @@ rebuild any of them byte for byte (`docs/ci.md`).
 ## Release signing key
 
 > **Not created yet.** Until the project owner creates the key and publishes its
-> fingerprint here, releases are not signed and cannot be verified by signature;
-> the CI refuses to publish a release without a key unless
+> fingerprint here, images cannot be verified by signature; CI refuses to
+> publish a release without a key unless
 > `AGIOS_ALLOW_UNSIGNED_RELEASE=1` is set on purpose.
 
 Fingerprint: *to be published here, in the README and in every release note.*
@@ -31,7 +40,7 @@ A fingerprint is only trustworthy when it comes from a place other than the
 download itself: check that the fingerprint in the release notes, this page in
 the Git repository and (when published) the key server agree.
 
-## Verify on Linux
+## Verify a signed release on Linux
 
 With the repository at hand:
 
@@ -56,7 +65,7 @@ the fingerprint gpg prints with the published one. The warning *This key is not
 certified with a trusted signature* only says that you have not signed the key
 yourself; the fingerprint check is what matters.
 
-## Verify on Windows
+## Verify a signed release on Windows
 
 1. Install [Gpg4win](https://www.gpg4win.org/) and open Kleopatra.
 2. *File → Import* `agios-release-key.asc`; in the key's details compare the
@@ -70,7 +79,7 @@ yourself; the fingerprint check is what matters.
    `Get-FileHash .\agi-os-…-x86_64.iso -Algorithm SHA256` and compare with the line
    in `SHA256SUMS`.
 
-## Verify on macOS
+## Verify a signed release on macOS
 
 Install GnuPG (`brew install gnupg` or GPG Suite), then run the gpg commands from
 the Linux section; for the checksum use `shasum -a 256 -c SHA256SUMS --ignore-missing`.
