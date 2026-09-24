@@ -212,11 +212,37 @@ class ApplyTests(unittest.TestCase):
 
 class BootloaderTests(unittest.TestCase):
     def test_systemd_boot_is_updated_only_when_systemd_changed(self):
-        with patch.object(update, "run", return_value="") as run:
+        with patch.object(update, "run", return_value="") as run, patch.object(update, "shared_esp", return_value=False):
             self.assertEqual(update.refresh_bootloader("systemd-boot", ["firefox"]), [])
             run.assert_not_called()
             self.assertEqual(update.refresh_bootloader("systemd-boot", ["systemd"]), ["systemd-boot"])
             run.assert_called_once_with(["bootctl", "--graceful", "update"])
+
+    def test_shared_esp_update_restores_an_existing_fallback_even_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            esp = Path(tmp)
+            fallback = esp / "EFI/BOOT/BOOTX64.EFI"
+            fallback.parent.mkdir(parents=True)
+            fallback.write_bytes(b"another system's fallback")
+
+            def replace_fallback(args):
+                fallback.write_bytes(b"systemd-boot fallback")
+                raise update.UpdateError("bootctl failed")
+
+            with patch.object(update, "shared_esp", return_value=True), \
+                    patch.object(update, "run", side_effect=replace_fallback) as run:
+                with self.assertRaisesRegex(update.UpdateError, "bootctl failed"):
+                    update.refresh_bootloader("systemd-boot", ["systemd"], esp=esp)
+            run.assert_called_once_with(["bootctl", "--esp-path=/efi", "--boot-path=/boot", "--graceful", "update"])
+            self.assertEqual(fallback.read_bytes(), b"another system's fallback")
+            self.assertEqual(list(fallback.parent.iterdir()), [fallback])
+
+    def test_shared_esp_comes_from_final_installation_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "installation.json"
+            record.write_text(json.dumps({"dual_boot": {"shared_esp": True}}))
+            self.assertTrue(update.shared_esp(record))
+            self.assertFalse(update.shared_esp(Path(tmp) / "missing.json"))
 
     def test_bios_grub_goes_to_the_disk_holding_boot(self):
         answers = {"findmnt": "/dev/nvme0n1p2\n", "lsblk": "nvme0n1\n"}

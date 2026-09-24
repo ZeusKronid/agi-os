@@ -35,6 +35,7 @@ from domain import SWAPFILE, Configuration, ValidationError, hibernation_swap_si
 from hardware import SETUP_MODE_VAR, driver_plan, efi_flag, initramfs_config, profile
 from journal import Logger, adopt
 import layout
+from update import preserve_efi_fallback
 from system import inventory, live_environment, selected_disk
 from worker import (CRYPT_NAME, Cancelled, Runner, boot_options, create_swapfile, emit, grub_defaults,
                     partition_path, resume_parameter, sbctl_unsigned, swap_fstab_line)
@@ -895,7 +896,11 @@ def finalize(request, runner):
                 conf.parent.mkdir(parents=True, exist_ok=True)
                 own = dst / 'boot/loader/loader.conf'
                 conf.write_text(own.read_text() if own.is_file() else 'default agi-os.conf\ntimeout 3\n')
-            runner.run([*chroot, 'bootctl', '--esp-path=/efi', '--boot-path=/boot', 'install'])
+            with preserve_efi_fallback(dst / 'efi'):
+                runner.run([*chroot, 'bootctl', '--esp-path=/efi', '--boot-path=/boot', 'install'])
+            # The automatic boot-time updater also overwrites the ESP fallback.
+            # AGIOS's own updater refreshes systemd-boot while preserving it.
+            runner.run([*chroot, 'systemctl', 'disable', 'systemd-boot-update.service'])
         elif config.bootloader == 'systemd-boot':
             runner.run([*chroot, 'bootctl', '--esp-path=/boot', 'install'])
         elif firmware == 'uefi':
