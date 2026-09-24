@@ -17,7 +17,10 @@ For the Live website test machine use `scripts/run-live-web-vm.sh`; it starts th
 bridge automatically. `AGIOS_TEST_SCRIPTED=<configuration.json>` replaces the
 model with a fixed configuration (`dev-bridge.py --scripted`), which exercises
 storage, preview and finalization without spending model quota; the dialogue
-itself is then not a test of the model.
+itself is then not a test of the model. `AGIOS_TEST_BRIDGE=claude-code` routes
+the dialogue through the host's headless Claude Code; `AGIOS_TEST_BRIDGE=none`
+starts no bridge at all, so the Live behaves as on a real computer (for example to
+check the ChatGPT sign-in link, for which the bridge otherwise stands in).
 
 Requires an ISO containing `bridge.py` and `71-agi-dev-bridge.rules`. Older images
 cannot discover this channel. Normal runs without `--dev-bridge` retain the

@@ -211,7 +211,7 @@ class LocalApiTests(AioHTTPTestCase):
         seen = []
         state = self.app['state']
 
-        def connect(model, show_login):
+        def connect(model, show_login, current=None):
             show_login('file:///etc/shadow')
             seen.append(state.login_url)
             show_login('https://auth.openai.com/oauth/authorize?state=x')
@@ -222,6 +222,20 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(seen, [None, 'https://auth.openai.com/oauth/authorize?state=x'])
         self.assertIsNone((await response.json())['login_url'])
+
+    async def test_chatgpt_on_the_test_bridge_reuses_the_open_port(self):
+        # The stand's bridge port opens only once: connecting "ChatGPT" again used to open it a
+        # second time and answer 500 (EBUSY). The provider that holds it is reused instead.
+        import provider as live_provider
+        class Bridge(live_provider.BridgeProvider):
+            def __init__(self): self.model, self.closed = 'scripted-test', False
+            def close(self): self.closed = True
+        current = live_provider.LiveProvider(Bridge())
+        with patch.object(live_provider, 'PORT', SimpleNamespace(exists=lambda: True)), \
+                patch.object(live_provider, 'LiveProvider', side_effect=AssertionError('opened twice')):
+            self.assertIs(live_provider.connect_chatgpt('other', current=current), current)
+        self.assertEqual(current.model, 'other')
+        self.assertFalse(current.backend.closed)
 
     async def test_provider_models_are_listed_without_keeping_the_key(self):
         """CMP-126: the page offers the provider's models instead of a typed id."""

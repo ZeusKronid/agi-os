@@ -55,10 +55,16 @@ class LiveProvider:
         return PROVIDERS.get(getattr(self.backend, 'kind', ''), ('',))[0]
 
 
-def connect_chatgpt(model=None, show_login=lambda url: None):
+def connect_chatgpt(model=None, show_login=lambda url: None, current=None):
     """Sign in to ChatGPT. The site runs as a system user without the Live desktop,
-    so the sign-in page is opened by the browser tab of the site (show_login)."""
+    so the sign-in page is opened by the browser tab of the site (show_login).
+    On the test stand the bridge stands in for ChatGPT; its port opens only once,
+    so a provider that already holds it is reused."""
     if PORT.exists():
+        if current is not None and isinstance(current.backend, BridgeProvider):
+            if model:
+                current.model = model
+            return current
         provider = LiveProvider()
         if model:
             provider.model = model
