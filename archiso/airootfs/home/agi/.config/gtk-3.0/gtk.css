@@ -1,0 +1,40 @@
+/* Helios for the Live panel: serif launchers like the site header, a mono clock, no button chrome.
+   Plugin widgets are named <plugin>-<id> after xfce4-panel.xml. */
+#XfcePanelWindow button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 6px;
+    padding: 0 8px;
+}
+#XfcePanelWindow button:hover { background-color: rgba(255, 255, 255, 0.06); }
+#XfcePanelWindow button:checked,
+#XfcePanelWindow button:active { background-color: rgba(255, 106, 61, 0.12); }
+
+#launcher-2 label, #launcher-3 label, #launcher-4 label {
+    font-family: "Newsreader";
+    font-size: 11.5pt;
+    color: #8f887e;
+}
+#launcher-2 button:hover label, #launcher-3 button:hover label, #launcher-4 button:hover label { color: #f6f2ec; }
+
+#applicationsmenu-1 label {
+    font-family: "Geist Mono";
+    font-size: 8.5pt;
+    letter-spacing: 3px;
+    color: #f6f2ec;
+}
+#clock-6 label { color: #d9d2c7; letter-spacing: 2px; }
+
+/* Selection in every app takes the one accent. */
+selection, *:selected, entry selection, textview text selection {
+    background-color: #ff6a3d;
+    color: #160b06;
+}
+
+tooltip, tooltip.background {
+    background-color: #16120f;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 7px;
+    color: #f6f2ec;
+}

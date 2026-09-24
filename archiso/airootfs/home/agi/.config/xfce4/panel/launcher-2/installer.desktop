@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Installer
+Comment=Describe and preview your Linux system in the local browser
+Exec=agi-installer
+Icon=system-software-install
+Terminal=false
