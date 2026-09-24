@@ -21,18 +21,23 @@ class BridgeProvider:
         self.lock = threading.Lock()
         self.closed = threading.Event()
 
-    def request(self, method, **params):
+    # The page can cancel a request: the bridge stops waiting; a late answer is ignored by its id.
+    cancellable = True
+
+    def request(self, method, cancel=None, **params):
         with self.lock:
             if self.closed.is_set():
-                raise ProviderError('Мост отключён')
+                raise ProviderError('The bridge is off')
             request_id = uuid.uuid4().hex
             outgoing = json.dumps({'id': request_id, 'method': method, **params}, ensure_ascii=False).encode() + b'\n'
             if len(outgoing) > LIMIT:
-                raise ProviderError('Диалог слишком большой для моста')
+                raise ProviderError('The conversation is too large for the bridge')
             end = time.monotonic() + (15 if method == 'models' else 240)
             received = b''
             try:
                 while time.monotonic() < end and not self.closed.is_set():
+                    if cancel is not None and cancel.is_set():
+                        raise ProviderError('The request to the bridge was cancelled')
                     readable, writable, _ = select.select([self.fd], [self.fd] if outgoing else [], [], .2)
                     if writable:
                         outgoing = outgoing[os.write(self.fd, outgoing):]
@@ -49,20 +54,20 @@ class BridgeProvider:
                             if reply.get('id') != request_id:
                                 continue  # Ignore an old response after reconnect/cancellation.
                             if 'error' in reply:
-                                raise ProviderError('Мост не получил ответ. Проверьте вход Codex на хосте, сеть и лимиты.')
+                                raise ProviderError('The bridge got no reply. Check the Codex sign-in on the host, the network and limits.')
                             return reply['result']
             except (OSError, ValueError, KeyError, TypeError):
-                raise ProviderError('Канал моста недоступен. Переподключитесь или перезапустите тестовую VM.') from None
-            raise ProviderError('Истекло время ожидания моста')
+                raise ProviderError('The bridge channel is unavailable. Reconnect or restart the test VM.') from None
+            raise ProviderError('The bridge timed out')
 
     def models(self):
         models = self.request('models')
         if not isinstance(models, list) or not models or any(not isinstance(m, str) for m in models):
-            raise ProviderError('Мост вернул неверный список моделей')
+            raise ProviderError('The bridge returned an invalid model list')
         return models
 
-    def reply(self, system, messages):
-        return validate_reply(self.request('reply', system=system, messages=messages))
+    def reply(self, system, messages, cancel=None):
+        return validate_reply(self.request('reply', cancel=cancel, system=system, messages=messages))
 
     def close(self):
         self.closed.set()

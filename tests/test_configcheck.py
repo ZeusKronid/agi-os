@@ -41,21 +41,21 @@ VALID = {
 }
 
 INVALID = {
-    ("home", ".config/waybar/config"): ('{"layer": "top" "height": 30}', "строка 1"),
-    ("home", ".config/waybar/style.jsonc"): ('{"a": 1 /* never closed', "незакрытый комментарий"),
+    ("home", ".config/waybar/config"): ('{"layer": "top" "height": 30}', "line 1"),
+    ("home", ".config/waybar/style.jsonc"): ('{"a": 1 /* never closed', "unclosed comment"),
     ("home", ".config/app/settings.json"): ("{'single': 'quotes'}", "JSON"),
-    ("home", ".config/foot/foot.ini"): ("[main\nfont=x\n", "секции"),
-    ("home", ".config/hypr/hyprland.conf"): ("input {\n  kb_layout = us\n", "не закрыт блок"),
-    ("home", ".config/sway/config"): ("}\n", "лишняя закрывающая"),
+    ("home", ".config/foot/foot.ini"): ("[main\nfont=x\n", "invalid section header"),
+    ("home", ".config/hypr/hyprland.conf"): ("input {\n  kb_layout = us\n", "block { … } is not closed"),
+    ("home", ".config/sway/config"): ("}\n", "extra closing brace"),
     ("home", ".config/alacritty/alacritty.toml"): ("[font\nsize = 11\n", "TOML"),
     ("home", ".config/xfce4/xfconf/xfce-perchannel-xml/x.xml"): ("<channel><property></channel>", "XML"),
     ("home", ".config/autostart/app.desktop"): ("[Desktop Entry]\nType=Application\nName=App\n", "Exec"),
     ("home", ".config/autostart/other.desktop"): ("[Something]\nName=x\n", "Desktop Entry"),
     ("home", ".config/qtile/config.py"): ("def broken(:\n", "Python"),
-    ("system", "etc/systemd/logind.conf.d/lid.conf"): ("HandleLidSwitch=suspend\n", "вне секции"),
+    ("system", "etc/systemd/logind.conf.d/lid.conf"): ("HandleLidSwitch=suspend\n", "outside a [..] section"),
     ("system", "etc/X11/xorg.conf.d/30-touchpad.conf"): ('Section "InputClass"\n  Identifier "t"\n', "EndSection"),
-    ("system", "etc/lightdm/lightdm.conf"): ("[Seat:*]\nthis line has no value\n", "ключ=значение"),
-    ("system", "etc/xdg/foot/foot.ini"): ("[main]\nfont: monospace\n", "ключ=значение"),
+    ("system", "etc/lightdm/lightdm.conf"): ("[Seat:*]\nthis line has no value\n", "key=value"),
+    ("system", "etc/xdg/foot/foot.ini"): ("[main]\nfont: monospace\n", "key=value"),
     ("home", ".config/app/strict.json"): ('{"a": 1, // no comments in plain JSON\n}', "JSON"),
 }
 
@@ -128,7 +128,7 @@ class Runner:
     def run(self, args, input_text=None, timeout=1800):
         self.calls.append(args)
         if self.fail and self.fail in args:
-            raise ValidationError(f"Ошибка arch-chroot (код 230)\nerr: config.c:3283: foot.ini:1: [colors]: invalid section name: colors")
+            raise ValidationError(f"arch-chroot failed (code 230)\nerr: config.c:3283: foot.ini:1: [colors]: invalid section name: colors")
         return ""
 
 
@@ -167,6 +167,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertEqual(foot[:6], ["arch-chroot", foot[1], "runuser", "-u", "tester", "--"])
         self.assertIn("/home/tester/.config/foot/foot.ini", foot)
         self.assertIn("XDG_RUNTIME_DIR=/var/tmp/agi-os-config-check", foot)
+        self.assertIn("LC_ALL=C.UTF-8", foot)  # no "'C' is not a UTF-8 locale" noise in the error
         self.assertTrue(any("/usr/bin/Hyprland" in c and "--verify-config" in c for c in calls))
         self.assertTrue(error.startswith(worker.CONFIG_CHECK_FAILED))
         self.assertIn("~/.config/foot/foot.ini — foot", error)
@@ -183,7 +184,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertFalse(any("/usr/bin/sway" in c for c in calls))
         bash = next(c for c in calls if "/usr/bin/bash" in c)
-        self.assertEqual(bash, ["arch-chroot", bash[1], "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
+        self.assertEqual(bash, ["arch-chroot", bash[1], "env", "LC_ALL=C.UTF-8", "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
 
     def test_systemd_failure_explains_file_modes(self):
         config = dataclasses.replace(self.config(), system_files=(("etc/systemd/user/agi.service",
@@ -195,7 +196,7 @@ class ToolCheckTests(unittest.TestCase):
     def test_unknown_keyboard_layout_blocks_the_preview(self):
         config = self.config()
         _, error, _ = self.run_checks(config, [], layouts=["us"])
-        self.assertIn("«ru»", error)
+        self.assertIn("“ru”", error)
         _, error, _ = self.run_checks(config, [], layouts=["us", "ru"])
         self.assertIsNone(error)
 

@@ -250,8 +250,25 @@ class VirtualMachine:
             await self.server.wait_closed()
             self.server = None
 
+    async def shutdown(self, timeout=90):
+        """Turn the preview off as with its power button, so the guest unmounts its file
+        systems and the preview stays consistent for the installation. A guest that does
+        not power off in time (a desktop asking to confirm, a hung system) is stopped
+        hard as before. Returns whether the guest turned itself off."""
+        clean = not self.running
+        if self.running:
+            try:
+                await self.qmp('system_powerdown')
+                await asyncio.wait_for(self.process.wait(), timeout)
+                clean = True
+            except (OSError, TimeoutError, ValueError):
+                clean = False
+        await self.stop()
+        return clean
+
     async def stop(self):
-        # Process termination is also the explicit cancel operation for this local MVP.
+        # Process termination is also the explicit cancel operation for this local MVP:
+        # for the guest it is a power cut. Use shutdown() for a preview the user keeps.
         if self.running:
             self.process.terminate()
             try:

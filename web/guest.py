@@ -38,10 +38,10 @@ def main():
         def send(value):
             channel.write(json.dumps(value, ensure_ascii=False).encode() + b'\n')
         send({'kind': 'ready', 'inventory': inventory()})
-        LOG.info('guest.ready', 'Установочная VM готова, жду запрос')
+        LOG.info('guest.ready', 'Installer VM ready, waiting for a request')
         raw = channel.readline(1_000_001)
         request = json.loads(raw)
-        LOG.info('guest.request', 'Запрос установки получен')
+        LOG.info('guest.request', 'Installation request received')
         if request['configuration']['disk'] != '/dev/vda':
             raise ValueError('Only the VM disk is supported')
         proc = subprocess.Popen([sys.executable, '-u', str(ENGINE / 'worker.py')],
@@ -64,7 +64,7 @@ def main():
             proc.wait()
             proc.stdin.close()
             LOG.log('info' if installed and proc.returncode == 0 else 'error', 'guest.worker-exit',
-                    f'Установщик завершился с кодом {proc.returncode}', installed=installed)
+                    f'The installer exited with code {proc.returncode}', installed=installed)
         if installed and proc.returncode == 0:
             send({'kind': 'shutdown', 'text': 'Booting the installed system'})
             subprocess.run(['systemctl', 'poweroff'], check=True)

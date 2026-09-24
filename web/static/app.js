@@ -6,6 +6,7 @@ const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
 let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', installStep = 1, stopping = false, chatView = false, changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
 let providerKind = 'chatgpt', shown = 0, placeStep = 1, foundAsk = '', lastFound = '', lastFiles = '', lastHardware = '', lastLogin = '';
+let sentAt = 0, cancelling = false, rebuildAsk = false, rebuilding = false, lastDock = 0;
 
 async function api(path, data) {
     const response = await fetch('/api/' + path, data === undefined ? {} : {
@@ -60,13 +61,17 @@ function installShare(s) {
     const marks = [[/^Opening the preview/, .05], [/^Creating partitions/, .15], [/^Encrypting the root/, .22], [/^Promoting/, .3],
                    [/^Copying the checked system/, .35], [/^Verifying the copy/, .65], [/^Updating partition IDs/, .75],
                    [/^Rebuilding initramfs/, .85], [/^Registering the boot/, .93], [/^The system on/, 1]];
-    for (const event of s.final.events) for (const [pattern, value] of marks) if (pattern.test(event.text || '')) share = Math.max(share, value);
+    for (const event of s.final.events) {
+        for (const [pattern, value] of marks) if (pattern.test(event.text || '')) share = Math.max(share, value);
+        // The copy reports its own percentage: the longest step moves continuously.
+        if (event.step === 'copy' && typeof event.percent === 'number') share = Math.max(share, .35 + .3 * Math.min(100, event.percent) / 100);
+    }
     return share;
 }
 const BUILD_STEPS = [['Storage', 0], ['VM', .05], ['Base', .12], ['Packages', .3], ['Boot', .84]];
 const INSTALL_STEPS = [['Check', 0], ['Partitions', .15], ['Copy', .35], ['Verify', .65], ['Boot', .85]];
 
-/* ── the sun: the site's «Восход», drawn on a canvas behind everything ───────── */
+/* ── the sun: the site's “Sunrise”, drawn on a canvas behind everything ───────── */
 function mulberry(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const random = mulberry(11);
 const RAYS = Array.from({length: 98}, (_, i) => ({f: i / 97, major: i % 4 === 0, len: i % 4 === 0 ? .62 : .16 + random() * .28,
@@ -122,7 +127,7 @@ function render(state) {
     document.querySelectorAll('#pips i').forEach((pip, i) => pip.classList.toggle('on', i <= step));
     $('chapter').textContent = CHAPTERS[step];
     sun.dots = [.14, .38, .62, .86].map((f, i) => [f, i < step ? 'done' : i === step ? 'current' : 'next']);
-    $('model').textContent = state.model || 'no model';
+    $('model').textContent = state.model ? state.model + (state.provider ? ' · ' + state.provider.split(' — ')[0] : '') : 'no model';
     $('modelDot').className = 'dot ' + (state.model ? 'ok' : 'off');
     $('status').textContent = state.status;
 
@@ -164,6 +169,7 @@ function render(state) {
     $('welcome').hidden = state.messages.length > 0 || busy;
     $('thinking').hidden = !busy;
     if (busy) $('thinkingText').textContent = state.status;
+    renderTurn(state);
     $('error').hidden = !state.error || place !== 'talk';
     if (state.error) $('error').textContent = state.error;
 
@@ -179,7 +185,18 @@ function render(state) {
     $('connectButton').hidden = !!state.model;
     $('chatForm').hidden = !state.model;
     $('send').disabled = busy;
-    $('suggestions').hidden = busy || !!config;
+    // A question after the agreement keeps the configuration, so its suggested answers stay useful.
+    $('suggestions').hidden = busy || (!!config && !state.configuration_kept);
+    $('kept').hidden = !state.configuration_kept || busy || place !== 'talk' || !!state.rebuild_needed;
+    $('changedNote').hidden = !state.rebuild_needed || busy || place !== 'talk';
+    $('rebuildButton').hidden = !state.rebuild_needed || busy || place !== 'talk';
+    $('rebuildSaid').hidden = !state.rebuild_needed || busy;
+    for (const button of [$('rebuildButton'), $('rebuildSaid')]) {
+        button.disabled = rebuilding || state.final.phase === 'working';
+        button.querySelector('.rebuild-text').textContent = rebuilding ? 'Removing the preview…'
+            : rebuildAsk ? 'Confirm: remove this preview and build the changed system' : 'Rebuild the preview with the changes';
+        button.classList.toggle('danger', rebuildAsk && button.id === 'rebuildSaid');
+    }
 
     // Scenes.
     $('talk').hidden = place !== 'talk';
@@ -216,13 +233,16 @@ function render(state) {
         $('vmStatus').querySelector('.dot').className = 'dot ' + dot; $('vmStatus').querySelector('span').textContent = label;
         // The agent's answer to a change asked for during the preview stands above the bar.
         const answer = [...state.messages].reverse().find(message => message.role !== 'user');
-        $('said').hidden = !changeAsked;
         if (changeAsked) $('saidText').innerHTML = busy ? '<span class="typing"><i></i><i></i><i></i></span>' : '';
+        if (changeAsked && busy && state.status) $('saidText').append(' ' + state.status + elapsed());
         if (changeAsked && !busy && answer) $('saidText').textContent = answer.content;
+        if (!changeAsked && state.rebuild_needed) $('saidText').textContent = 'The configuration changed after this preview was built.';
     }
     if (place !== 'preview') changeAsked = false;
-    $('said').hidden = place !== 'preview' || !changeAsked;
-    document.body.classList.toggle('has-said', changeAsked);
+    $('said').hidden = place !== 'preview' || !(changeAsked || state.rebuild_needed);
+    $('cancelSaid').hidden = !busy || !state.turn;
+    $('cancelSaid').disabled = cancelling;
+    document.body.classList.toggle('has-said', !$('said').hidden);
     $('vmStatus').hidden = $('vmbar').hidden;
     $('fullscreen').hidden = !(place === 'preview' && state.running);
     $('stop').hidden = !state.running;
@@ -255,6 +275,10 @@ function render(state) {
             : 'The system you tried is copied to the disk and checked file by file.';
         $('revertHint').textContent = 'You tried the system. Installing makes it this computer’s system. Putting it back removes the preview — '
             + (state.built.revert || 'nothing else changes') + '.';
+    } else {
+        // A build that stopped (an error, a failed file check) has no built system to describe.
+        $('revertHint').textContent = 'The preview was not finished. Putting it back removes what was prepared for it — '
+            + (state.preview_revert || 'nothing else changes') + '.';
     }
     // Installing needs the preview off: step 1 turns it off, step 2 installs.
     if (modal === 'install') {
@@ -271,6 +295,7 @@ function render(state) {
     $('keep').hidden = !revertAsk;
     $('finalError').hidden = !state.final.error || place === 'install';
     if (state.final.error) $('finalError').textContent = state.final.error;
+    $('changedWarning').hidden = !state.rebuild_needed;
     updateLayoutWarning(); validateFinal();
     if (sheet === 'place' && (place !== 'talk' || !state.plan)) openSheet('');
     if (modal === 'install' && !state.built) openModal('');
@@ -291,6 +316,10 @@ function render(state) {
     renderSecureBoot(state);
     renderFinalNotes(state);
     aimSun(state, place);
+    // The dock grows with suggestions, notes and buttons: keep the newest line of the
+    // conversation above it instead of under its top edge.
+    const dock = document.querySelector('.dock').offsetHeight;
+    if (dock !== lastDock) { lastDock = dock; $('lines').scrollTop = $('lines').scrollHeight; }
 }
 const horizon = () => Math.min(230, Math.max(170, innerHeight * .24));
 function aimSun(state, place) {
@@ -325,7 +354,7 @@ function renderOptions(plan) {
         const radio = document.createElement('span'); radio.className = 'radio';
         const body = document.createElement('div'), title = document.createElement('b'), detail = document.createElement('span'), undo = document.createElement('small');
         title.textContent = option.title;
-        const tags = [option.recommended && 'recommended', !option.fits && 'not enough room', option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
+        const tags = [option.recommended && 'recommended', !option.fits && (option.blocked ? 'not possible now' : 'not enough room'), option.destructive && (option.kind === 'erase' ? 'irreversible' : 'changes a partition')].filter(Boolean);
         for (const tag of tags) { const i = document.createElement('i'); i.textContent = tag; title.append(' ', i); }
         detail.textContent = option.detail; undo.textContent = 'Undo: ' + option.revert;
         body.append(title, detail, undo); card.append(radio, body); box.append(card);
@@ -384,11 +413,31 @@ function validateFinal() {
     if (current.built.encrypted) needs.push([$('finalPassphrase').value.length >= 8, 'Encryption password']);
     $('installFinal').disabled = !needsHTML($('finalNeeds'), needs) || !current.can_finalize;
 }
+const ESP_TYPE = 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b';
+function partitionName(part) {
+    const size = (part.size / 2 ** 30).toFixed(1) + ' GiB';
+    return part.path + ' (' + [part.fstype || 'no file system', part.label || part.partlabel, size].filter(Boolean).join(', ') + ')';
+}
+function diskEffects(built, erase) {
+    // What installing does to each partition of the target disk (CMP-151): shown before the user confirms.
+    const disk = (current.disks || []).find(d => d.path === built.target);
+    const kept = [], shared = [];
+    for (const part of disk ? disk.partitions || [] : []) {
+        if (part.partlabel === 'AGIOS-PREVIEW') continue;
+        const esp = (part.parttype || '').toLowerCase() === ESP_TYPE;
+        (esp && current.firmware === 'uefi' && built.bootloader === 'systemd-boot' ? shared : kept).push(partitionName(part));
+    }
+    if (erase) return [...kept, ...shared].length ? 'Deleted: ' + [...kept, ...shared].join('; ') + '.' : '';
+    return [kept.length && 'Stays untouched: ' + kept.join('; ') + '.',
+            shared.length && 'Shared, not formatted: ' + shared.join('; ') + ' — the boot menu is added there and lists the other system too.']
+        .filter(Boolean).join(' ');
+}
 function updateLayoutWarning() {
     if (!current || !current.built) return;
     const erase = document.querySelector('input[name=layout]:checked').value === 'erase';
-    $('layoutWarning').textContent = erase ? 'Everything on ' + current.built.target + ' will be deleted, including other systems.'
-        : 'Your files and other systems on ' + current.built.target + ' stay as they are.';
+    const effects = diskEffects(current.built, erase);
+    $('layoutWarning').textContent = (erase ? 'Everything on ' + current.built.target + ' will be deleted, including other systems.'
+        : 'Your files and other systems on ' + current.built.target + ' stay as they are.') + (effects ? ' ' + effects : '');
     $('layoutWarning').className = erase ? 'line error' : 'hint';
 }
 const FOUND_STATUS = {ready: 'Installed in the preview', finalizing: 'Installing on the disk was interrupted — success is not confirmed',
@@ -496,6 +545,44 @@ function renderFinalNotes(state) {
     $('finalWarnings').replaceChildren(...warnings.map(text => { const p = document.createElement('p'); p.className = 'line warn'; p.textContent = text; return p; }));
 }
 
+// The request to the model: the seconds it takes and each step the installer took (CMP-129).
+const elapsed = () => sentAt ? ' · ' + Math.round((Date.now() - sentAt) / 1000) + ' s' : '';
+let lastTurn = '';
+function renderTurn(state) {
+    $('thinkingTime').textContent = busy ? elapsed().slice(3) : '';
+    $('cancelChat').hidden = !busy || !state.turn;
+    $('cancelChat').disabled = cancelling;
+    $('cancelChat').textContent = cancelling ? 'Cancelling…' : 'Cancel';
+    const steps = busy && state.turn ? state.turn.steps : [], key = JSON.stringify(steps);
+    if (key === lastTurn) return; lastTurn = key;
+    // The newest step is already the status line above; the list shows what came before it.
+    $('thinkingSteps').replaceChildren(...steps.slice(0, -1).map(step => {
+        const li = document.createElement('li'); li.textContent = step.text + ' · ' + Math.round(step.at) + ' s'; return li;
+    }));
+}
+setInterval(() => { if (busy && current) { renderTurn(current); if (changeAsked) render(current); } }, 1000);
+async function cancelChat() {
+    if (!busy || cancelling) return;
+    cancelling = true; render(current);
+    try { render(await api('chat/cancel', {})); } catch (error) { showError(error); }
+    finally { cancelling = false; if (current) render(current); }
+}
+$('cancelChat').onclick = $('cancelSaid').onclick = cancelChat;
+// The agent changed the system after the preview was built: the preview is removed and the changed
+// system measured again, only after a second, explicit click.
+async function rebuild() {
+    if (!rebuildAsk) { rebuildAsk = true; render(current); return; }
+    rebuildAsk = false; rebuilding = true; render(current);
+    try {
+        render(await api('revert', {}));
+        chatView = false; changeAsked = false;
+        $('placeButton').disabled = true; $('placeText').innerHTML = '<span class="spin"></span> Measuring the system…';
+        if (await plan()) openSheet('place');
+    } catch (error) { showError(error); }
+    finally { rebuilding = false; if (current) render(current); }
+}
+$('rebuildButton').onclick = $('rebuildSaid').onclick = rebuild;
+
 /* ── sheets and modals ────────────────────────────────── */
 // Placing the preview goes one step at a time: first where it lives, then its settings and the password.
 function showPlaceStep(step) {
@@ -534,10 +621,16 @@ document.addEventListener('keydown', event => {
 async function refresh() { try { render(await api('state')); } catch (error) { showError(error); } }
 async function send(text) {
     text = text.trim(); if (!text || busy) return;
-    busy = true; $('prompt').value = ''; $('changePrompt').value = '';
+    busy = true; sentAt = Date.now(); rebuildAsk = false; $('prompt').value = ''; $('changePrompt').value = '';
+    const box = changeAsked ? $('changePrompt') : $('prompt');
     current.messages = [...current.messages, {role: 'user', content: text}]; render(current);
-    try { render(await api('chat', {text})); } catch (error) { showError(error); $('prompt').value = text; }
-    finally { busy = false; if (current) render(current); }
+    try {
+        const result = await api('chat', {text});
+        // A cancelled request leaves no trace: the message comes back to be edited or sent again.
+        if (result.cancelled) { box.value = result.cancelled; changeAsked = false; }
+        render(result);
+    } catch (error) { showError(error); box.value = text; }
+    finally { busy = false; sentAt = 0; if (current) render(current); }
 }
 $('chatForm').onsubmit = event => { event.preventDefault(); send($('prompt').value); };
 $('changeForm').onsubmit = event => { event.preventDefault(); if ($('changePrompt').value.trim()) changeAsked = true; send($('changePrompt').value); };
@@ -618,8 +711,14 @@ $('diagnosticsButton').onclick = async () => {
 $('poweroffLive').onclick = () => powerAction('poweroff');
 
 /* ── model settings ───────────────────────────────────── */
-const PROVIDER_NOTES = {chatgpt: 'Sign-in opens in a new tab of this browser. Finish it there.', ollama: 'For Ollama on the QEMU host, use http://10.0.2.2:11434.',
-                        compatible: 'Any OpenAI-compatible API with structured JSON replies.'};
+const PROVIDER_NOTES = {chatgpt: 'Sign-in opens in a new tab of this browser. Finish it there.',
+    anthropic: 'Claude works with an API key from the Claude Console; the key stays in memory here and never enters the chat. '
+        + 'Signing in with a Claude subscription is not offered: Anthropic does not allow apps like this one to use claude.ai sign-in.',
+    gemini: 'Gemini works with an API key from Google AI Studio; the key stays in memory here and never enters the chat. '
+        + 'Signing in with a Google or Gemini subscription is not offered: Google does not allow other apps to use it.',
+    ollama: 'Ollama on this computer or another one in your network, e.g. http://192.168.1.20:11434 (start it there with OLLAMA_HOST=0.0.0.0). '
+        + 'Plain HTTP works only with a local-network IP address. Models run on that machine: Live keeps its whole system in memory and does not run them itself.',
+    compatible: 'Any OpenAI-compatible API with structured JSON replies. Plain HTTP works only with a local-network IP address.'};
 function pickProvider(kind) {
     providerKind = kind;
     document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.setAttribute('aria-checked', String(seg.dataset.kind === kind)));
@@ -627,9 +726,23 @@ function pickProvider(kind) {
     $('endpointField').hidden = kind === 'chatgpt';
     $('providerNote').textContent = PROVIDER_NOTES[kind] || 'The key stays in memory on this computer and never enters the chat. API usage may be billed separately.';
     $('providerSubmit').textContent = kind === 'chatgpt' ? 'Sign in to ChatGPT' : 'Connect';
+    $('providerModel').placeholder = kind === 'chatgpt' ? 'Leave empty to pick one after signing in' : 'Pick a model from the list or type its ID';
+    $('listModelsRow').hidden = kind === 'chatgpt';
+    $('providerModels').replaceChildren();
     $('providerError').hidden = true;
 }
 document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.onclick = () => pickProvider(seg.dataset.kind));
+$('listModels').onclick = async () => {
+    const button = $('listModels');
+    button.disabled = true; $('providerError').hidden = false; $('providerError').className = 'hint'; $('providerError').textContent = 'Asking the provider…';
+    try {
+        const {models} = await api('provider/models', {kind: providerKind, endpoint: $('endpoint').value, key: $('key').value});
+        $('providerModels').replaceChildren(...models.map(name => Object.assign(document.createElement('option'), {value: name})));
+        $('providerError').textContent = models.length ? models.length + ' models: pick one in the Model field.' : 'The provider listed no models.';
+        if (models.length && !$('providerModel').value) $('providerModel').focus();
+    } catch (error) { $('providerError').className = 'line error'; $('providerError').textContent = error.message; }
+    finally { button.disabled = false; }
+};
 $('settingsButton').onclick = $('connectButton').onclick = () => { pickProvider(providerKind); $('settings').showModal(); };
 $('closeSettings').onclick = () => $('settings').close();
 $('providerForm').onsubmit = async event => {

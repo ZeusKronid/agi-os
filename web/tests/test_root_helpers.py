@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,7 +24,7 @@ import deployment
 import finalize_worker
 import storage_worker
 from controller import DemoProvider
-from domain import ValidationError
+from domain import Configuration, ValidationError
 
 GIB = 2**30
 S = 512
@@ -77,6 +79,7 @@ class Environment:
             patch.object(finalize_worker, 'inventory', side_effect=lambda: copy.deepcopy(self.snapshot)),
             patch.object(storage_worker, 'live_source', return_value='/dev/sdb1'),
             patch.object(storage_worker, 'mount_source', return_value=None),
+            patch.object(storage_worker, 'hibernated', return_value=False),
         ]
 
     def __enter__(self):
@@ -367,6 +370,135 @@ class PrepareTests(unittest.TestCase):
                 self.prepare({'id': 'part:/dev/sdc:2048'}, snapshot)
         self.assertFalse([c for c in self.calls if c[0] == 'sgdisk'])
 
+    def test_shrink_refuses_stale_free_space_before_writing(self):
+        # Files can be added after the place step. Recheck on Build, before even
+        # e2fsck -y, which can change an ext4 volume that no longer fits.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=4 * GIB) as room:
+                with self.assertRaisesRegex(ValidationError, 'shrinkable space'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            room.assert_called_once()
+            self.assertEqual(self.calls, [], fstype)
+
+    def test_shrink_refuses_space_below_installer_disk_minimum(self):
+        # The package estimate can be smaller than the installer VM's 12 GiB
+        # minimum disk; accepting that estimate creates a VM that cannot install.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=10 * GIB):
+                with self.assertRaisesRegex(ValidationError, 'shrinkable space'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual(self.calls, [], fstype)
+
+    def test_probe_marks_small_raw_partition_unfit_and_hides_small_shrink(self):
+        snapshot = fixture()
+        start = 2048 + 100 * GIB // S
+        short = [(start, start + 10 * GIB // S - 1)]
+        with Environment(snapshot), patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
+                patch.object(storage_worker, 'free_regions', return_value=short), \
+                patch.object(storage_worker, 'fs_free', return_value=0), \
+                patch.object(storage_worker, 'shrink_room', return_value=10 * GIB):
+            options = {o['id']: o for o in storage_worker.probe(
+                {'needed': 8 * GIB, 'target': '/dev/sda', 'vm_memory': 4 * GIB})['options']}
+        self.assertFalse(options[f'part:/dev/sda:{start}']['fits'])
+        self.assertNotIn('shrink:/dev/sda1', options)
+
+    def test_partition_prepare_rechecks_installer_disk_minimum(self):
+        start = 2048 + 100 * GIB // S
+        short = [(start, start + 10 * GIB // S - 1)]
+        with patch.object(storage_worker, 'free_regions', return_value=short):
+            with self.assertRaisesRegex(ValidationError, 'too small for the installer VM'):
+                self.prepare({'id': f'part:/dev/sda:{start}'})
+        self.assertEqual([call[0] for call in self.calls], ['sgdisk'])  # GPT backup only
+
+    def test_shrink_creates_an_installable_disk_when_estimate_is_smaller(self):
+        start = 2048 + 48 * GIB // S
+        end = 2048 + 60 * GIB // S - 1
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'free_regions', return_value=[(start, end)]), \
+                    patch.object(storage_worker, 'resize_partition') as resize, \
+                    patch.object(storage_worker, 'new_partition', return_value='/dev/sda3') as create:
+                result = self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            resize.assert_any_call('/dev/sda', 1, 48 * GIB // S, dry_run=True)
+            resize.assert_any_call('/dev/sda', 1, 48 * GIB // S)
+            create.assert_called_once_with('/dev/sda', start, end)
+            self.assertGreaterEqual((end - start + 1) * S, storage_worker.MIN_PREVIEW_DISK)
+            self.assertEqual(result['image']['path'], '/dev/sda3')
+
+    def test_shrink_refuses_failed_gpt_backup_before_writing(self):
+        # Recovery needs the original table. If it cannot be backed up, leave
+        # the filesystem at its original size as well.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'gpt_backup', side_effect=ValidationError('Cannot back up GPT')):
+                with self.assertRaisesRegex(ValidationError, 'Cannot back up GPT'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual(self.calls, [], fstype)
+
+    def test_partition_resize_uses_sfdisk_without_wiping_existing_metadata(self):
+        with patch.object(storage_worker, 'sh') as run:
+            storage_worker.resize_partition('/dev/sda', 3, 123456, dry_run=True)
+            storage_worker.resize_partition('/dev/sda', 3, 123456)
+        preview, actual = (call.args[0] for call in run.call_args_list)
+        self.assertIn('--no-act', preview)
+        self.assertNotIn('--no-act', actual)
+        for call in run.call_args_list:
+            args = call.args[0]
+            self.assertEqual(args[-3:], ['-N', '3', '/dev/sda'])
+            self.assertIn('--wipe=never', args)
+            self.assertIn('--wipe-partitions=never', args)
+            self.assertEqual(call.kwargs['input_text'], 'size=123456\n')
+
+    def test_partition_resize_preserves_real_gpt_entry_on_sparse_disk(self):
+        if not shutil.which('sfdisk'):
+            self.skipTest('sfdisk is unavailable')
+        disk = self.tmp / 'disk.img'
+        with disk.open('wb') as image:
+            image.truncate(64 * 2**20)
+        metadata = ('type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, '
+                    'uuid=1202576F-BE26-49CB-9297-813DE0B8296D, name="User data"')
+        subprocess.run(['sfdisk', '--wipe=never', '--wipe-partitions=never', str(disk)],
+                       input=f'label: gpt\nunit: sectors\nstart=2048, size=120832, {metadata}\n',
+                       text=True, capture_output=True, check=True)
+
+        def table():
+            return json.loads(subprocess.check_output(['sfdisk', '--json', str(disk)]))['partitiontable']
+
+        original = table()
+        storage_worker.resize_partition(str(disk), 1, 65536, dry_run=True)
+        self.assertEqual(table(), original)
+        storage_worker.resize_partition(str(disk), 1, 65536)
+        shrunk = table()
+        self.assertEqual(shrunk['partitions'][0]['size'], 65536)
+        self.assertEqual({k: v for k, v in shrunk['partitions'][0].items() if k != 'size'},
+                         {k: v for k, v in original['partitions'][0].items() if k != 'size'})
+        self.assertEqual({k: v for k, v in shrunk.items() if k != 'partitions'},
+                         {k: v for k, v in original.items() if k != 'partitions'})
+        storage_worker.resize_partition(str(disk), 1, 120832)
+        self.assertEqual(table(), original)
+
+    def test_shrink_preflights_partition_boundary_before_filesystem_writes(self):
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'resize_partition', side_effect=ValidationError('Bad boundary')):
+                with self.assertRaisesRegex(ValidationError, 'Bad boundary'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual([call[0] for call in self.calls], ['sgdisk'], fstype)
+
 
 class RestartOperationTests(unittest.TestCase):
     """scan / adopt / remove / mark (CMP-119) behind the same checks."""
@@ -481,6 +613,360 @@ class FinalizeImageTests(unittest.TestCase):
             (record / 'installation.json').write_text('{}')
             finalize_worker.read_record(Runner(), '/dev/mapper/x', Path(tmp))
         self.assertEqual(calls[0][:3], ['mount', '-o', 'ro,nosuid,nodev,noexec'])
+
+
+
+class WindowsSafetyTests(unittest.TestCase):
+    """CMP-151: a hibernated (Fast Startup) or BitLocker Windows is never written or resized."""
+
+    def probe(self, snapshot, state):
+        with Environment(snapshot), patch.object(storage_worker, 'hibernated', return_value=state), \
+                patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
+                patch.object(storage_worker, 'fs_free', return_value=50 * GIB), \
+                patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                patch.object(storage_worker, 'free_regions', return_value=[]):
+            return {o['id']: o for o in storage_worker.probe({'needed': 8 * GIB, 'target': '/dev/sda', 'vm_memory': 4 * GIB})['options']}
+
+    def test_hibernated_windows_is_offered_neither_for_shrinking_nor_for_a_file(self):
+        snapshot = fixture()
+        snapshot['disks'][2]['partitions'][0].update(fstype='ntfs')  # a Windows data disk
+        options = self.probe(snapshot, True)
+        for option_id in ('shrink:/dev/sda1', 'file:/dev/sdc1'):
+            option = options[option_id]
+            self.assertFalse(option['fits'], option_id)
+            self.assertIn('Fast Startup', option['blocked'])
+            self.assertEqual(option['detail'], option['blocked'])
+        self.assertTrue(self.probe(snapshot, False)['shrink:/dev/sda1']['fits'])
+        self.assertNotIn('blocked', self.probe(snapshot, False)['file:/dev/sdc1'])
+
+    def test_unreadable_windows_is_left_alone(self):
+        self.assertIn('could not be checked', self.probe(fixture(), None)['shrink:/dev/sda1']['blocked'])
+
+    def test_bitlocker_volume_is_explained_not_hidden(self):
+        snapshot = fixture()
+        snapshot['disks'][0]['partitions'][0].update(fstype='BitLocker')
+        option = self.probe(snapshot, False)['shrink:/dev/sda1']
+        self.assertFalse(option['fits'])
+        self.assertIn('BitLocker', option['blocked'])
+
+    def test_forged_choice_of_a_blocked_volume_is_refused(self):
+        with Environment() as env, patch.object(storage_worker, 'hibernated', return_value=True):
+            for option in ({'id': 'shrink:/dev/sda1'}, {'id': 'file:/dev/sdc1'}):
+                env.snapshot['disks'][2]['partitions'][0]['fstype'] = 'ntfs'
+                with self.assertRaises(ValidationError) as caught:
+                    storage_worker.resolve_option(option, '/dev/sda', env.snapshot)
+                self.assertIn('Fast Startup', str(caught.exception))
+
+    def test_hiberfil_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = {'path': '/dev/sda3', 'fstype': 'ntfs', 'mounted': False}
+            with patch.object(storage_worker, 'PREVIEW', root), \
+                    patch.object(storage_worker, 'read_only_mount', return_value=True), \
+                    patch.object(storage_worker.subprocess, 'run'):
+                self.assertFalse(storage_worker.hibernated(part))  # no hiberfil.sys at all
+                (root / 'check').mkdir()
+                for head, state in ((b'HIBR' + b'\0' * 60, True), (b'hibr' + b'\0' * 60, True),
+                                    (b'\0' * 64, False), (b'wake' + b'\0' * 60, False)):
+                    (root / 'check/hiberfil.sys').write_bytes(head)
+                    self.assertEqual(storage_worker.hibernated(part), state, head[:4])
+            with patch.object(storage_worker, 'read_only_mount', return_value=False):
+                self.assertIsNone(storage_worker.hibernated(part))
+
+
+
+class DualBootFinalizeTests(unittest.TestCase):
+    """CMP-151: finalizing next to Windows on UEFI shares its ESP and keeps its partitions."""
+
+    ESP, WINDOWS, PREVIEW_PART = '/dev/vda1', '/dev/vda2', '/dev/vda3'
+    BASE = 60 * GIB // S
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
+        self.tmp, self.calls, self.promoted = tmp, [], False
+        self.foreign_fallback = False
+        self.esp_guid = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
+        self.basic = 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7'
+
+    def table(self):
+        parts = [{'node': self.ESP, 'start': 2048, 'size': 100 * 2**20 // S, 'type': self.esp_guid, 'uuid': 'E1'},
+                 {'node': self.WINDOWS, 'start': 2048 + 100 * 2**20 // S, 'size': 50 * GIB // S, 'type': self.basic, 'uuid': 'W1'}]
+        if self.promoted:
+            parts += [{'node': '/dev/vda4', 'start': self.BASE + 2048, 'size': GIB // S, 'type': 'BC13C2FF-59E6-4262-A352-B275FD779F9C', 'uuid': 'B1'},
+                      {'node': '/dev/vda5', 'start': self.BASE + 2048 + GIB // S, 'size': 14 * GIB // S, 'type': '0FC63DAF-8483-4772-8E79-3D69D8477DE4', 'uuid': 'R1'}]
+        else:
+            parts.append({'node': self.PREVIEW_PART, 'start': self.BASE, 'size': 16 * GIB // S, 'type': '0FC63DAF-8483-4772-8E79-3D69D8477DE4',
+                          'uuid': 'P1', 'name': 'AGIOS-PREVIEW'})
+        return json.dumps({'partitiontable': {'label': 'gpt', 'firstlba': 2048, 'lastlba': 128 * GIB // S - 34, 'partitions': parts}})
+
+    def run_command(self, args, **kw):
+        self.calls.append(args)
+        if args[0] == 'sfdisk':
+            return self.table()
+        if args[0] == 'sgdisk' and any(a.startswith('--new') for a in args):
+            self.promoted = True
+        if args[0] == 'blkid':
+            return 'ESP-UUID\n'
+        if args[0] == 'mount' and args[-1].endswith('/target'):
+            root = Path(args[-1])
+            (root / 'etc').mkdir(parents=True)
+            (root / 'etc/fstab').write_text('UUID=R1 / ext4 rw 0 1\n')
+            (root / 'boot/loader').mkdir(parents=True)
+            (root / 'boot/loader/loader.conf').write_text('default agi-os.conf\ntimeout 3\n')
+            (root / 'var/lib/agi-os').mkdir(parents=True)
+            if self.foreign_fallback:
+                fallback = root / 'efi/EFI/BOOT/BOOTX64.EFI'
+                fallback.parent.mkdir(parents=True)
+                fallback.write_bytes(b'foreign fallback loader')
+        if 'bootctl' in args and self.foreign_fallback:
+            (self.tmp / 'target/efi/EFI/BOOT/BOOTX64.EFI').write_bytes(b'systemd-boot fallback loader')
+        return ''
+
+    def finalize(self, bootloader='systemd-boot', enroll=False, hibernated=False, fstype='ntfs'):
+        config = Configuration.parse({**DemoProvider().reply('', [])['configuration'], 'disk': '/dev/vda',
+                                      'bootloader': bootloader})
+        disk = {'path': '/dev/vda', 'pttype': 'gpt', 'fingerprint': 'fp', 'partitions': [
+            part(self.ESP, 2048, 100 * 2**20, 'vfat', 'EFI system partition'),
+            part(self.WINDOWS, 2048 + 100 * 2**20 // S, 50 * GIB, fstype, 'Basic data partition'),
+            part(self.PREVIEW_PART, self.BASE, 16 * GIB, None, 'AGIOS-PREVIEW')]}
+        request = {'image': {'format': 'raw', 'path': self.PREVIEW_PART, 'on_target': True}, 'layout': 'alongside',
+                   'passphrase': '', 'enroll_keys': enroll}
+        record = {'id': 'preview', 'configuration': config.as_dict(), 'firmware': 'uefi', 'secure_boot': None}
+        class Source:
+            opened, partitions = False, [{'node': '/dev/nbd0p1', 'start': 2048, 'size': GIB // S, 'name': 'AGI-BOOT'},
+                                         {'node': '/dev/nbd0p2', 'start': 2048 + GIB // S, 'size': 14 * GIB // S, 'name': 'AGI-ROOT'}]
+            def __init__(self, *a): pass
+            def attach(self): return self
+            group = None
+            def open_root(self, number, passphrase): return '/dev/nbd0p2', False
+            def close_root(self): pass
+            def detach(self): pass
+        runner = type('R', (), {'run': lambda _, args, **kw: self.run_command(args, **kw)})()
+        with patch.object(finalize_worker, 'checked_request', return_value=(config, disk)), \
+                patch.object(finalize_worker, 'live_firmware', return_value='uefi'), \
+                patch.object(finalize_worker.tempfile, 'mkdtemp', return_value=str(self.tmp)), \
+                patch.object(finalize_worker, 'Source', Source), \
+                patch.object(finalize_worker, 'read_record', return_value=record), \
+                patch.object(finalize_worker, 'check_record'), \
+                patch.object(finalize_worker, 'fit_drivers'), \
+                patch.object(finalize_worker, 'inspect_esp', return_value=(90 * 2**20, True)), \
+                patch.object(storage_worker, 'hibernated', return_value=hibernated), \
+                patch.object(finalize_worker, 'emit') as emit:
+            finalize_worker.finalize(request, runner)
+        return record, emit
+
+    def test_systemd_boot_shares_the_windows_esp(self):
+        self.foreign_fallback = True
+        record, _ = self.finalize()
+        new = next(c for c in self.calls if c[0] == 'sgdisk' and any(a.startswith('--new') for a in c))
+        self.assertIn('--typecode=0:ea00', new)  # /boot becomes XBOOTLDR, not a second ESP
+        self.assertNotIn('--typecode=0:ef00', new)
+        target = self.tmp / 'target'
+        self.assertIn(['mount', '-o', 'umask=0077', self.ESP, str(target / 'efi')], self.calls)
+        self.assertFalse(any(c[0].startswith('mkfs') and self.ESP in c for c in self.calls))  # never formatted
+        self.assertIn('bootctl', next(c for c in self.calls if 'bootctl' in c))
+        bootctl = next(c for c in self.calls if 'bootctl' in c)
+        self.assertEqual(bootctl[-3:], ['--esp-path=/efi', '--boot-path=/boot', 'install'])
+        self.assertEqual((target / 'efi/loader/loader.conf').read_text(), 'default agi-os.conf\ntimeout 3\n')
+        self.assertEqual((target / 'efi/EFI/BOOT/BOOTX64.EFI').read_bytes(), b'foreign fallback loader')
+        self.assertIn(['arch-chroot', str(target), 'systemctl', 'mask', 'systemd-boot-update.service'], self.calls)
+        self.assertIn('UUID=ESP-UUID /efi vfat umask=0077 0 2', (target / 'etc/fstab').read_text())
+        self.assertEqual(record['dual_boot'], {'esp': self.ESP, 'shared_esp': True, 'windows': True})
+        umounts = [c[1] for c in self.calls if c[0] == 'umount']
+        self.assertLess(umounts.index(str(target / 'efi')), umounts.index(str(target / 'boot')))
+
+    def test_grub_keeps_its_own_esp_and_chainloads_windows(self):
+        self.finalize(bootloader='grub')
+        new = next(c for c in self.calls if c[0] == 'sgdisk' and any(a.startswith('--new') for a in c))
+        self.assertIn('--typecode=0:ef00', new)
+        entry = (self.tmp / 'target/etc/grub.d/35_agios_windows').read_text()
+        self.assertIn('search --no-floppy --fs-uuid --set=root ESP-UUID', entry)
+        self.assertIn('chainloader /EFI/Microsoft/Boot/bootmgfw.efi', entry)
+
+    def test_hibernated_windows_stops_before_any_change(self):
+        with self.assertRaises(ValidationError) as caught:
+            self.finalize(hibernated=True)
+        self.assertIn('Nothing was changed', str(caught.exception))
+        self.assertEqual(self.calls, [])
+
+    def test_bitlocker_warns_and_refuses_new_secure_boot_keys(self):
+        record, emit = self.finalize(fstype='BitLocker')
+        self.assertIn(finalize_worker.BITLOCKER_NOTE, record['warnings'])
+        self.assertIn(finalize_worker.BITLOCKER_NOTE, [c.kwargs.get('text') for c in emit.call_args_list])
+        self.calls, self.promoted = [], False
+        with self.assertRaises(ValidationError):
+            self.finalize(fstype='BitLocker', enroll=True)
+        self.assertEqual(self.calls, [])
+
+    def test_a_changed_partition_of_another_system_is_reported(self):
+        original = self.table
+        def moved():
+            table = json.loads(original())
+            if self.promoted:
+                table['partitiontable']['partitions'][1]['size'] -= 2048
+            return json.dumps(table)
+        self.table = moved
+        with self.assertRaises(ValidationError) as caught:
+            self.finalize()
+        self.assertIn('another system', str(caught.exception))
+
+    def test_esp_helpers(self):
+        runner = type('R', (), {'run': lambda _, args, **kw: self.run_command(args, **kw)})()
+        self.assertEqual(finalize_worker.existing_esp(runner, {'path': '/dev/vda', 'pttype': 'gpt'}), self.ESP)
+        self.assertIsNone(finalize_worker.existing_esp(runner, {'path': '/dev/vda', 'pttype': None}))
+        point = self.tmp / 'esp'
+        (point / 'EFI/Microsoft/Boot').mkdir(parents=True)
+        (point / 'EFI/Microsoft/Boot/bootmgfw.efi').write_bytes(b'MZ')
+        free, windows = finalize_worker.inspect_esp(runner, self.ESP, point)
+        self.assertTrue(windows)
+        self.assertGreater(free, 0)
+        self.assertEqual(self.calls[-2][:3], ['mount', '-o', 'ro,nosuid,nodev,noexec'])
+        self.assertEqual(self.calls[-1], ['umount', str(point)])
+
+def completed(args, returncode=0, stdout='', stderr=''):
+    return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+
+class PartitionTableTests(unittest.TestCase):
+    """CMP-149: a device without a partition table is an answer, not a failed command."""
+
+    def ask(self, result):
+        with patch.object(storage_worker.subprocess, 'run', return_value=result) as run, \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            try:
+                return storage_worker.partition_table('/dev/vda'), warning
+            finally:
+                self.assertEqual(run.call_args.args[0], ['sfdisk', '--json', '/dev/vda'])
+                self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
+
+    def test_blank_device_is_none_without_a_warning(self):
+        table, warning = self.ask(completed([], 1, stderr='sfdisk: /dev/vda: does not contain a recognized partition table\n'))
+        self.assertIsNone(table)
+        warning.assert_not_called()
+
+    def test_real_failures_still_warn(self):
+        with self.assertRaises(ValidationError):
+            self.ask(completed([], 1, stderr='sfdisk: cannot open /dev/vda: Permission denied\n'))
+        with patch.object(storage_worker.subprocess, 'run', return_value=completed([], 1, stderr='sfdisk: I/O error')), \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            self.assertTrue(storage_worker.gap_free('/dev/vda'))
+            warning.assert_called_once()
+
+    def test_table_is_parsed(self):
+        table, warning = self.ask(completed([], 0, stdout=json.dumps({'partitiontable': {'label': 'gpt', 'partitions': []}})))
+        self.assertEqual(table['label'], 'gpt')
+        warning.assert_not_called()
+        with self.assertRaises(ValidationError):
+            self.ask(completed([], 0, stdout='not json'))
+
+    def test_fresh_preview_partition_is_free_for_the_record_without_a_warning(self):
+        answer = completed([], 1, stderr='sfdisk: /dev/sdc2: does not contain a recognized partition table\n')
+        with patch.object(storage_worker.subprocess, 'run', return_value=answer), \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            self.assertTrue(storage_worker.gap_free('/dev/sdc2'))
+        warning.assert_not_called()
+
+
+class DirtyPreviewTests(unittest.TestCase):
+    """CMP-146: a preview that was not shut down properly still finalizes, the preview
+    itself is never written, and what cannot be opened gets a clear way out."""
+
+    class Runner:
+        def __init__(self, fail=()):
+            self.calls, self.fail = [], fail
+
+        def run(self, args, **kw):
+            self.calls.append(args)
+            if args[0] in self.fail:
+                raise ValidationError(f'Ошибка {args[0]} (код 32)\nmount: /mnt/x: cannot mount /dev/nbd0p3 read-only.')
+            if args[0] == 'qemu-img':
+                Path(args[-1]).write_bytes(b'')
+            if args[0] == 'sfdisk':
+                return json.dumps({'partitiontable': {'label': 'gpt', 'partitions': [{'node': '/dev/nbd0p1', 'start': 2048}]}})
+            if args[0] == 'blkid':
+                return 'crypto_LUKS\n'
+            return ''
+
+    def attach(self, image, runner):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
+        source = finalize_worker.Source(runner, image)
+        with patch.object(finalize_worker, 'OVERLAY_DIR', str(tmp)), \
+                patch.object(finalize_worker, 'free_nbd', return_value='/dev/nbd0'):
+            source.attach()
+        return source, tmp
+
+    def test_both_image_kinds_are_read_through_a_throwaway_overlay(self):
+        for image in ({'format': 'raw', 'path': '/dev/sdc2', 'on_target': False},
+                      {'format': 'qcow2', 'path': str(PREVIEW / 'ram/preview.qcow2'), 'on_target': False}):
+            runner = self.Runner()
+            source, tmp = self.attach(image, runner)
+            create = next(c for c in runner.calls if c[0] == 'qemu-img')
+            overlay = create[-1]
+            self.assertEqual(create[create.index('-b') + 1], image['path'])
+            self.assertEqual(create[create.index('-F') + 1], image['format'])
+            self.assertTrue(overlay.startswith(str(tmp) + '/'))
+            connect = next(c for c in runner.calls if c[0] == 'qemu-nbd')
+            # The preview itself is never handed to a writer: only the overlay is.
+            self.assertEqual(connect[-2:], ['/dev/nbd0', overlay])
+            self.assertNotIn(image['path'], connect)
+            self.assertFalse(any(c[0] == 'losetup' for c in runner.calls))
+            self.assertEqual(source.partition(3), '/dev/nbd0p3')
+            with patch.object(finalize_worker.subprocess, 'run') as run, \
+                    patch.object(finalize_worker, 'nbd_server', return_value=None):
+                source.detach()
+            self.assertIn(['qemu-nbd', '--disconnect', '/dev/nbd0'], [c.args[0] for c in run.call_args_list])
+            self.assertFalse(Path(overlay).parent.exists())
+
+    def test_encrypted_root_opens_writable_over_the_overlay(self):
+        runner = self.Runner()
+        source, _ = self.attach({'format': 'raw', 'path': '/dev/sdc2', 'on_target': False}, runner)
+        device, encrypted = source.open_root(3, 'secret-pass')
+        self.assertTrue(encrypted)
+        self.assertEqual(device, '/dev/mapper/' + finalize_worker.SOURCE_MAP)
+        opened = next(c for c in runner.calls if c[:2] == ['cryptsetup', 'open'])
+        self.assertNotIn('--readonly', opened)
+        self.assertEqual(opened[-2], '/dev/nbd0p3')
+        with patch.object(finalize_worker.subprocess, 'run'), patch.object(finalize_worker, 'nbd_server', return_value=None):
+            source.detach()
+
+    def test_detach_waits_for_the_nbd_server_to_release_the_preview(self):
+        runner = self.Runner()
+        source, _ = self.attach({'format': 'raw', 'path': '/dev/sda2', 'on_target': True}, runner)
+        alive = [True, True, False]
+        with patch.object(finalize_worker.subprocess, 'run'), \
+                patch.object(finalize_worker, 'nbd_server', return_value=4242), \
+                patch.object(finalize_worker.Path, 'exists', side_effect=lambda *a: alive.pop(0) if alive else False), \
+                patch.object(finalize_worker.time, 'sleep') as sleep:
+            source.detach()
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_a_root_that_still_does_not_mount_gets_a_clear_way_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValidationError) as caught:
+                finalize_worker.read_record(self.Runner(fail=('mount',)), '/dev/nbd0p3', Path(tmp))
+        self.assertEqual(str(caught.exception), finalize_worker.UNREADABLE)
+        self.assertIn('shut it down from its power menu', str(caught.exception))
+        self.assertIsNotNone(caught.exception.__cause__)  # the mount error stays in the log
+
+    def swapfile(self, root, signature):
+        path = root / finalize_worker.SWAPFILE
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'\0' * (finalize_worker.PAGE - 10) + signature + b'\0' * 4096)
+        return path
+
+    def test_hibernated_preview_is_not_resumed_after_promotion(self):
+        for signature, discarded in ((b'S1SUSPEND\0', True), (b'LINHIB0001', True), (b'SWAPSPACE2', False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = self.swapfile(root, signature)
+                runner = self.Runner()
+                with patch.object(finalize_worker, 'emit'):
+                    self.assertEqual(finalize_worker.discard_hibernation_image(runner, root), discarded)
+                self.assertEqual(runner.calls, [['mkswap', str(path)]] if discarded else [])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(finalize_worker.discard_hibernation_image(self.Runner(), Path(tmp)))
 
 
 # ---- Fuzzing: mutated requests must be refused cleanly or resolve to allowed devices only ----

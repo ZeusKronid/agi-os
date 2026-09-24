@@ -47,9 +47,9 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(update.notice_text({"updates": []}), "")
         text = update.notice_text({"updates": [{"name": "linux"}], "kernel": True, "reboot_required": True,
                                    "pacnew": ["/etc/pacman.conf.pacnew"]})
-        self.assertIn("доступно обновлений: 1 (включая ядро)", text)
+        self.assertIn("updates available: 1 (including the kernel)", text)
         self.assertIn("sudo agi-os-update apply", text)
-        self.assertIn("перезагрузите", text)
+        self.assertIn("restart the computer", text)
         self.assertIn("/etc/pacman.conf.pacnew", text)
 
     def test_status_files_are_world_readable_and_atomic(self):
@@ -119,7 +119,7 @@ class ApplyTests(unittest.TestCase):
             patch.object(update, "PACMAN_DB", self.pacman), patch.object(update.os, "geteuid", return_value=0),
             patch.object(update, "free_bytes", return_value=10 * 1024 ** 3),
             patch.object(update, "root_filesystem", return_value="btrfs"),
-            patch.object(update, "snapshot", side_effect=lambda stamp: self.calls.append(["snapshot"]) or "/.snapshots/x"),
+            patch.object(update, "snapshot", side_effect=lambda stamp, **kw: self.calls.append(["snapshot"]) or "/.snapshots/x"),
             patch.object(update, "installed_versions", side_effect=lambda: next(versions)),
             patch.object(update, "stream", side_effect=lambda args: self.calls.append(args)),
             patch.object(update, "run", side_effect=lambda args, **kw: self.calls.append(args) or ""),
@@ -167,7 +167,7 @@ class ApplyTests(unittest.TestCase):
 
     def test_busy_package_manager_is_refused(self):
         (self.pacman / "db.lck").write_text("")
-        for running, expected in ((0, "занят"), (1, "sudo rm /var/lib/pacman/db.lck")):
+        for running, expected in ((0, "busy with another operation"), (1, "sudo rm /var/lib/pacman/db.lck")):
             with patch.object(update.subprocess, "run", return_value=subprocess.CompletedProcess([], running)):
                 with self.assertRaises(update.UpdateError) as caught:
                     update.apply()
@@ -190,7 +190,7 @@ class ApplyTests(unittest.TestCase):
         def fail(args):
             self.calls.append(args)
             if args[:2] == ["pacman", "-Su"]:
-                raise update.UpdateError("Ошибка pacman (код 1)\nerror: failed to commit transaction")
+                raise update.UpdateError("pacman failed (code 1)\nerror: failed to commit transaction")
         with patch.object(update, "stream", side_effect=fail):
             with self.assertRaises(update.UpdateError) as caught:
                 update.apply()
@@ -212,11 +212,37 @@ class ApplyTests(unittest.TestCase):
 
 class BootloaderTests(unittest.TestCase):
     def test_systemd_boot_is_updated_only_when_systemd_changed(self):
-        with patch.object(update, "run", return_value="") as run:
+        with patch.object(update, "run", return_value="") as run, patch.object(update, "shared_esp", return_value=False):
             self.assertEqual(update.refresh_bootloader("systemd-boot", ["firefox"]), [])
             run.assert_not_called()
             self.assertEqual(update.refresh_bootloader("systemd-boot", ["systemd"]), ["systemd-boot"])
             run.assert_called_once_with(["bootctl", "--graceful", "update"])
+
+    def test_shared_esp_update_restores_an_existing_fallback_even_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            esp = Path(tmp)
+            fallback = esp / "EFI/BOOT/BOOTX64.EFI"
+            fallback.parent.mkdir(parents=True)
+            fallback.write_bytes(b"another system's fallback")
+
+            def replace_fallback(args):
+                fallback.write_bytes(b"systemd-boot fallback")
+                raise update.UpdateError("bootctl failed")
+
+            with patch.object(update, "shared_esp", return_value=True), \
+                    patch.object(update, "run", side_effect=replace_fallback) as run:
+                with self.assertRaisesRegex(update.UpdateError, "bootctl failed"):
+                    update.refresh_bootloader("systemd-boot", ["systemd"], esp=esp)
+            run.assert_called_once_with(["bootctl", "--esp-path=/efi", "--boot-path=/boot", "--graceful", "update"])
+            self.assertEqual(fallback.read_bytes(), b"another system's fallback")
+            self.assertEqual(list(fallback.parent.iterdir()), [fallback])
+
+    def test_shared_esp_comes_from_final_installation_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "installation.json"
+            record.write_text(json.dumps({"dual_boot": {"shared_esp": True}}))
+            self.assertTrue(update.shared_esp(record))
+            self.assertFalse(update.shared_esp(Path(tmp) / "missing.json"))
 
     def test_bios_grub_goes_to_the_disk_holding_boot(self):
         answers = {"findmnt": "/dev/nvme0n1p2\n", "lsblk": "nvme0n1\n"}
@@ -294,7 +320,7 @@ class TargetFilesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.object(update, "STATUS", Path(tmp) / "missing.json"), \
              patch("builtins.print") as printed:
             self.assertEqual(update.main(["status"]), 0)
-        self.assertIn("ещё не проверялись", printed.call_args.args[0])
+        self.assertIn("not been checked yet", printed.call_args.args[0])
 
 
 if __name__ == "__main__":

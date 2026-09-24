@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,7 +42,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(old, Configuration.parse(old.as_dict()))
         hibernating = Configuration.parse(specification(swap="hibernate"))
         self.assertNotEqual(old.digest(), hibernating.digest())
-        self.assertIn("гибернац", hibernating.summary({"size": 64 * GIB}, demo_inventory()["hardware"]))
+        self.assertIn("swap file /swap/swapfile (16 GiB, the size of RAM) inside the root", hibernating.summary({"size": 64 * GIB}, demo_inventory()["hardware"]))
 
     def test_unknown_mode_and_f2fs_hibernation_rejected(self):
         for changes in ({"swap": "partition"}, {"swap": "hibernate", "filesystem": "f2fs"}, {"swap": ""}):
@@ -116,6 +118,43 @@ class SwapFileTests(unittest.TestCase):
         self.assertIn('GRUB_CMDLINE_LINUX_DEFAULT="quiet"', grub)
 
 
+class StandTests(unittest.TestCase):
+    def test_disk_vm_does_not_reset_on_emulated_watchdog(self):
+        """Exercise the disk launch path that previously reset after a valid UEFI resume."""
+        source = Path(__file__).resolve().parents[1] / "scripts/run-live-web-vm.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            script = root / "scripts/run-live-web-vm.sh"
+            shutil.copy2(source, script)
+            kvm_check = "[[ -r /dev/kvm && -w /dev/kvm ]] || { echo 'KVM unavailable'; exit 1; }"
+            contents = script.read_text()
+            self.assertIn(kvm_check, contents)
+            script.write_text(contents.replace(kvm_check, ": # fake QEMU does not need KVM", 1))
+            (root / ".local/live-test").mkdir(parents=True)
+            (root / ".local/live-test-target.qcow2").touch()
+            (root / ".local/live-test/OVMF_VARS-uefi.fd").touch()
+            binary = root / "bin"
+            binary.mkdir()
+            (binary / "qemu-system-x86_64").write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "open(os.environ['QEMU_CAPTURE'], 'w').write(json.dumps(sys.argv[1:]))\n")
+            (binary / "systemd-run").write_text(
+                "#!/bin/sh\n"
+                "while [ \"$1\" != qemu-system-x86_64 ]; do shift; done\n"
+                "exec \"$@\"\n")
+            for name in ("qemu-system-x86_64", "systemd-run"):
+                (binary / name).chmod(0o755)
+            capture = root / "qemu-args.json"
+            env = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                   "QEMU_CAPTURE": str(capture)}
+            subprocess.run([str(script), "--mode", "disk", "--firmware", "uefi"],
+                           cwd=root, env=env, check=True, capture_output=True, text=True, timeout=15)
+            args = json.loads(capture.read_text())
+            self.assertEqual(args[args.index("-action") + 1], "watchdog=none")
+
+
 class InstallRunner(SwapRunner):
     def __init__(self, config):
         super().__init__({"filefrag": EXT4_FILEFRAG})
@@ -131,6 +170,14 @@ class InstallRunner(SwapRunner):
         if "-Qq" in args:
             self.calls.append(args)
             return "\n".join(worker.packages_for(self.config, demo_inventory()["hardware"]))
+        if args[-2:] == ["mkinitcpio", "-P"]:
+            preset = (worker.TARGET / "etc/mkinitcpio.d/linux.preset").read_text()
+            assert "PRESETS=('default' 'fallback')" in preset
+            assert "fallback_image='/boot/initramfs-linux-fallback.img'" in preset
+            assert "fallback_options='-S autodetect'" in preset
+            image = worker.TARGET / "boot/initramfs-linux-fallback.img"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(b"generated fallback initramfs")
         return super().run(args, input_text, timeout)
 
 
@@ -150,6 +197,9 @@ class InstallTests(unittest.TestCase):
                          f"consolefonts/{config.effective_console_font()}.psfu.gz"):
                 (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
                 (target / "usr/share/kbd" / name).touch()
+            preset = target / "etc/mkinitcpio.d/linux.preset"
+            preset.parent.mkdir(parents=True, exist_ok=True)
+            preset.write_text("ALL_kver='/boot/vmlinuz-linux'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\n")
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
@@ -214,15 +264,15 @@ class VerifyTests(unittest.TestCase):
     def test_configuration_checks(self):
         with patch.object(verify, "command", return_value=(0, 's "yes"')):
             checks = verify.hibernation_checks(self.record, {}, self.root)
-        self.assertTrue(checks["Гибернация: swap-файл включён"])
-        self.assertTrue(checks["Гибернация: resume в параметрах ядра"])
-        self.assertTrue(checks["Гибернация: доступна системе (logind)"])
-        self.assertFalse(checks["Гибернация: сеанс восстановлен (agi-os-verify --hibernate)"])
+        self.assertTrue(checks["Hibernation: swap file on"])
+        self.assertTrue(checks["Hibernation: resume in the kernel parameters"])
+        self.assertTrue(checks["Hibernation: available to the system (logind)"])
+        self.assertFalse(checks["Hibernation: session restored (agi-os-verify --hibernate)"])
         (self.root / "sys/power/resume_offset").write_text("0\n")
         with patch.object(verify, "command", return_value=(0, 's "na"')):
             checks = verify.hibernation_checks(self.record, {}, self.root)
-        self.assertFalse(checks["Гибернация: resume в параметрах ядра"])
-        self.assertFalse(checks["Гибернация: доступна системе (logind)"])
+        self.assertFalse(checks["Hibernation: resume in the kernel parameters"])
+        self.assertFalse(checks["Hibernation: available to the system (logind)"])
 
     def test_resumed_session_passes(self):
         state = self.root / "state"
@@ -233,6 +283,18 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(passed, detail)
         self.assertTrue(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
         self.assertFalse(list((self.root / "dev/shm").iterdir()))
+
+    def test_fast_resume_passes_and_snapshot_pause_does_not(self):
+        """The stand's VM is off for ~10 s in a full cycle; without a resume the clocks move ~0.2 s."""
+        for gap, wall, expected in ((9.6, 1012.0, True), (4.0, 1012.0, True), (0.2, 1045.0, False)):
+            state = self.root / f"state-{gap}"
+            ticks = iter([(1000.0, 0.0), (1001.0, 0.0), (wall, gap)])
+            def command(args):
+                return (1, "none") if args[0] == "systemd-detect-virt" else (0, "")
+            with self.subTest(gap=gap), patch.object(verify, "command", side_effect=command), \
+                    patch.object(verify, "clocks", side_effect=lambda: next(ticks)), patch.object(verify.time, "sleep"):
+                passed, detail = verify.hibernate(self.record, state, self.root)
+                self.assertIs(passed, expected, detail)
 
     def test_rolled_back_hibernation_is_not_a_resume(self):
         """Run A: the session went on in the same boot after the kernel rolled back; not a pass."""
@@ -247,7 +309,7 @@ class VerifyTests(unittest.TestCase):
                 passed, detail = verify.hibernate(self.record, state, self.root)
                 self.assertFalse(passed, detail)
                 self.assertFalse(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
-        self.assertIn("не подтверждена", detail)
+        self.assertIn("Hibernation not confirmed", detail)
 
     def test_unreadable_kernel_log_is_not_a_pass(self):
         state = self.root / "state"
@@ -258,7 +320,7 @@ class VerifyTests(unittest.TestCase):
                 patch.object(verify.time, "sleep"):
             passed, detail = verify.hibernate(self.record, state, self.root)
         self.assertFalse(passed)
-        self.assertIn("журнал ядра недоступен", detail)
+        self.assertIn("kernel log is unavailable", detail)
 
     def test_preview_vm_does_not_try_platform_hibernation(self):
         calls = []
@@ -269,7 +331,7 @@ class VerifyTests(unittest.TestCase):
         with patch.object(verify, "command", side_effect=command):
             passed, detail = verify.hibernate(record, self.root / "state", self.root)
         self.assertFalse(passed)
-        self.assertIn("после установки", detail)
+        self.assertIn("checked after installing", detail)
         self.assertNotIn(["systemctl", "hibernate"], calls)
 
     def test_refusal_and_fresh_boot_fail(self):
@@ -286,7 +348,7 @@ class VerifyTests(unittest.TestCase):
                 patch.object(verify.socket, "getaddrinfo", return_value=[]):
             result = verify.evaluate(record, state, False, self.root)
         self.assertFalse(result["hibernate"]["result"])
-        self.assertIn("заново", result["hibernate"]["detail"])
+        self.assertIn("booted afresh", result["hibernate"]["detail"])
 
 
 if __name__ == "__main__":

@@ -65,14 +65,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             controller.respond("Change the disk")
 
-    def test_failed_revision_removes_prior_configuration(self):
+    def test_failed_revision_keeps_prior_configuration(self):
+        # A provider error agrees on nothing new: the configuration agreed earlier stays,
+        # and the unanswered message joins the next turn (CMP-129).
         provider = DemoProvider()
         controller = Controller(demo_inventory(), provider, catalog=DemoCatalog())
         controller.respond("First proposal")
+        agreed = controller.configuration
         with patch.object(provider, "reply", side_effect=ProviderError("offline")):
             with self.assertRaises(ProviderError):
                 controller.respond("Actually use another disk")
-        self.assertIsNone(controller.configuration)
+        self.assertEqual(controller.configuration, agreed)
+        self.assertEqual(controller.history[-1], {"role": "user", "content": "Actually use another disk"})
 
 
 class ProviderTests(unittest.TestCase):
@@ -109,13 +113,25 @@ class ProviderTests(unittest.TestCase):
                 APIProvider("compatible", url, "secret")
         self.assertIsNone(NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere"))
 
+    def test_plain_http_only_inside_the_local_network(self):
+        """CMP-126: Ollama or an OpenAI-compatible server on another PC at home."""
+        for url in ("http://127.0.0.1:11434", "http://localhost:11434", "http://10.0.2.2:11434",
+                    "http://192.168.1.20:11434", "http://172.16.5.4:8000/v1", "http://[fe80::1]:11434"):
+            self.assertEqual(APIProvider("ollama", url).endpoint, url)
+        for url in ("http://8.8.8.8:11434", "http://nas.local:11434", "http://ollama.example.com"):
+            with self.assertRaises(ProviderError, msg=url):
+                APIProvider("ollama", url)
+        with self.assertRaises(ProviderError):
+            APIProvider("openai", "http://192.168.1.20/v1", "secret")  # API providers always use HTTPS
+
 
 class FakeRunner:
-    def __init__(self, fail_on=None, config=None):
+    def __init__(self, fail_on=None, config=None, generate_fallback=True):
         self.cancel = threading.Event()
         self.calls = []
         self.fail_on = fail_on
         self.config = config or Configuration.parse(specification())
+        self.generate_fallback = generate_fallback
 
     def run(self, args, input_text=None, timeout=1800):
         self.calls.append(args)
@@ -127,6 +143,15 @@ class FakeRunner:
             return "UUID=installed-uuid / ext4 defaults 0 1\n"
         if "-Qq" in args:
             return "\n".join(worker.packages_for(self.config, demo_inventory()["hardware"]))
+        if args[-2:] == ["mkinitcpio", "-P"]:
+            preset = (worker.TARGET / "etc/mkinitcpio.d/linux.preset").read_text()
+            assert "PRESETS=('default' 'fallback')" in preset
+            assert "fallback_image='/boot/initramfs-linux-fallback.img'" in preset
+            assert "fallback_options='-S autodetect'" in preset
+            if self.generate_fallback:
+                image = worker.TARGET / "boot/initramfs-linux-fallback.img"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"generated fallback initramfs")
         return ""
 
 
@@ -137,10 +162,10 @@ class WorkerTests(unittest.TestCase):
         request = {"configuration": config.as_dict(), "fingerprint": "wrong", "consent_digest": "wrong", "password": "private-password"}
         with patch.object(worker.os, "geteuid", return_value=0), patch.object(worker, "live_environment", return_value=True), \
              patch.object(worker, "inventory", return_value=snapshot):
-            with self.assertRaisesRegex(ValidationError, "Конфигурация"):
+            with self.assertRaisesRegex(ValidationError, "configuration changed after you confirmed"):
                 worker.preflight(request)
             request["consent_digest"] = config.digest()
-            with self.assertRaisesRegex(ValidationError, "Диск изменился"):
+            with self.assertRaisesRegex(ValidationError, "disk changed after you confirmed"):
                 worker.preflight(request)
 
     def test_worker_refuses_host_before_reading_request(self):
@@ -153,7 +178,8 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 worker.preflight({})
 
-    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, data=None, files=None):
+    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, data=None, files=None,
+                     generate_fallback=True):
         config = Configuration.parse(data or specification())
         snapshot = demo_inventory()
         disk = snapshot["disks"][0]
@@ -161,7 +187,7 @@ class WorkerTests(unittest.TestCase):
                    "consent_digest": config.digest(), "password": "private-password"}
         if passphrase:
             request["passphrase"] = passphrase
-        runner, events = FakeRunner(fail_on, config), []
+        runner, events = FakeRunner(fail_on, config, generate_fallback), []
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
             # kbd is part of the base system; the worker checks the console files exist there.
@@ -169,6 +195,9 @@ class WorkerTests(unittest.TestCase):
                          f"consolefonts/{config.effective_console_font()}.psfu.gz"):
                 (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
                 (target / "usr/share/kbd" / name).touch()
+            preset = target / "etc/mkinitcpio.d/linux.preset"
+            preset.parent.mkdir(parents=True, exist_ok=True)
+            preset.write_text("ALL_kver='/boot/vmlinuz-linux'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\n")
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
@@ -193,6 +222,29 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("private-password", json.dumps(calls))
         self.assertEqual(events[-1]["kind"], "installed")
         self.assertEqual(events[-1]["stage"], 7)
+
+    def test_fallback_preset_preserves_stock_settings_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "TARGET", Path(tmp)):
+            preset = Path(tmp) / "etc/mkinitcpio.d/linux.preset"
+            preset.parent.mkdir(parents=True)
+            stock = "ALL_kver='/boot/vmlinuz-linux'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\n"
+            preset.write_text(stock)
+            worker.enable_fallback_initramfs()
+            configured = preset.read_text()
+            worker.enable_fallback_initramfs()
+            self.assertEqual(preset.read_text(), configured)
+            self.assertTrue(configured.startswith(stock))
+            self.assertIn("PRESETS=('default' 'fallback')", configured)
+            self.assertIn("fallback_image='/boot/initramfs-linux-fallback.img'", configured)
+            self.assertIn("fallback_options='-S autodetect'", configured)
+
+    def test_fallback_menu_entry_requires_generated_image(self):
+        files = {}
+        calls, events = self.fake_install(files=files, generate_fallback=False)
+        self.assertTrue(any(c[-2:] == ["mkinitcpio", "-P"] for c in calls))
+        self.assertIn("boot/loader/entries/agi-os.conf", files)
+        self.assertNotIn("boot/loader/entries/agi-os-fallback.conf", files)
+        self.assertNotIn("installed", [event["kind"] for event in events])
 
     def test_no_secret_in_events_commands_or_installed_files(self):
         for fail_on in (None, "pacstrap", "chpasswd"):
@@ -284,7 +336,7 @@ class AcceptanceTests(unittest.TestCase):
                 with patch.object(verify, "command", side_effect=command), \
                      patch.object(verify.socket, "getaddrinfo", return_value=[]):
                     checks = verify.evaluate(record, root / "state", False, root)["checks"]
-                self.assertEqual(checks["Проверка обновлений по расписанию"], enabled == 0)
+                self.assertEqual(checks["Scheduled update checks"], enabled == 0)
 
 
 if __name__ == "__main__":

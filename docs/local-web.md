@@ -59,6 +59,34 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
+   *Alongside* another system (dual boot) on UEFI: with systemd-boot the
+   disk's existing ESP is shared, never formatted — systemd-boot goes to it
+   (`/efi`, with at least 2 MiB free) and lists Windows Boot Manager itself,
+   while the system's own `/boot` becomes an XBOOTLDR partition; GRUB keeps
+   its own ESP and gets a chainload entry for Windows. If the shared ESP
+   already has a fallback `EFI/BOOT/BOOTX64.EFI`, finalization and later
+   AGIOS bootloader updates keep its bytes intact. AGIOS registers its
+   systemd-boot loader in firmware, and keeps the automatic systemd boot-time
+   updater masked on this shared ESP. `sbctl verify` ignores
+   Microsoft's own loaders there. A hibernated Windows
+   (Fast Startup included, detected by `hiberfil.sys`) stops the installation
+   before anything is written; it is also never shrunk or used for a preview
+   file. BitLocker volumes are not shrunk; next to one, the page warns about
+   the recovery key and Secure Boot keys are not enrolled. After the
+   installation the entries of the other system's partitions (start, size,
+   type, UUID) are compared with the ones before.
+   Before that the preview VM is turned off like a computer: *Stop VM* and
+   *Turn off and continue* press its ACPI power button (QMP `system_powerdown`)
+   and wait up to 90 s for the guest to shut down; only a guest that does not
+   (a desktop asking to confirm, a hung system) is stopped hard. Cancelling a
+   build still stops the installer VM at once.
+   The preview is read through `qemu-nbd` with a throwaway qcow2 overlay in
+   `/tmp`: a preview that was not shut down properly (crash, power cut) has its
+   file system journal replayed into the overlay, never into the preview, so the
+   copy sees the consistent tree. A root that still does not mount is reported
+   as "start the preview again, shut it down from its power menu, repeat". A
+   promoted preview that was hibernated instead of shut down gets its swap
+   header rewritten, so the installed system never resumes the stale image.
    Finally missing hardware drivers are completed for the real computer (a
    failure is reported, never hidden), the initramfs is rebuilt, the boot loader is
    registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new
@@ -118,6 +146,19 @@ connect a provider.
   site starts `codex app-server` inside bubblewrap with an ephemeral home, no
   shell tool and a read-only sandbox. The Live image ships no Codex terminal
   entry, Codex configuration or agent instructions for a terminal session.
+- Other providers (CMP-126) use an API key held only in the site's memory:
+  OpenAI, Anthropic (Claude), Google Gemini, any OpenAI-compatible server and
+  Ollama. The dialog lists the provider's models for the entered key
+  (`POST /api/provider/models`, the key is not kept) and the status line names
+  the provider. Plain HTTP is accepted only for Ollama/OpenAI-compatible servers
+  at a loopback, private or link-local IP address (Ollama on another PC at
+  home); everything else needs HTTPS, including 100.64.0.0/10 (carrier-grade
+  NAT; for Tailscale use `tailscale serve` with HTTPS). Live does not run Ollama itself: its whole
+  system lives in memory, a model of several GiB would not fit next to the preview.
+  Sign-in with a Claude or Gemini subscription is deliberately not offered:
+  Anthropic does not allow third-party products to offer claude.ai login unless
+  approved (Agent SDK overview), and Google's Gemini CLI terms forbid using its
+  OAuth sign-in from other software. Only ChatGPT sign-in is built in.
 
 Privileges in Live (`etc/sudoers.d/10-agi-live`): only `agi-web` may use sudo,
 and only for the exact command lines the site runs — the two root helpers,
@@ -240,7 +281,9 @@ The installer adds `agi-os-update` to every installed system:
   `archlinux-keyring`, runs `pacman -Su`, refreshes the bootloader when its
   package changed (`bootctl update`; GRUB is reinstalled exactly as the
   finalization did) and reports `.pacnew` files and whether a reboot is needed.
-  `systemd-boot-update.service` is enabled for systemd-boot as well.
+  `systemd-boot-update.service` is enabled for systemd-boot on its own ESP.
+  On a shared ESP it is masked during finalization; `agi-os-update` preserves
+  the other system's existing fallback loader when it refreshes systemd-boot.
 - Desktops get "AGI OS — Updates" in the menu and a reminder window at login,
   at most once a day while updates wait: the list and one button. The password
   goes only to `sudo -S` on stdin.
@@ -252,7 +295,14 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
 
 ## Limits
 
-- Disks with MBR partition tables: only the explicit whole-disk erase.
+- MBR (msdos) partition tables: `partition_table: "msdos"` (BIOS with GRUB, disks
+  up to 2 TiB) gives an MBR with an active ext4 `/boot` and the root; GRUB's core
+  goes to the gap after the MBR. A disk keeps its table type next to other systems:
+  an MBR disk takes an msdos system, installed by copy (the preview lives in memory
+  or on another medium, no preview partition is made on an MBR disk) into two free
+  primary entries; logical partitions are not created, the backup of the old MBR is
+  `/run/agi-final-<disk>.sfdisk`. A BIOS Windows found there (its `bootmgr`) gets a
+  GRUB chainload entry and keeps the active flag.
 - Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
   hibernation) is refused by `ntfsresize` — shut Windows down fully first.
 - Swap is zram by default. `swap: "hibernate"` adds a swap file `/swap/swapfile`
@@ -264,8 +314,9 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
   F2FS is refused for hibernation. `agi-os-verify` checks the swap file,
   `/sys/power/resume*` and logind `CanHibernate`; `agi-os-verify --hibernate`
   (or the button in the GUI) hibernates once and passes only if the same session
-  comes back from the image: the kernel must not report a rollback and the session
-  must have been stopped for longer than a real power-off and resume take. With
+  comes back from the image: the kernel must not report a rollback and the clocks
+  must show the session stopped for at least 3 s (taking the snapshot alone pauses
+  them for ~0.2 s; a whole power-off and resume on the QEMU stand takes ~10 s). With
   hibernation chosen, acceptance is complete only after that test. In a virtual
   machine the system hibernates with `HibernateMode=shutdown`
   (`/etc/systemd/sleep.conf.d/agi-os-hibernate.conf`): QEMU handles ACPI S4 as a
