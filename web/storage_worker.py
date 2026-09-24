@@ -75,6 +75,33 @@ def sh(args, timeout=120, input_text=None):
     return output
 
 
+NO_TABLE = 'does not contain a recognized partition table'
+
+
+def partition_table(device):
+    """sfdisk's view of a device's partition table, or None when there is none. A blank
+    disk or a fresh preview partition has no table: that is an answer, not a failure,
+    and must not look like one in the journal."""
+    args = ['sfdisk', '--json', device]
+    try:
+        result = subprocess.run(args, text=True, capture_output=True, timeout=120,
+                                env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+    except Exception as exc:
+        LOG.warning('command.failed', f'sfdisk: {type(exc).__name__}', args=args)
+        raise ValidationError('sfdisk could not read the partition table') from exc
+    if result.returncode and NO_TABLE in result.stderr:
+        LOG.debug('table.none', 'No partition table', device=device)
+        return None
+    if result.returncode:
+        LOG.warning('command.failed', f'sfdisk: code {result.returncode}', args=args, stderr=result.stderr)
+        raise ValidationError('sfdisk could not read the partition table')
+    LOG.info('command.done', 'sfdisk', args=args)
+    try:
+        return json.loads(result.stdout)['partitiontable']
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ValidationError('sfdisk returned an unexpected answer') from exc
+
+
 def mem_available():
     for line in Path('/proc/meminfo').read_text().splitlines():
         if line.startswith('MemAvailable:'):
@@ -90,10 +117,10 @@ def free_regions(disk):
             return []  # A filesystem or signature-less data (e.g. a VeraCrypt disk) is user data.
         return [(2048, total - 34)]
     try:
-        table = json.loads(sh(['sfdisk', '--json', disk['path']]))['partitiontable']
-    except (ValidationError, ValueError, KeyError):
+        table = partition_table(disk['path'])
+    except ValidationError:
         return []
-    if table.get('label') != 'gpt':
+    if table is None or table.get('label') != 'gpt':
         return []  # MBR disks: only the explicit whole-disk erase converts them.
     first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
     used = sorted((int(p['start']), int(p['start']) + int(p['size']) - 1) for p in table.get('partitions', []))
@@ -714,8 +741,10 @@ def clear_gap(device):
 def gap_free(device):
     """Nothing of the nested disk (table, entries, partitions) lives in the record area."""
     try:
-        table = json.loads(sh(['sfdisk', '--json', device]))['partitiontable']
-    except (ValidationError, ValueError, KeyError):
+        table = partition_table(device)
+    except ValidationError:
+        table = None
+    if table is None:
         return True  # No nested table yet: the installation has not partitioned the preview.
     if int(table.get('firstlba', 34)) > GAP_START:
         return False

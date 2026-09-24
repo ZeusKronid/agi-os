@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -481,6 +482,152 @@ class FinalizeImageTests(unittest.TestCase):
             (record / 'installation.json').write_text('{}')
             finalize_worker.read_record(Runner(), '/dev/mapper/x', Path(tmp))
         self.assertEqual(calls[0][:3], ['mount', '-o', 'ro,nosuid,nodev,noexec'])
+
+
+
+def completed(args, returncode=0, stdout='', stderr=''):
+    return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+
+class PartitionTableTests(unittest.TestCase):
+    """CMP-149: a device without a partition table is an answer, not a failed command."""
+
+    def ask(self, result):
+        with patch.object(storage_worker.subprocess, 'run', return_value=result) as run, \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            try:
+                return storage_worker.partition_table('/dev/vda'), warning
+            finally:
+                self.assertEqual(run.call_args.args[0], ['sfdisk', '--json', '/dev/vda'])
+                self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
+
+    def test_blank_device_is_none_without_a_warning(self):
+        table, warning = self.ask(completed([], 1, stderr='sfdisk: /dev/vda: does not contain a recognized partition table\n'))
+        self.assertIsNone(table)
+        warning.assert_not_called()
+
+    def test_real_failures_still_warn(self):
+        with self.assertRaises(ValidationError):
+            self.ask(completed([], 1, stderr='sfdisk: cannot open /dev/vda: Permission denied\n'))
+        with patch.object(storage_worker.subprocess, 'run', return_value=completed([], 1, stderr='sfdisk: I/O error')), \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            self.assertTrue(storage_worker.gap_free('/dev/vda'))
+            warning.assert_called_once()
+
+    def test_table_is_parsed(self):
+        table, warning = self.ask(completed([], 0, stdout=json.dumps({'partitiontable': {'label': 'gpt', 'partitions': []}})))
+        self.assertEqual(table['label'], 'gpt')
+        warning.assert_not_called()
+        with self.assertRaises(ValidationError):
+            self.ask(completed([], 0, stdout='not json'))
+
+    def test_fresh_preview_partition_is_free_for_the_record_without_a_warning(self):
+        answer = completed([], 1, stderr='sfdisk: /dev/sdc2: does not contain a recognized partition table\n')
+        with patch.object(storage_worker.subprocess, 'run', return_value=answer), \
+                patch.object(storage_worker.LOG, 'warning') as warning:
+            self.assertTrue(storage_worker.gap_free('/dev/sdc2'))
+        warning.assert_not_called()
+
+
+class DirtyPreviewTests(unittest.TestCase):
+    """CMP-146: a preview that was not shut down properly still finalizes, the preview
+    itself is never written, and what cannot be opened gets a clear way out."""
+
+    class Runner:
+        def __init__(self, fail=()):
+            self.calls, self.fail = [], fail
+
+        def run(self, args, **kw):
+            self.calls.append(args)
+            if args[0] in self.fail:
+                raise ValidationError(f'Ошибка {args[0]} (код 32)\nmount: /mnt/x: cannot mount /dev/nbd0p3 read-only.')
+            if args[0] == 'qemu-img':
+                Path(args[-1]).write_bytes(b'')
+            if args[0] == 'sfdisk':
+                return json.dumps({'partitiontable': {'label': 'gpt', 'partitions': [{'node': '/dev/nbd0p1', 'start': 2048}]}})
+            if args[0] == 'blkid':
+                return 'crypto_LUKS\n'
+            return ''
+
+    def attach(self, image, runner):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
+        source = finalize_worker.Source(runner, image)
+        with patch.object(finalize_worker, 'OVERLAY_DIR', str(tmp)), \
+                patch.object(finalize_worker, 'free_nbd', return_value='/dev/nbd0'):
+            source.attach()
+        return source, tmp
+
+    def test_both_image_kinds_are_read_through_a_throwaway_overlay(self):
+        for image in ({'format': 'raw', 'path': '/dev/sdc2', 'on_target': False},
+                      {'format': 'qcow2', 'path': str(PREVIEW / 'ram/preview.qcow2'), 'on_target': False}):
+            runner = self.Runner()
+            source, tmp = self.attach(image, runner)
+            create = next(c for c in runner.calls if c[0] == 'qemu-img')
+            overlay = create[-1]
+            self.assertEqual(create[create.index('-b') + 1], image['path'])
+            self.assertEqual(create[create.index('-F') + 1], image['format'])
+            self.assertTrue(overlay.startswith(str(tmp) + '/'))
+            connect = next(c for c in runner.calls if c[0] == 'qemu-nbd')
+            # The preview itself is never handed to a writer: only the overlay is.
+            self.assertEqual(connect[-2:], ['/dev/nbd0', overlay])
+            self.assertNotIn(image['path'], connect)
+            self.assertFalse(any(c[0] == 'losetup' for c in runner.calls))
+            self.assertEqual(source.partition(3), '/dev/nbd0p3')
+            with patch.object(finalize_worker.subprocess, 'run') as run, \
+                    patch.object(finalize_worker, 'nbd_server', return_value=None):
+                source.detach()
+            self.assertEqual(run.call_args_list[0].args[0], ['qemu-nbd', '--disconnect', '/dev/nbd0'])
+            self.assertFalse(Path(overlay).parent.exists())
+
+    def test_encrypted_root_opens_writable_over_the_overlay(self):
+        runner = self.Runner()
+        source, _ = self.attach({'format': 'raw', 'path': '/dev/sdc2', 'on_target': False}, runner)
+        device, encrypted = source.open_root(3, 'secret-pass')
+        self.assertTrue(encrypted)
+        self.assertEqual(device, '/dev/mapper/' + finalize_worker.SOURCE_MAP)
+        opened = next(c for c in runner.calls if c[:2] == ['cryptsetup', 'open'])
+        self.assertNotIn('--readonly', opened)
+        self.assertEqual(opened[-2], '/dev/nbd0p3')
+        with patch.object(finalize_worker.subprocess, 'run'), patch.object(finalize_worker, 'nbd_server', return_value=None):
+            source.detach()
+
+    def test_detach_waits_for_the_nbd_server_to_release_the_preview(self):
+        runner = self.Runner()
+        source, _ = self.attach({'format': 'raw', 'path': '/dev/sda2', 'on_target': True}, runner)
+        alive = [True, True, False]
+        with patch.object(finalize_worker.subprocess, 'run'), \
+                patch.object(finalize_worker, 'nbd_server', return_value=4242), \
+                patch.object(finalize_worker.Path, 'exists', side_effect=lambda *a: alive.pop(0) if alive else False), \
+                patch.object(finalize_worker.time, 'sleep') as sleep:
+            source.detach()
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_a_root_that_still_does_not_mount_gets_a_clear_way_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValidationError) as caught:
+                finalize_worker.read_record(self.Runner(fail=('mount',)), '/dev/nbd0p3', Path(tmp))
+        self.assertEqual(str(caught.exception), finalize_worker.UNREADABLE)
+        self.assertIn('shut it down from its power menu', str(caught.exception))
+        self.assertIsNotNone(caught.exception.__cause__)  # the mount error stays in the log
+
+    def swapfile(self, root, signature):
+        path = root / finalize_worker.SWAPFILE
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'\0' * (finalize_worker.PAGE - 10) + signature + b'\0' * 4096)
+        return path
+
+    def test_hibernated_preview_is_not_resumed_after_promotion(self):
+        for signature, discarded in ((b'S1SUSPEND\0', True), (b'LINHIB0001', True), (b'SWAPSPACE2', False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = self.swapfile(root, signature)
+                runner = self.Runner()
+                with patch.object(finalize_worker, 'emit'):
+                    self.assertEqual(finalize_worker.discard_hibernation_image(runner, root), discarded)
+                self.assertEqual(runner.calls, [['mkswap', str(path)]] if discarded else [])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(finalize_worker.discard_hibernation_image(self.Runner(), Path(tmp)))
 
 
 # ---- Fuzzing: mutated requests must be refused cleanly or resolve to allowed devices only ----
