@@ -102,9 +102,9 @@ class Controller:
             raise
         except Exception:
             # Nothing is agreed by a failed turn; the user's message stays for the next one.
-            self.commit(turn, history, None)
+            self.commit(turn, history, None, answered=False)
             raise
-        self.commit(turn, history, None)
+        self.commit(turn, history, None, answered=False)
         raise ValidationError("The proposal needs more detail. Say what to change; nothing has been written to disk.")
 
     ROUNDS = 4
@@ -121,14 +121,16 @@ class Controller:
         self.catalog.validate([*config.packages, *config.effective_fonts()])
         return config
 
-    def commit(self, turn, history, config):
+    def commit(self, turn, history, config, answered=True):
         """Apply a finished turn unless the page cancelled it first (atomic with cancel)."""
         with self.lock:
             if turn.cancelled.is_set():
                 raise Cancelled("The request was cancelled; nothing changed")
             turn.committed = True
             self.history = history
-            self.kept = config is None and self.configuration is not None
+            # "Kept" describes an answer that left the agreement as it was; after an error the
+            # page shows the error, not that note.
+            self.kept = answered and config is None and self.configuration is not None
             if config is not None:
                 self.configuration = config
             self.stage_changed(4 if self.configuration else 2)

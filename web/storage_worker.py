@@ -584,6 +584,12 @@ def new_partition(disk, start, end):
         raise ValidationError('Could not find the created preview partition')
     # Old data under a new entry must not look like a nested table or a preview record.
     sh(['dd', 'if=/dev/zero', f'of={created[0]}', 'bs=1M', 'count=1', 'conv=fsync'], timeout=60)
+    # Nor like half of one: a GPT keeps its backup in the last sectors, and a backup left by an
+    # earlier preview of the same size makes the installer's sgdisk --zap-all fail (code 2).
+    sectors = int(sh(['blockdev', '--getsz', created[0]]).strip())
+    tail = min(sectors, MIB // 512)
+    sh(['dd', 'if=/dev/zero', f'of={created[0]}', 'bs=512', f'seek={sectors - tail}', f'count={tail}', 'conv=fsync'],
+       timeout=60)
     return created[0]
 
 

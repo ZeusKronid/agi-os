@@ -192,7 +192,9 @@
     <button type="button" class="seg" data-kind="chatgpt">ChatGPT</button><button type="button" class="seg" data-kind="openai">OpenAI</button><button type="button" class="seg" data-kind="anthropic">Anthropic</button><button type="button" class="seg" data-kind="gemini">Gemini</button><button type="button" class="seg" data-kind="ollama">Ollama</button><button type="button" class="seg" data-kind="compatible">Other API</button>
   </div>
   <p id="providerNote" class="hint"></p>
-  <label class="field"><span>Model</span><input id="providerModel" autocomplete="off" placeholder="Leave empty to pick one after signing in"></label>
+  <label class="field"><span>Model</span><input id="providerModel" autocomplete="off" list="providerModels" placeholder="Leave empty to pick one after signing in"></label>
+  <datalist id="providerModels"></datalist>
+  <div class="row end" id="listModelsRow"><button type="button" id="listModels" class="btn ghost">List this provider’s models</button></div>
   <label class="field" id="endpointField"><span>API base URL</span><input id="endpoint" autocomplete="off" placeholder="Optional for a standard provider"></label>
   <label class="field" id="keyField"><span>API key</span><input id="key" type="password" autocomplete="off"></label>
   <p id="providerError" class="line error" role="alert" hidden></p>

@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 import sys
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -151,6 +152,51 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(sorted(p.name for p in (root / 'vm').iterdir()), sorted(['web-newest', vm.directory.name]))
         self.assertTrue((restored.directory / 'guest-console.log').exists())  # resuming prunes nothing
 
+    async def test_stop_turns_a_kept_preview_off_and_cancels_a_build_hard(self):
+        # A kept preview is powered off like a computer (a power cut leaves its file systems
+        # dirty); cancelling a build still stops the installer VM at once.
+        state = self.app['state']
+        state.vm = self.fake_vm()({'format': 'raw', 'path': '/dev/vda2'})
+        state.vm.running = True
+        state.disk_ready = True
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['clean'])
+        self.assertEqual((await response.json())['status'], 'VM turned off. The preview is kept')
+        state.vm.running, state.vm.stops = True, []
+        state.build_task = asyncio.ensure_future(asyncio.sleep(3600))
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['hard'])
+        state.vm, state.build_task = None, None
+
+    async def test_runtime_shutdown_presses_the_power_button_then_falls_back(self):
+        import runtime
+        root = Path(self.directory.name)
+        with patch.object(runtime, 'DATA_ROOT', root):
+            vm = runtime.VirtualMachine({'format': 'qcow2', 'path': str(root / 'none.qcow2')})
+        commands = []
+        class Process:
+            def __init__(self, exits):
+                self.returncode, self.exits = None, exits
+            async def wait(self):
+                while not self.exits and self.returncode is None:
+                    await asyncio.sleep(0.01)
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
+        async def qmp(command):
+            commands.append(command)
+        vm.qmp = qmp
+        vm.process = Process(exits=True)
+        self.assertTrue(await vm.shutdown(timeout=1))
+        self.assertEqual((commands, vm.process.returncode), (['system_powerdown'], 0))
+        vm.process = Process(exits=False)  # a desktop asks to confirm; nobody answers
+        self.assertFalse(await vm.shutdown(timeout=0.05))
+        self.assertEqual(vm.process.returncode, -15)
+
     async def test_runtime_refuses_to_start_outside_live(self):
         import runtime
         with patch.object(runtime, 'DATA_ROOT', Path(self.directory.name)), \
@@ -176,6 +222,28 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(seen, [None, 'https://auth.openai.com/oauth/authorize?state=x'])
         self.assertIsNone((await response.json())['login_url'])
+
+    async def test_provider_models_are_listed_without_keeping_the_key(self):
+        """CMP-126: the page offers the provider's models instead of a typed id."""
+        seen = []
+        def models(provider):
+            seen.append((provider.kind, provider.endpoint, provider.key))
+            return ['b-model', 'a-model', 'b-model']
+        with patch.object(server.APIProvider, 'models', models):
+            response = await self.request('/api/provider/models', {'kind': 'anthropic', 'key': 'sk-test'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['models'], ['a-model', 'b-model'])
+        self.assertEqual(seen, [('anthropic', 'https://api.anthropic.com/v1', 'sk-test')])
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'chatgpt'})).status, 400)
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'ollama', 'endpoint': 'http://8.8.8.8'})).status, 400)
+
+    async def test_status_names_the_connected_provider(self):
+        state = self.app['state']
+        api = server.APIProvider('ollama', 'http://127.0.0.1:11434')
+        api.model = 'llama3'
+        import provider as live
+        state.provider = live.LiveProvider(api)
+        self.assertEqual(state.public()['provider'], 'Ollama — local model')
 
     async def test_foreign_origin_cannot_start_vm(self):
         response = await self.request('/api/build', {}, {'Origin': 'https://example.org'})
@@ -212,7 +280,13 @@ class LocalApiTests(AioHTTPTestCase):
                 assert hardware is not None and 'gpus' in hardware  # the real computer's inventory reaches the guest
                 notify({'kind': 'progress', 'text': 'Installing'})
                 notify({'kind': 'installed', 'text': 'Installed'})
-            async def stop(self): self.running = False
+            async def stop(self):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['hard']
+            async def shutdown(self, timeout=90):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['clean']
+                return True
         return VM
 
     async def test_successful_build_enables_finalize_and_revert(self):
@@ -254,6 +328,8 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertFalse(state.disk_ready)
         self.assertFalse(state.public()['can_resume'])
         self.assertTrue(state.public()['can_revert'])
+        # The put-back dialog of an unfinished build describes the chosen storage's undo.
+        self.assertEqual(state.public()['preview_revert'], option['revert'])
 
     async def test_failed_file_check_goes_back_to_the_model(self):
         state = self.app['state']
