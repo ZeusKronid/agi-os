@@ -20,7 +20,7 @@ OVMF = Path('/usr/share/edk2/x64')
 BOOTMNT = Path('/run/archiso/bootmnt')
 # The guest's journal lives in its RAM; forwarding it to the serial console keeps
 # the installer's own log in guest-console.log on the Live side.
-GUEST_OPTIONS = 'agios.guest systemd.unit=multi-user.target systemd.journald.forward_to_console=1'
+GUEST_OPTIONS = 'agios.guest copytoram=n systemd.unit=multi-user.target systemd.journald.forward_to_console=1'
 
 
 def available_port():

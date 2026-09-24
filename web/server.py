@@ -27,7 +27,7 @@ from journal import Logger, new_operation, operation as current_operation
 import diagnostics
 
 from provider import LiveProvider, connect_chatgpt
-from system import live_environment
+from system import copied_to_ram, live_environment
 from deployment import consent as consent_binding, target_inventory
 import preview_record
 import release
@@ -1040,14 +1040,68 @@ def application(port=8787, guacd_port=14822):
     return app
 
 
+RAM_BOOT_ERROR = ('AGIOS was copied into memory at boot (copytoram), so the USB stick is no longer '
+                  'mounted. The preview and the install run from the stick: restart and boot the '
+                  '“AGI OS live” entry without extra options.')
+RAM_BOOT_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AGIOS — restart needed</title>
+<style>
+@font-face { font-family: Newsreader; src: url(/fonts/Newsreader.ttf); }
+@font-face { font-family: Geist; src: url(/fonts/Geist.ttf); }
+@font-face { font-family: 'Geist Mono'; src: url(/fonts/GeistMono.ttf); }
+html, body { margin: 0; min-height: 100%; background: #0b0908; color: #f6f2ec; }
+main { max-width: 620px; margin: 0 auto; padding: 22vh 24px 48px; font: 16px/1.6 Geist, sans-serif; }
+.caps { font: 12px 'Geist Mono', monospace; letter-spacing: .36em; text-transform: uppercase; color: #8f887e; }
+h1 { font: 400 clamp(34px, 5vw, 52px)/1.05 Newsreader, Georgia, serif; letter-spacing: -.024em; margin: 14px 0 20px; }
+em { color: #ff6a3d; }
+p, li { color: #d9d2c7; }
+ol { padding-left: 1.2em; }
+code { font: 14px 'Geist Mono', monospace; color: #f6f2ec; background: #1f1a16; padding: 1px 6px; border-radius: 4px; }
+</style></head><body><main>
+<span class="caps">Restart needed</span>
+<h1>Boot AGIOS <em>from the stick</em></h1>
+<p>AGIOS was copied into memory at boot, so the USB stick is no longer in use. The preview
+and the install run from the stick, so they cannot start in this mode.</p>
+<ol>
+<li>Keep the USB stick plugged in.</li>
+<li>Restart the computer and boot from the stick again.</li>
+<li>Choose <b>AGI OS live</b> in the boot menu without adding options. If you added
+<code>copytoram</code> yourself, leave it out.</li>
+</ol>
+</main></body></html>
+"""
+
+
+def ram_boot_application(port=8787):
+    """The Live booted into memory: serve one page that says how to boot again, not no page at all."""
+    async def page(request):
+        return web.Response(text=RAM_BOOT_PAGE, content_type='text/html')
+
+    async def state(request):
+        return web.json_response({'phase': 'unsupported', 'error': RAM_BOOT_ERROR})
+
+    app = web.Application(middlewares=[local_only])
+    app['hosts'] = {f'localhost:{port}', f'127.0.0.1:{port}'}
+    app.router.add_get('/api/state', state)
+    app.router.add_get('/', page)
+    if FONTS.is_dir():
+        app.router.add_static('/fonts', FONTS)
+    return app
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--guacd-port', type=int, default=14822)
     args = parser.parse_args()
-    if not live_environment():
+    in_memory = copied_to_ram()
+    if not live_environment() and not in_memory:
         parser.error('The AGIOS website runs inside the booted Live environment. To test, boot the Live ISO in QEMU.')
     os.umask(0o077)
     log.info('site.start', 'AGIOS website started', port=args.port,
              revision=((ROOT / 'source-revision').read_text().strip() if (ROOT / 'source-revision').exists() else None))
-    web.run_app(application(args.port, args.guacd_port), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5)
+    if in_memory:
+        log.warning('site.ram_boot', RAM_BOOT_ERROR)
+    app = ram_boot_application(args.port) if in_memory else application(args.port, args.guacd_port)
+    web.run_app(app, host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5)

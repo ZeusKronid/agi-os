@@ -66,8 +66,10 @@ def qemu_command(iso, firmware, memory, cpus, workdir):
                '-device', 'virtserialport,chardev=qa,name=org.agi-os.qa',
                '-drive', f'file={scratch},format=qcow2,if=none,id=target',
                '-device', 'virtio-blk-pci,drive=target,serial=AGIOS_TARGET',
-               '-drive', f'file={iso},media=cdrom,readonly=on,if=none,id=live',
-               '-device', 'ide-cd,drive=live,bootindex=1']
+               # A USB stick, as people boot it: archiso's copytoram=auto skips optical media,
+               # so booting a CD-ROM here would hide a Live that unmounts its boot medium.
+               '-drive', f'file={iso},format=raw,readonly=on,if=none,id=live',
+               '-device', 'qemu-xhci', '-device', 'usb-storage,drive=live,bootindex=1']
     if firmware == 'uefi':
         code, variables = ovmf()
         shutil.copyfile(variables, workdir / 'OVMF_VARS.fd')
