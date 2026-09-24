@@ -24,6 +24,8 @@ from domain import (GIB, SWAPFILE, Configuration, ValidationError, console_font_
                     hibernation_swap_size, system_path_allowed)
 from hardware import driver_plan, initramfs_config, profile, virtual
 from journal import Logger
+import layout
+from layout import CRYPT_NAME, partition_path
 from system import Catalog, inventory, live_environment, selected_disk
 import update
 
@@ -31,7 +33,6 @@ import update
 TARGET = Path("/mnt/agi-os")
 HERE = Path(__file__).resolve().parent
 BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python", "zram-generator")
-CRYPT_NAME = "cryptroot"
 LOG = Logger("worker")
 
 
@@ -90,10 +91,6 @@ class Runner:
             detail = "" if input_text is not None else output[-2500:]
             raise ValidationError(f"Ошибка {args[0]} (код {proc.returncode})\n{detail}")
         return output
-
-
-def partition_path(disk, number):
-    return disk + ("p" if disk[-1].isdigit() else "") + str(number)
 
 
 SBCTL_EFI = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
@@ -380,40 +377,27 @@ def install(request, runner):
         raise Cancelled("Остановлено до изменения диска")
 
     firmware = snapshot["firmware"]
-    boot_number, root_number = (1, 2) if firmware == "uefi" else (2, 3)
-    boot = partition_path(config.disk, boot_number)
-    root_partition = partition_path(config.disk, root_number)
     passphrase = request.pop("passphrase", "")
     encrypted = bool(passphrase)
-    root = "/dev/mapper/" + CRYPT_NAME if encrypted else root_partition
+    plan = layout.plan_for(config, firmware, encrypted)
+    boot = plan.path(config.disk, "boot")
+    root_partition = plan.path(config.disk, "root")
     TARGET.mkdir(parents=True, exist_ok=True)
     mounted = False
     try:
         emit("progress", stage=5, text="Создаю согласованные разделы на " + config.disk)
-        runner.run(["sgdisk", "--zap-all", config.disk])
-        args = ["sgdisk"]
-        if firmware == "bios":
-            args += ["--new=1:0:+2M", "--typecode=1:ef02", "--change-name=1:BIOS"]
-        args += [f"--new={boot_number}:0:+1G", f"--typecode={boot_number}:" + ("ef00" if firmware == "uefi" else "8300"),
-                 f"--change-name={boot_number}:AGI-BOOT", f"--new={root_number}:0:0",
-                 f"--typecode={root_number}:8300", f"--change-name={root_number}:AGI-ROOT", config.disk]
-        runner.run(args)
+        for command in layout.table_commands(plan, config.disk):
+            runner.run(command)
         runner.run(["partprobe", config.disk])
         runner.run(["udevadm", "settle", "--timeout=30"])
-        runner.run(["mkfs.fat", "-F", "32", boot] if firmware == "uefi" else ["mkfs.ext4", "-F", boot])
+        layout.format_boot(runner, plan, boot)
         if encrypted:
             emit("progress", stage=5, text="Шифрую корневой раздел (LUKS2)…")
-            # The passphrase travels only over stdin; a trailing newline would become part of the key.
-            runner.run(["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-",
-                        root_partition], input_text=passphrase)
-            runner.run(["cryptsetup", "open", "--key-file", "-", root_partition, CRYPT_NAME], input_text=passphrase)
+        root = layout.create_root(runner, plan, root_partition, passphrase)
         passphrase = None
-        force = {"ext4": "-F", "btrfs": "-f", "xfs": "-f", "f2fs": "-f"}[config.filesystem]
-        runner.run(["mkfs." + config.filesystem, force, root])
-        runner.run(["mount", root, str(TARGET)])
+        layout.mount_root(runner, plan, root, TARGET)
         mounted = True
-        (TARGET / "boot").mkdir()
-        runner.run(["mount", boot, str(TARGET / "boot")])
+        layout.mount_boot(runner, plan, boot, TARGET)
         emit("progress", stage=5, text="Устанавливаю базовую систему…")
         # Install in batches and drop the download cache between them: the preview
         # image may live in memory, so its peak size must stay close to the installed size.
