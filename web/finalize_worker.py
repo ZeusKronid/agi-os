@@ -149,6 +149,7 @@ class Source:
     def __init__(self, runner, image):
         self.runner, self.image = runner, image
         self.device = None
+        self.label = None
         self.nbd = None
         self.scratch = None
         self.opened = False
@@ -168,8 +169,9 @@ class Source:
         self.runner.run(['partprobe', self.nbd])
         self.runner.run(['udevadm', 'settle', '--timeout=30'])
         table = run_json(self.runner, ['sfdisk', '--json', self.device])['partitiontable']
-        if table.get('label') != 'gpt' or not table.get('partitions'):
+        if table.get('label') not in ('gpt', 'dos') or not table.get('partitions'):
             raise ValidationError('The preview has no expected partition table')
+        self.label = table['label']
         self.partitions = table['partitions']
         return self
 
@@ -235,14 +237,18 @@ def check_record(record, config, firmware, encrypted):
         raise ValidationError('The encryption state does not match the installation record')
 
 
-def prepare_table(runner, layout, disk):
-    """The target's partition table before the copy: a fresh GPT for "erase"; for
-    "alongside" the existing GPT (backed up first). A brand-new disk has no table at
-    all: with nothing on it to keep, it gets an empty GPT instead of an error."""
+def prepare_table(runner, layout, disk, table='gpt'):
+    """The target's partition table before the copy: a fresh GPT (or MBR for an msdos
+    plan) for "erase"; for "alongside" the existing GPT (backed up first). A brand-new
+    disk has no table at all: with nothing on it to keep, it gets an empty GPT instead
+    of an error."""
     target = disk['path']
     if layout == 'erase':
         runner.run(['sgdisk', '--zap-all', target])
-        runner.run(['sgdisk', '--clear', target])
+        if table == 'msdos':
+            runner.run(['sfdisk', '--wipe', 'always', target], input_text='label: dos\n')
+        else:
+            runner.run(['sgdisk', '--clear', target])
         return
     if not disk.get('pttype'):
         if disk.get('fstype') or not storage_worker.looks_blank(target):
@@ -254,10 +260,14 @@ def prepare_table(runner, layout, disk):
 
 def free_regions(runner, disk_path, size):
     table = run_json(runner, ['sfdisk', '--json', disk_path])['partitiontable']
-    if table.get('label') != 'gpt':
-        raise ValidationError('Installing alongside other systems needs a GPT disk')
     total = size // SECTOR
-    first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
+    if table.get('label') == 'dos':
+        # MBR sectors are 32-bit; the first partition starts after GRUB's 1 MiB gap.
+        first, last = ALIGN, min(total, layout.MBR_SECTORS) - 1
+    elif table.get('label') != 'gpt':
+        raise ValidationError('Installing alongside other systems needs a GPT disk')
+    else:
+        first, last = int(table.get('firstlba', 2048)), int(table.get('lastlba', total - 34))
     used = sorted((int(p['start']), int(p['start']) + int(p['size']) - 1) for p in table.get('partitions', []))
     regions, cursor = [], first
     for start, end in used:
@@ -347,6 +357,8 @@ def promote(runner, request, disk, source, plan):
     for part in nested:
         if int(part['start']) % ALIGN:
             raise ValidationError('The preview partitions are not aligned; they can’t be promoted')
+    if plan.table == 'msdos':
+        return promote_mbr(runner, request, disk, source, plan, base, nested)
     emit('final-progress', text='Promoting the preview partitions to disk partitions (no data moves)')
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
     if request['layout'] == 'erase':
@@ -379,14 +391,66 @@ def promote(runner, request, disk, source, plan):
     return node('boot'), node('linux'), False
 
 
+def promote_mbr(runner, request, disk, source, plan, base, nested):
+    """The preview's MBR entries become the disk's new MBR at the same absolute sectors.
+    The disk's own table was a GPT holding the preview partition; only a whole-disk
+    install converts it (next to other systems the disk keeps its table type)."""
+    target = disk['path']
+    if request['layout'] != 'erase' or source.label != 'dos':
+        raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
+    roles = {p.number: p.role for p in plan.partitions}
+    absolute = []
+    for part in nested:
+        start, size = base + int(part['start']), int(part['size'])
+        if start + size > layout.MBR_SECTORS:
+            raise ValidationError('An MBR (msdos) table covers only the first 2 TiB of the disk; choose GPT')
+        role = roles.get(int(part['node'][len(source.device):].lstrip('p')))
+        if role is None:
+            raise ValidationError('The preview holds an unexpected partition')
+        absolute.append((role, start, size))
+    emit('final-progress', text='Promoting the preview partitions to an MBR partition table (no data moves)')
+    runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    runner.run(['sgdisk', '--zap-all', target])
+    # The new entries lie over the preview's file systems: sfdisk must not wipe them.
+    runner.run(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'never', '--label', 'dos', target],
+               input_text=layout.mbr_script([(start, size, layout.MBR_LINUX, role == 'boot')
+                                             for role, start, size in absolute]))
+    # The preview's own MBR sits in the gap before its first partition now.
+    head = min(int(p['start']) for p in nested)
+    runner.run(['dd', 'if=/dev/zero', f'of={target}', 'bs=512', f'seek={base}', f'count={head}', 'conv=notrunc,fsync'])
+    runner.run(['partprobe', target])
+    runner.run(['udevadm', 'settle', '--timeout=30'])
+    refreshed = run_json(runner, ['sfdisk', '--json', target])['partitiontable']['partitions']
+    def node(role):
+        start = next(s for r, s, _ in absolute if r == role)
+        return next(p['node'] for p in refreshed if int(p['start']) == start)
+    return node('boot'), node('root'), False
+
+
+def gpt_partitions(runner, plan, target, start, end):
+    """The plan's GPT entries in the free region start..end; returns where /boot starts and ends."""
+    args = ['sgdisk']
+    if plan.firmware == 'bios':
+        bios = plan.part('bios')
+        args += [f'--new=0:{start}:{start + 4095}', f'--typecode=0:{bios.typecode}', f'--change-name=0:{bios.name}']
+        start += 4096
+    boot_part, root_part = plan.part('boot'), plan.part('root')
+    boot_end = start + boot_part.size // SECTOR - 1
+    args += [f'--new=0:{start}:{boot_end}', f'--typecode=0:{boot_part.typecode}', f'--change-name=0:{boot_part.name}',
+             f'--new=0:{boot_end + 1}:{end}', f'--typecode=0:{root_part.typecode}', f'--change-name=0:{root_part.name}', target]
+    runner.run(args)
+    return start, boot_end
+
+
 def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserve=0):
     """Create fresh partitions on the target and copy the preview into them file by file.
 
     Paths in skip (root-relative, e.g. the hibernation swap file) are recreated by the
     caller: a copied swap file would sit at other physical blocks than resume_offset says.
     reserve is the space the caller needs for them on the new root."""
+    if plan.table == 'msdos' and request['layout'] != 'erase':
+        raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
     target = disk['path']
-    firmware = plan.firmware
     boot_number = plan.part('boot').number
     src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
@@ -398,21 +462,19 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     used = int(runner.run(['du', '-sxB1', *skipped, str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
     needed = used + used // 5 + 2 * GIB + reserve
     emit('final-progress', text=f'Creating partitions on {target} for {used / GIB:.1f} GiB of data')
-    prepare_table(runner, request['layout'], disk)
+    prepare_table(runner, request['layout'], disk, plan.table)
     regions = [r for r in free_regions(runner, target, disk['size']) if (r[1] - r[0] + 1) * SECTOR >= needed]
     if not regions:
         raise ValidationError(f'The disk has no free space for the system ({needed / GIB:.1f} GiB)')
     start, end = max(regions, key=lambda r: r[1] - r[0])
-    args = ['sgdisk']
-    if firmware == 'bios':
-        bios = plan.part('bios')
-        args += [f'--new=0:{start}:{start + 4095}', f'--typecode=0:{bios.typecode}', f'--change-name=0:{bios.name}']
-        start += 4096
-    boot_part, root_part = plan.part('boot'), plan.part('root')
-    boot_end = start + boot_part.size // SECTOR - 1
-    args += [f'--new=0:{start}:{boot_end}', f'--typecode=0:{boot_part.typecode}', f'--change-name=0:{boot_part.name}',
-             f'--new=0:{boot_end + 1}:{end}', f'--typecode=0:{root_part.typecode}', f'--change-name=0:{root_part.name}', target]
-    runner.run(args)
+    if plan.table == 'msdos':
+        boot_part, root_part = plan.part('boot'), plan.part('root')
+        boot_end = start + boot_part.size // SECTOR - 1
+        runner.run(['sfdisk', '--append', '--wipe-partitions', 'never', target], input_text=layout.mbr_script(
+            [(start, boot_part.size // SECTOR, boot_part.typecode, True),
+             (boot_end + 1, end - boot_end, root_part.typecode, False)]))
+    else:
+        start, boot_end = gpt_partitions(runner, plan, target, start, end)
     runner.run(['partprobe', target])
     runner.run(['udevadm', 'settle', '--timeout=30'])
     refreshed = run_json(runner, ['sfdisk', '--json', target])['partitiontable']['partitions']
@@ -602,6 +664,10 @@ def finalize(request, runner):
     target = config.disk
     firmware = live_firmware()
     plan = layout.plan_for(config, firmware)
+    if plan.table == 'msdos':
+        if request['layout'] != 'erase':
+            raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
+        layout.check_mbr_size(disk['size'])
     passphrase = request.pop('passphrase')
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])

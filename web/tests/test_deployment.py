@@ -144,6 +144,101 @@ class PromoteTests(unittest.TestCase):
         self.assertIn('count=2048', zeroing[0])
 
 
+def dos(partitions):
+    return json.dumps({'partitiontable': {'label': 'dos', 'partitions': partitions}})
+
+
+def mbr_plan():
+    return finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4', partition_table='msdos', bootloader='grub'), 'bios')
+
+
+class MbrFinalizeTests(unittest.TestCase):
+    """CMP-152: an msdos preview becomes the disk's MBR."""
+
+    def test_promote_writes_an_mbr_over_the_same_sectors_without_wiping_them(self):
+        calls, inputs = [], []
+        base = 2048
+        outer = gpt([{'node': '/dev/vda1', 'start': base, 'size': 20 * GIB // 512, 'name': 'AGIOS-PREVIEW'}], 64 * GIB)
+        nested = [{'node': '/dev/loop0p1', 'start': 2048, 'size': GIB // 512},
+                  {'node': '/dev/loop0p2', 'start': 2048 + GIB // 512, 'size': 18 * GIB // 512}]
+        boot_start, root_start = base + 2048, base + 2048 + GIB // 512
+        refreshed = dos([{'node': '/dev/vda1', 'start': boot_start, 'size': GIB // 512},
+                         {'node': '/dev/vda2', 'start': root_start, 'size': 18 * GIB // 512}])
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args); inputs.append(input_text)
+                if args[:2] == ['sfdisk', '--json']:
+                    return outer if len([c for c in calls if c[:2] == ['sfdisk', '--json']]) == 1 else refreshed
+                return ''
+        class Source:
+            partitions, device, label = nested, '/dev/loop0', 'dos'
+        request = {'image': {'format': 'raw', 'path': '/dev/vda1'}, 'layout': 'erase'}
+        with patch.object(finalize_worker, 'emit'):
+            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(), mbr_plan())
+        self.assertEqual((boot, root), ('/dev/vda1', '/dev/vda2'))
+        write = calls.index(['sfdisk', '--wipe', 'always', '--wipe-partitions', 'never', '--label', 'dos', '/dev/vda'])
+        self.assertEqual(inputs[write], f'start={boot_start}, size={GIB // 512}, type=83, bootable\n'
+                                        f'start={root_start}, size={18 * GIB // 512}, type=83\n')
+        self.assertLess(calls.index(['sgdisk', '--zap-all', '/dev/vda']), write)
+        zeroing = [c for c in calls if c[0] == 'dd']
+        self.assertEqual(len(zeroing), 1)  # No GPT backup at the end of an MBR preview: its root runs there.
+        self.assertIn(f'seek={base}', zeroing[0])
+
+    def test_promote_refuses_alongside_and_beyond_2_tib(self):
+        nested = [{'node': '/dev/loop0p1', 'start': 2048, 'size': GIB // 512},
+                  {'node': '/dev/loop0p2', 'start': 2048 + GIB // 512, 'size': 18 * GIB // 512}]
+        class Source:
+            partitions, device, label = nested, '/dev/loop0', 'dos'
+        for layout_name, base in (('alongside', 2048), ('erase', 2**32 - 4096)):
+            calls = []
+            outer = gpt([{'node': '/dev/vda1', 'start': base, 'size': 20 * GIB // 512, 'name': 'AGIOS-PREVIEW'}], 4096 * GIB)
+            class Runner:
+                def run(self, args, input_text=None, **kw):
+                    calls.append(args)
+                    return outer if args[:2] == ['sfdisk', '--json'] else ''
+            with self.subTest(layout=layout_name), patch.object(finalize_worker, 'emit'), self.assertRaises(ValidationError):
+                finalize_worker.promote(Runner(), {'image': {'path': '/dev/vda1'}, 'layout': layout_name},
+                                        {'path': '/dev/vda'}, Source(), mbr_plan())
+            self.assertEqual([c for c in calls if c[0] != 'sfdisk'], [])  # Refused before any write.
+
+    def test_copy_creates_an_mbr_with_an_active_boot_partition(self):
+        calls, inputs = [], []
+        empty = dos([])
+        refreshed = dos([{'node': '/dev/sda1', 'start': 2048, 'size': GIB // 512},
+                         {'node': '/dev/sda2', 'start': 2048 + GIB // 512, 'size': 40 * GIB // 512}])
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args); inputs.append(input_text)
+                if args[0] == 'du':
+                    return f'{4 * GIB}\t/x\n'
+                if args[:2] == ['sfdisk', '--json']:
+                    return empty if len([c for c in calls if c[:2] == ['sfdisk', '--json']]) == 1 else refreshed
+                if args[0] == 'blkid':
+                    return 'ext4\n'
+                return ''
+        class Source:
+            mount = None
+            def open_root(self, number, passphrase):
+                return '/dev/nbd0p2', False
+            def partition(self, number):
+                return f'/dev/nbd0p{number}'
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'):
+            boot, root_partition, *_ = finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/sda', 'size': 64 * GIB},
+                                                            Source(), mbr_plan(), '', Path(tmp))
+        self.assertEqual((boot, root_partition), ('/dev/sda1', '/dev/sda2'))
+        label = calls.index(['sfdisk', '--wipe', 'always', '/dev/sda'])
+        self.assertEqual(inputs[label], 'label: dos\n')
+        append = calls.index(['sfdisk', '--append', '--wipe-partitions', 'never', '/dev/sda'])
+        last = 64 * GIB // 512 - 1
+        self.assertEqual(inputs[append], f'start=2048, size={GIB // 512}, type=83, bootable\n'
+                                         f'start={2048 + GIB // 512}, size={last - (2048 + GIB // 512) + 1}, type=83\n')
+        self.assertIn(['mkfs.ext4', '-F', '/dev/sda1'], calls)
+        with self.assertRaises(ValidationError):
+            finalize_worker.copy(Runner(), {'layout': 'alongside'}, {'path': '/dev/sda', 'size': 64 * GIB},
+                                 Source(), mbr_plan(), '', Path('/nonexistent-agios-test'))
+
+
 class HibernationTests(unittest.TestCase):
     def test_reserved_swap_file_costs_no_memory_but_needs_disk(self):
         snapshot = demo_inventory()
