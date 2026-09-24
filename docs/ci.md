@@ -113,8 +113,9 @@ download page; the Live does not download or apply anything itself.
 ## Releases
 
 Pushing a tag `v*` runs the whole pipeline and then publishes a GitHub release
-named after the tag with the ISO, its `.sha256` and `build-info.json`; the notes
-come from `scripts/ci/changelog.sh` (build facts and the commits since the previous
-`v*` tag). GitHub release assets must be smaller than 2 GiB; the build fails
-early if the ISO grows past that. Signing the ISO and the checksum is tracked
-separately (CMP-125) and is not part of this pipeline yet.
+named after the tag with the ISO, its `.sha256`, `build-info.json`, `SHA256SUMS`,
+detached signatures, and the public signing key. The notes come from
+`scripts/ci/changelog.sh` (build facts and the commits since the previous `v*`
+tag). The release job verifies the checksum and signatures before publication.
+GitHub release assets must be smaller than 2 GiB; the build fails early if the
+ISO grows past that. See [Download and verify](download.md) for the fingerprint.
