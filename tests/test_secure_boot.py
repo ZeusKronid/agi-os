@@ -82,6 +82,9 @@ class WorkerSigningTests(unittest.TestCase):
                          f"consolefonts/{config.effective_console_font()}.psfu.gz"):
                 (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
                 (target / "usr/share/kbd" / name).touch()
+            preset = target / "etc/mkinitcpio.d/linux.preset"
+            preset.parent.mkdir(parents=True, exist_ok=True)
+            preset.write_text("ALL_kver='/boot/vmlinuz-linux'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\n")
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \

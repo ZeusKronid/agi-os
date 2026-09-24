@@ -726,6 +726,7 @@ function pickProvider(kind) {
     $('endpointField').hidden = kind === 'chatgpt';
     $('providerNote').textContent = PROVIDER_NOTES[kind] || 'The key stays in memory on this computer and never enters the chat. API usage may be billed separately.';
     $('providerSubmit').textContent = kind === 'chatgpt' ? 'Sign in to ChatGPT' : 'Connect';
+    $('providerModel').placeholder = kind === 'chatgpt' ? 'Leave empty to pick one after signing in' : 'Pick a model from the list or type its ID';
     $('listModelsRow').hidden = kind === 'chatgpt';
     $('providerModels').replaceChildren();
     $('providerError').hidden = true;

@@ -403,6 +403,20 @@ def close_group(group):
         raise ValidationError("Could not deactivate the LVM volume group " + group + " after installing.")
 
 
+def enable_fallback_initramfs():
+    """Keep the kernel package preset, but build its hardware-independent image too."""
+    preset = TARGET / "etc/mkinitcpio.d/linux.preset"
+    if not preset.is_file():
+        raise ValidationError("The Linux kernel initramfs preset is missing")
+    original = preset.read_text()
+    marker = "# AGI OS fallback initramfs"
+    if marker not in original:
+        preset.write_text(original.rstrip() + "\n\n" + marker + "\n"
+                          "PRESETS=('default' 'fallback')\n"
+                          "fallback_image='/boot/initramfs-linux-fallback.img'\n"
+                          "fallback_options='-S autodetect'\n")
+
+
 def install(request, runner):
     config, snapshot, disk = preflight(request)
     hardware = request.get("hardware") or snapshot["hardware"]
@@ -541,6 +555,7 @@ def install(request, runner):
                 raise ValidationError("The graphical session is not installed: " + config.session)
             if not (TARGET / "etc/systemd/system/display-manager.service").is_symlink():
                 raise ValidationError("No display manager is enabled for the graphical session")
+        enable_fallback_initramfs()
         runner.run([*chroot, "mkinitcpio", "-P"])
         if config.bootloader == "grub":
             if encrypted or resume:
@@ -567,6 +582,9 @@ def install(request, runner):
                        f"initrd /initramfs-linux.img\noptions {options}\n")
             # The fallback image carries every module: it boots the same disk on other hardware
             # (for example the preview VM after the initramfs is rebuilt for the real computer).
+            fallback = TARGET / "boot/initramfs-linux-fallback.img"
+            if not fallback.is_file() or not fallback.stat().st_size:
+                raise ValidationError("The fallback initramfs was not generated")
             write_file("boot/loader/entries/agi-os-fallback.conf", "title AGI OS (fallback initramfs)\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux-fallback.img\noptions {options}\n")
 
