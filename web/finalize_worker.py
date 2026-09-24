@@ -24,12 +24,14 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from dataclasses import replace
 
 from settings import ENGINE
 sys.path.insert(0, str(ENGINE))
 from domain import SWAPFILE, Configuration, ValidationError, hibernation_swap_size
 from hardware import SETUP_MODE_VAR, driver_plan, efi_flag, initramfs_config, profile
 from journal import Logger, adopt
+import layout
 from system import inventory, live_environment, selected_disk
 from worker import (CRYPT_NAME, Cancelled, Runner, boot_options, create_swapfile, emit, grub_defaults,
                     partition_path, resume_parameter, sbctl_unsigned, swap_fstab_line)
@@ -41,7 +43,7 @@ GIB = 2**30
 ALIGN = 2048
 SOURCE_MAP = 'agi-final-source'
 TARGET_MAP = 'agi-final-target'
-TYPES = {'bios': 'ef02', 'boot': 'ef00', 'linux': '8300'}
+TYPES = {'bios': layout.BIOS_BOOT, 'boot': layout.ESP, 'linux': layout.LINUX}
 # The preview's filesystems were written by the preview VM: read them without trusting
 # setuid bits, device nodes or executables on the Live host.
 SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
@@ -256,16 +258,16 @@ def promote(runner, request, disk, source, firmware):
     return node('boot'), node('linux'), False
 
 
-def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), reserve=0):
+def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserve=0):
     """Create fresh partitions on the target and copy the preview into them file by file.
 
     Paths in skip (root-relative, e.g. the hibernation swap file) are recreated by the
     caller: a copied swap file would sit at other physical blocks than resume_offset says.
     reserve is the space the caller needs for them on the new root."""
     target = disk['path']
-    boot_number = 1 if firmware == 'uefi' else 2
-    root_number = boot_number + 1
-    src_root, encrypted = source.open_root(root_number, passphrase)
+    firmware = plan.firmware
+    boot_number = plan.part('boot').number
+    src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
     runner.run(['mount', '-o', SOURCE_MOUNT, src_root, str(src_mount)])
@@ -282,11 +284,13 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     start, end = max(regions, key=lambda r: r[1] - r[0])
     args = ['sgdisk']
     if firmware == 'bios':
-        args += [f'--new=0:{start}:{start + 4095}', '--typecode=0:ef02', '--change-name=0:BIOS']
+        bios = plan.part('bios')
+        args += [f'--new=0:{start}:{start + 4095}', f'--typecode=0:{bios.typecode}', f'--change-name=0:{bios.name}']
         start += 4096
-    boot_end = start + GIB // SECTOR - 1
-    args += [f'--new=0:{start}:{boot_end}', '--typecode=0:' + ('ef00' if firmware == 'uefi' else '8300'), '--change-name=0:AGI-BOOT',
-             f'--new=0:{boot_end + 1}:{end}', '--typecode=0:8300', '--change-name=0:AGI-ROOT', target]
+    boot_part, root_part = plan.part('boot'), plan.part('root')
+    boot_end = start + boot_part.size // SECTOR - 1
+    args += [f'--new=0:{start}:{boot_end}', f'--typecode=0:{boot_part.typecode}', f'--change-name=0:{boot_part.name}',
+             f'--new=0:{boot_end + 1}:{end}', f'--typecode=0:{root_part.typecode}', f'--change-name=0:{root_part.name}', target]
     runner.run(args)
     runner.run(['partprobe', target])
     runner.run(['udevadm', 'settle', '--timeout=30'])
@@ -294,20 +298,16 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     boot = next(p['node'] for p in refreshed if int(p['start']) == start)
     root_partition = next(p['node'] for p in refreshed if int(p['start']) == boot_end + 1)
     fstype = runner.run(['blkid', '-s', 'TYPE', '-o', 'value', src_root]).strip()
-    runner.run(['mkfs.fat', '-F', '32', boot] if firmware == 'uefi' else ['mkfs.ext4', '-F', boot])
-    root = root_partition
+    layout.format_boot(runner, plan, boot)
     if encrypted:
         emit('final-progress', text='Encrypting the root partition of the target disk (LUKS2)')
-        runner.run(['cryptsetup', 'luksFormat', '--type', 'luks2', '--batch-mode', '--key-file', '-', root_partition], input_text=passphrase)
-        runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
-        root = '/dev/mapper/' + TARGET_MAP
-    force = {'ext4': '-F', 'btrfs': '-f', 'xfs': '-f', 'f2fs': '-f'}[fstype]
-    runner.run(['mkfs.' + fstype, force, root])
+    # The preview's file system decides, not the plan's: they match unless the record was forged.
+    target_plan = replace(plan, encrypted=encrypted, filesystem=fstype)
+    root = layout.create_root(runner, target_plan, root_partition, passphrase, TARGET_MAP)
     dst = mount / 'target'
     dst.mkdir()
-    runner.run(['mount', root, str(dst)])
-    (dst / 'boot').mkdir()
-    runner.run(['mount', boot, str(dst / 'boot')])
+    layout.mount_root(runner, target_plan, root, dst)
+    layout.mount_boot(runner, target_plan, boot, dst)
     emit('final-progress', text='Copying the checked system file by file')
     excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
     runner.run(['rsync', '-aHAX', '--numeric-ids', *excludes, f'{src_mount}/', f'{dst}/'], timeout=14400)
@@ -441,7 +441,7 @@ def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
     firmware = 'uefi' if Path('/sys/firmware/efi').is_dir() else 'bios'
-    boot_number = 1 if firmware == 'uefi' else 2
+    plan = layout.plan_for(config, firmware)
     passphrase = request.pop('passphrase')
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])
@@ -450,7 +450,7 @@ def finalize(request, runner):
     try:
         emit('final-progress', text='Opening the preview for checking')
         source.attach()
-        src_root, encrypted = source.open_root(boot_number + 1, passphrase)
+        src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
         record = read_record(runner, src_root, mount)
         check_record(record, config, firmware, encrypted)
         if source.opened:
@@ -472,7 +472,7 @@ def finalize(request, runner):
             # The swap directory (a subvolume on btrfs) is recreated, not copied.
             skip = [str(Path(SWAPFILE).parent)] if record.get('hibernation') else []
             swap_size = swapfile_size(record) if skip else 0
-            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, firmware, passphrase, mount,
+            boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, plan, passphrase, mount,
                                                               skip, swap_size)
             opened_target = encrypted
             moved = True

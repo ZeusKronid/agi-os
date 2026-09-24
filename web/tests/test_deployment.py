@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -184,7 +185,8 @@ class HibernationTests(unittest.TestCase):
 
         import tempfile
         with tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'):
-            finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/vda', 'size': 64 * GIB}, Source(), 'uefi', '',
+            finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/vda', 'size': 64 * GIB}, Source(),
+                                 finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'uefi'), '',
                                  Path(tmp), ['swap'], 16 * GIB)
             du = [c for c in calls if c[0] == 'du'][0]
             self.assertIn(f'--exclude={Path(tmp) / "source/swap"}', du)
