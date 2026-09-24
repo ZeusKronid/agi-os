@@ -20,9 +20,11 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 from settings import ENGINE
@@ -45,6 +47,18 @@ TYPES = {'bios': 'ef02', 'boot': 'ef00', 'linux': '8300'}
 # The preview's filesystems were written by the preview VM: read them without trusting
 # setuid bits, device nodes or executables on the Live host.
 SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
+# The throwaway overlay a dirty preview replays its journal into: tmpfs, not the Live's
+# small copy-on-write space under /var/tmp. 4 KiB clusters keep a replay of scattered
+# blocks as small as the journal itself.
+OVERLAY_DIR = '/tmp'
+OVERLAY_CLUSTER = 4096
+UNREADABLE = ('The preview’s system could not be opened: its file system is damaged, most likely because the preview '
+              'was not shut down properly. Start the preview again, shut it down from its power menu, then repeat '
+              'the installation.')
+# The last bytes of a swap area's first page while it holds a hibernation image
+# (the kernel's swsusp signatures and the uswsusp/TuxOnIce ones).
+PAGE = 4096
+HIBERNATION_SIGNATURES = (b'S1SUSPEND', b'S2SUSPEND', b'ULSUSPEND', b'LINHIB0001')
 LOG = Logger('finalize')
 
 
@@ -100,30 +114,49 @@ def checked_image(image, snapshot, target):
     raise ValidationError('Invalid preview image description')
 
 
+def free_nbd():
+    return next((f'/dev/nbd{i}' for i in range(16) if Path(f'/sys/class/block/nbd{i}').exists()
+                 and not Path(f'/sys/class/block/nbd{i}/pid').exists()), None)
+
+
+def nbd_server(device):
+    try:
+        return int(Path(f'/sys/class/block/{Path(device).name}/pid').read_text())
+    except (OSError, ValueError):
+        return None
+
+
 class Source:
-    """Read-only access to the preview's partitions and root filesystem."""
+    """The preview's partitions and root filesystem, read through a throwaway overlay.
+
+    A preview that was not shut down properly (power cut, crash, a failed hibernation)
+    leaves a file system journal to replay. A read-only device cannot replay it, and
+    skipping the replay (ext4 noload, xfs norecovery) shows an older and possibly
+    inconsistent tree that a copy would then carry to the disk. So the preview (qcow2
+    image or raw partition) is exported by qemu-nbd through a temporary qcow2 overlay:
+    the kernel replays the journal into the overlay, the preview itself is never
+    written, and the overlay is deleted on detach. Mounts stay read-only."""
 
     def __init__(self, runner, image):
         self.runner, self.image = runner, image
         self.device = None
         self.nbd = None
-        self.loop = None
+        self.scratch = None
         self.opened = False
         self.mount = None
 
     def attach(self):
-        if self.image['format'] == 'qcow2':
-            self.runner.run(['modprobe', 'nbd', 'max_part=16'])
-            self.nbd = next((f'/dev/nbd{i}' for i in range(16) if Path(f'/sys/class/block/nbd{i}').exists()
-                             and not Path(f'/sys/class/block/nbd{i}/pid').exists()), None)
-            if self.nbd is None:
-                raise ValidationError('No free NBD device for the preview image')
-            self.runner.run(['qemu-nbd', '--read-only', '--format=qcow2', '--connect', self.nbd, self.image['path']])
-            self.device = self.nbd
-            self.runner.run(['partprobe', self.nbd])
-        else:
-            self.loop = self.runner.run(['losetup', '--find', '--show', '--read-only', '--partscan', self.image['path']]).strip()
-            self.device = self.loop
+        self.scratch = Path(tempfile.mkdtemp(prefix='agi-final-overlay-', dir=OVERLAY_DIR))
+        overlay = self.scratch / 'overlay.qcow2'
+        self.runner.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-o', f'cluster_size={OVERLAY_CLUSTER}',
+                         '-b', self.image['path'], '-F', self.image['format'], str(overlay)])
+        self.runner.run(['modprobe', 'nbd', 'max_part=16'])
+        nbd = free_nbd()
+        if nbd is None:
+            raise ValidationError('No free NBD device for the preview image')
+        self.runner.run(['qemu-nbd', '--format=qcow2', '--connect', nbd, str(overlay)])
+        self.device = self.nbd = nbd
+        self.runner.run(['partprobe', self.nbd])
         self.runner.run(['udevadm', 'settle', '--timeout=30'])
         table = run_json(self.runner, ['sfdisk', '--json', self.device])['partitiontable']
         if table.get('label') != 'gpt' or not table.get('partitions'):
@@ -140,7 +173,8 @@ class Source:
         if kind == 'crypto_LUKS':
             if not passphrase:
                 raise ValidationError('The root is encrypted: enter the encryption password to finish')
-            self.runner.run(['cryptsetup', 'open', '--readonly', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
+            # Writable like the overlay under it: an ext4 or xfs journal replays through it.
+            self.runner.run(['cryptsetup', 'open', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
             self.opened = True
             return '/dev/mapper/' + SOURCE_MAP, True
         return device, False
@@ -152,15 +186,30 @@ class Source:
             subprocess.run(['cryptsetup', 'close', SOURCE_MAP], capture_output=True)
             self.opened = False
         if self.nbd:
+            server = nbd_server(self.nbd)
             subprocess.run(['qemu-nbd', '--disconnect', self.nbd], capture_output=True)
+            # The server exits after the disconnect, not with it. Until then it holds the
+            # preview open: promote would find the partition busy, a revert its medium.
+            deadline = time.monotonic() + 30
+            while server and Path(f'/proc/{server}').exists() and time.monotonic() < deadline:
+                time.sleep(0.2)
             self.nbd = None
-        if self.loop:
-            subprocess.run(['losetup', '--detach', self.loop], capture_output=True)
-            self.loop = None
+        if self.scratch:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+            self.scratch = None
+
+
+def mount_source_root(runner, device, point):
+    """Read-only mount of the preview's root; a journal replays into the overlay first.
+    What still refuses to mount is damaged: the user gets a way out, the log the details."""
+    try:
+        runner.run(['mount', '-o', SOURCE_MOUNT, device, str(point)])
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
 
 
 def read_record(runner, root_device, mount):
-    runner.run(['mount', '-o', SOURCE_MOUNT, root_device, str(mount)])
+    mount_source_root(runner, root_device, mount)
     try:
         return json.loads((mount / 'var/lib/agi-os/installation.json').read_text())
     finally:
@@ -268,7 +317,7 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     src_root, encrypted = source.open_root(root_number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
-    runner.run(['mount', '-o', SOURCE_MOUNT, src_root, str(src_mount)])
+    mount_source_root(runner, src_root, src_mount)
     source.mount = src_mount
     runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
     skipped = [f'--exclude={src_mount / path}' for path in skip]
@@ -322,6 +371,25 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     runner.run(['umount', str(src_mount)])
     source.mount = None
     return boot, root_partition, root, encrypted, dst
+
+
+def discard_hibernation_image(runner, dst):
+    """A preview hibernated instead of shut down keeps its memory image in the swap file.
+    Promoted as is, the new system would resume that image over a file system the
+    finalization has changed. The swap header is rewritten in place (same blocks, so
+    resume_offset stays valid) and the first boot starts fresh."""
+    path = dst / SWAPFILE
+    try:
+        with open(path, 'rb') as handle:
+            header = handle.read(PAGE)
+    except OSError:
+        return False
+    if len(header) < PAGE or not header[-10:].startswith(HIBERNATION_SIGNATURES):
+        return False
+    emit('final-progress', text='The preview was hibernated, not shut down: its saved session is discarded '
+         'so the installed system starts fresh')
+    runner.run(['mkswap', str(path)])
+    return True
 
 
 def swapfile_size(record):
@@ -467,6 +535,8 @@ def finalize(request, runner):
             dst.mkdir()
             runner.run(['mount', root, str(dst)])
             runner.run(['mount', boot, str(dst / 'boot')])
+            if record.get('hibernation'):
+                discard_hibernation_image(runner, dst)
             moved = False
         else:
             # The swap directory (a subvolume on btrfs) is recreated, not copied.

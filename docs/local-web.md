@@ -59,6 +59,13 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
+   The preview is read through `qemu-nbd` with a throwaway qcow2 overlay in
+   `/tmp`: a preview that was not shut down properly (crash, power cut) has its
+   file system journal replayed into the overlay, never into the preview, so the
+   copy sees the consistent tree. A root that still does not mount is reported
+   as "start the preview again, shut it down from its power menu, repeat". A
+   promoted preview that was hibernated instead of shut down gets its swap
+   header rewritten, so the installed system never resumes the stale image.
    Finally missing hardware drivers are completed for the real computer (a
    failure is reported, never hidden), the initramfs is rebuilt, the boot loader is
    registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new
