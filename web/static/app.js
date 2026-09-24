@@ -277,8 +277,8 @@ function render(state) {
             + (state.built.revert || 'nothing else changes') + '.';
     } else {
         // A build that stopped (an error, a failed file check) has no built system to describe.
-        $('revertHint').textContent = 'The preview was not finished. Putting it back removes what was prepared for it; '
-            + 'nothing else on the disk changes.';
+        $('revertHint').textContent = 'The preview was not finished. Putting it back removes what was prepared for it — '
+            + (state.preview_revert || 'nothing else changes') + '.';
     }
     // Installing needs the preview off: step 1 turns it off, step 2 installs.
     if (modal === 'install') {
