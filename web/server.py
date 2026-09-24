@@ -695,7 +695,8 @@ async def stop(request):
             else:
                 # A preview the user keeps is turned off like a computer, never cut off: a power cut
                 # leaves its file systems dirty and loses what the guest has not written yet.
-                state.status = 'Turning off the preview, as with its power button…'
+                state.status = ('Turning off the preview, as with its power button… If the preview asks to confirm, '
+                                'confirm there; it is stopped after 90 seconds')
                 clean = await state.vm.shutdown()
                 if not clean:
                     log.warning('vm.stop.forced', 'The preview did not turn itself off in time and was stopped')
