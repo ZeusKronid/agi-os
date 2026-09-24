@@ -59,6 +59,11 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
+   Before that the preview VM is turned off like a computer: *Stop VM* and
+   *Turn off and continue* press its ACPI power button (QMP `system_powerdown`)
+   and wait up to 90 s for the guest to shut down; only a guest that does not
+   (a desktop asking to confirm, a hung system) is stopped hard. Cancelling a
+   build still stops the installer VM at once.
    The preview is read through `qemu-nbd` with a throwaway qcow2 overlay in
    `/tmp`: a preview that was not shut down properly (crash, power cut) has its
    file system journal replayed into the overlay, never into the preview, so the
