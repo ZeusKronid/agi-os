@@ -46,6 +46,8 @@ GIB = 2**30
 ALIGN = 2048
 SOURCE_MAP = 'agi-final-source'
 TARGET_MAP = 'agi-final-target'
+# Partition table backups made before a table is changed (root-only tmpfs).
+BACKUPS = Path('/run')
 TYPES = {'bios': layout.BIOS_BOOT, 'boot': layout.ESP, 'linux': layout.LINUX}
 # The preview's filesystems were written by the preview VM: read them without trusting
 # setuid bits, device nodes or executables on the Live host.
@@ -275,8 +277,39 @@ def prepare_table(runner, layout, disk, table='gpt'):
         if disk.get('fstype') or not storage_worker.looks_blank(target):
             raise ValidationError('The disk has data but no partition table: installing alongside it is not possible. '
                                   'Choose “Erase the disk” if you don’t need that data.')
-        runner.run(['sgdisk', '--clear', target])
+        if table == 'msdos':
+            runner.run(['sfdisk', '--wipe', 'always', target], input_text='label: dos\n')
+        else:
+            runner.run(['sgdisk', '--clear', target])
+    if table == 'msdos':
+        # The MBR and its entries, restorable with sfdisk DISK < file.
+        (BACKUPS / f'agi-final-{Path(target).name}.sfdisk').write_text(runner.run(['sfdisk', '--dump', target]))
+        return
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+
+
+TABLES = {'gpt': 'gpt', 'dos': 'msdos'}
+
+
+def check_table(plan, disk, layout_name):
+    """Next to other systems the disk keeps its table type: the plan must match it."""
+    if plan.table == 'msdos':
+        layout.check_mbr_size(disk['size'])
+    existing = TABLES.get(disk.get('pttype')) if disk.get('pttype') else None
+    if layout_name != 'alongside' or existing in (None, plan.table):
+        return
+    if existing == 'msdos':
+        raise ValidationError('This disk has an MBR (msdos) partition table: to install next to its systems, ask the '
+                              'agent for partition_table msdos (BIOS with GRUB) and build the preview again. Nothing was changed.')
+    raise ValidationError('This disk has a GPT: a system with an MBR (msdos) table can only erase it. '
+                          'Choose “Erase the disk” or ask the agent for GPT. Nothing was changed.')
+
+
+def mbr_slots(runner, target):
+    """Free primary entries of the disk's MBR (logical partitions are not created)."""
+    table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
+    used = {int(p['node'][len(target):].lstrip('p')) for p in table.get('partitions', [])}
+    return 4 - len(used & {1, 2, 3, 4})
 
 
 def free_regions(runner, disk_path, size):
@@ -362,6 +395,34 @@ def windows_entry(esp_uuid):
             '    insmod part_gpt\n    insmod fat\n'
             f'    search --no-floppy --fs-uuid --set=root {esp_uuid}\n'
             f'    chainloader /{WINDOWS_LOADER}\n}}\n')
+
+
+def bios_windows(disk):
+    """The NTFS partition of a BIOS Windows on this MBR disk (the one holding its boot
+    manager), or None. Read through a temporary read-only mount."""
+    if disk.get('pttype') != 'dos':
+        return None
+    for part in disk.get('partitions', []):
+        if part.get('fstype') != 'ntfs' or part.get('mounted'):
+            continue
+        point = storage_worker.PREVIEW / 'check'
+        if not storage_worker.read_only_mount(part['path'], 'ntfs', point):
+            continue
+        try:
+            if any((point / name).is_file() for name in ('bootmgr', 'BOOTMGR')):
+                return part
+        finally:
+            subprocess.run(['umount', str(point)], capture_output=True, timeout=60)
+    return None
+
+
+def bios_windows_entry(uuid):
+    """A GRUB menu entry that starts a BIOS Windows through its partition's boot sector."""
+    return ('#!/bin/sh\nexec tail -n +3 "$0"\n'
+            "menuentry 'Windows' --class windows --class os {\n"
+            '    insmod part_msdos\n    insmod ntfs\n'
+            f'    search --no-floppy --fs-uuid --set=root {uuid}\n'
+            '    chainloader +1\n}\n')
 
 
 def promote(runner, request, disk, source, plan):
@@ -469,9 +530,10 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     Paths in skip (root-relative, e.g. the hibernation swap file) are recreated by the
     caller: a copied swap file would sit at other physical blocks than resume_offset says.
     reserve is the space the caller needs for them on the new root."""
-    if plan.table == 'msdos' and request['layout'] != 'erase':
-        raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
     target = disk['path']
+    if plan.table == 'msdos' and request['layout'] == 'alongside' and disk.get('pttype') and mbr_slots(runner, target) < 2:
+        raise ValidationError('The MBR of this disk has fewer than two free primary entries for /boot and the root '
+                              '(an MBR holds four). Nothing was changed.')
     boot_number = plan.part('boot').number
     src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
@@ -497,8 +559,9 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     if plan.table == 'msdos':
         boot_part, root_part = plan.part('boot'), plan.part('root')
         boot_end = start + boot_part.size // SECTOR - 1
+        # Active flag only on a disk of its own: next to Windows its partition stays the active one.
         runner.run(['sfdisk', '--append', '--wipe-partitions', 'never', target], input_text=layout.mbr_script(
-            [(start, boot_part.size // SECTOR, boot_part.typecode, True),
+            [(start, boot_part.size // SECTOR, boot_part.typecode, request['layout'] == 'erase'),
              (boot_end + 1, end - boot_end, root_part.typecode, False)]))
     else:
         start, boot_end = gpt_partitions(runner, plan, target, start, end)
@@ -691,10 +754,7 @@ def finalize(request, runner):
     target = config.disk
     firmware = live_firmware()
     plan = layout.plan_for(config, firmware)
-    if plan.table == 'msdos':
-        if request['layout'] != 'erase':
-            raise ValidationError('An MBR (msdos) system is installed only on a whole disk; nothing was changed')
-        layout.check_mbr_size(disk['size'])
+    check_table(plan, disk, request['layout'])
     passphrase = request.pop('passphrase')
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])
@@ -801,6 +861,13 @@ def finalize(request, runner):
             runner.run([*chroot, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--bootloader-id=AGIOS'])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         else:
+            windows_part = bios_windows(disk) if request['layout'] == 'alongside' else None
+            if windows_part:
+                entry = dst / 'etc/grub.d/35_agios_windows'
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_text(bios_windows_entry(runner.run(['blkid', '-s', 'UUID', '-o', 'value', windows_part['path']]).strip()))
+                entry.chmod(0o755)
+                windows = True
             runner.run([*chroot, 'grub-install', '--target=i386-pc', target])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
         if request['enroll_keys']:
@@ -820,7 +887,7 @@ def finalize(request, runner):
         if kept is not None and kept - kept_partitions(runner, target):
             raise ValidationError('A partition of another system on the disk changed during the installation. '
                                   'Do not start that system before checking it; the GPT backup is in /run.')
-        if esp:
+        if esp or windows:
             record['dual_boot'] = {'esp': esp, 'shared_esp': plan.shared_esp, 'windows': windows}
         for note in notes:
             emit('final-warning', text=note)

@@ -274,7 +274,14 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
 
 ## Limits
 
-- Disks with MBR partition tables: only the explicit whole-disk erase.
+- MBR (msdos) partition tables: `partition_table: "msdos"` (BIOS with GRUB, disks
+  up to 2 TiB) gives an MBR with an active ext4 `/boot` and the root; GRUB's core
+  goes to the gap after the MBR. A disk keeps its table type next to other systems:
+  an MBR disk takes an msdos system, installed by copy (the preview lives in memory
+  or on another medium, no preview partition is made on an MBR disk) into two free
+  primary entries; logical partitions are not created, the backup of the old MBR is
+  `/run/agi-final-<disk>.sfdisk`. A BIOS Windows found there (its `bootmgr`) gets a
+  GRUB chainload entry and keeps the active flag.
 - Shrinking: NTFS and ext4 only; NTFS marked dirty (Windows fast startup or
   hibernation) is refused by `ntfsresize` — shut Windows down fully first.
 - Swap is zram by default. `swap: "hibernate"` adds a swap file `/swap/swapfile`
