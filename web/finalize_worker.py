@@ -899,8 +899,9 @@ def finalize(request, runner):
             with preserve_efi_fallback(dst / 'efi'):
                 runner.run([*chroot, 'bootctl', '--esp-path=/efi', '--boot-path=/boot', 'install'])
             # The automatic boot-time updater also overwrites the ESP fallback.
-            # AGIOS's own updater refreshes systemd-boot while preserving it.
-            runner.run([*chroot, 'systemctl', 'disable', 'systemd-boot-update.service'])
+            # Mask it so a later systemd preset cannot re-enable it; AGIOS's
+            # own updater refreshes systemd-boot while preserving the fallback.
+            runner.run([*chroot, 'systemctl', 'mask', 'systemd-boot-update.service'])
         elif config.bootloader == 'systemd-boot':
             runner.run([*chroot, 'bootctl', '--esp-path=/boot', 'install'])
         elif firmware == 'uefi':
