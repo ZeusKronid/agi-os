@@ -507,6 +507,7 @@ async def chat(request):
             state.messages.append({'role': 'assistant', 'content': reply['message'], 'suggestions': reply['suggestions']})
             kept = state.controller.kept
             state.status = ('Configuration unchanged: the agent’s reply did not change it' if kept
+                            else 'Configuration changed: rebuild the preview to try it' if state.rebuild_needed(state.controller.configuration)
                             else 'Configuration ready: next, find room for the preview' if state.controller.configuration
                             else 'Let’s keep talking')
             if not kept:
