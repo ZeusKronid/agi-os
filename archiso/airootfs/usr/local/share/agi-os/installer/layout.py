@@ -14,6 +14,9 @@ on the computer's disk (copy) or turns its partitions into real ones (promote).
 Functions here only build commands and run them through the caller's runner.
 """
 from dataclasses import dataclass
+from pathlib import Path
+import re
+import tempfile
 
 from domain import GIB, ValidationError
 
@@ -25,6 +28,13 @@ BIOS_BOOT_SIZE = 2 * MIB
 BIOS_BOOT, ESP, LINUX, XBOOTLDR = "ef02", "ef00", "8300", "ea00"
 ESP_GUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 MKFS_FORCE = {"ext4": "-F", "btrfs": "-f", "xfs": "-f", "f2fs": "-f"}
+# btrfs (CMP-153): the root is subvolume @; what must survive a rollback of the root lives
+# in subvolumes of its own. Snapshots of @ (update.py) go to @snapshots; the hibernation
+# swap file needs a subvolume that is never snapshotted.
+ROOT_SUBVOLUME = "@"
+SUBVOLUMES = (("@", ""), ("@home", "home"), ("@log", "var/log"), ("@pkg", "var/cache/pacman/pkg"),
+              ("@snapshots", ".snapshots"))
+SWAP_SUBVOLUME = ("@swap", "swap")
 
 
 def partition_path(disk, number):
@@ -51,6 +61,8 @@ class Plan:
     # Dual boot (CMP-151): the disk's existing ESP holds the boot loader, next to Windows
     # Boot Manager; this system's /boot becomes an XBOOTLDR partition.
     shared_esp: bool = False
+    # btrfs subvolumes as (name, path relative to the root), root first; () for a flat root.
+    subvolumes: tuple = ()
 
     def part(self, role):
         return next(p for p in self.partitions if p.role == role)
@@ -74,7 +86,14 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
     parts.append(Partition(number, "boot", BOOT_SIZE, boot_type, "AGI-BOOT",
                            "vfat" if firmware == "uefi" else "ext4"))
     parts.append(Partition(number + 1, "root", None, LINUX, "AGI-ROOT", None))
-    return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem, bool(shared_esp))
+    return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem, bool(shared_esp),
+                subvolumes_for(config))
+
+
+def subvolumes_for(config):
+    if config.filesystem != "btrfs":
+        return ()
+    return SUBVOLUMES + ((SWAP_SUBVOLUME,) if getattr(config, "swap", "zram") == "hibernate" else ())
 
 
 def table_commands(plan, disk):
@@ -107,11 +126,54 @@ def create_root(runner, plan, partition, passphrase, crypt_name=CRYPT_NAME):
         runner.run(["cryptsetup", "open", "--key-file", "-", partition, crypt_name], input_text=passphrase)
         device = "/dev/mapper/" + crypt_name
     runner.run(["mkfs." + plan.filesystem, MKFS_FORCE[plan.filesystem], device])
+    if plan.subvolumes:
+        top = Path(tempfile.mkdtemp(prefix="agi-subvolumes-"))
+        runner.run(["mount", device, str(top)])
+        try:
+            for name, _ in plan.subvolumes:
+                runner.run(["btrfs", "subvolume", "create", str(top / name)])
+        finally:
+            runner.run(["umount", str(top)])
+            top.rmdir()
     return device
 
 
-def mount_root(runner, plan, device, target):
-    runner.run(["mount", device, str(target)])
+def mount_root(runner, plan, device, target, options=None):
+    """Mount the root file system at target; with subvolumes, each at its place under it."""
+    extra = [options] if options else []
+    if not plan.subvolumes:
+        runner.run(["mount", *(["-o", options] if options else []), device, str(target)])
+        return
+    for name, path in plan.subvolumes:
+        where = Path(target) / path
+        where.mkdir(parents=True, exist_ok=True)
+        runner.run(["mount", "-o", ",".join(["subvol=" + name, *extra]), device, str(where)])
+
+
+def existing_subvolumes(runner, device, filesystem):
+    """The standard subvolumes present on an existing btrfs root (a preview being finished);
+    () for a flat root, which an older installer created."""
+    if filesystem != "btrfs":
+        return ()
+    top = Path(tempfile.mkdtemp(prefix="agi-subvolumes-"))
+    runner.run(["mount", "-o", "ro,subvolid=5", device, str(top)])
+    try:
+        found = tuple(entry for entry in (*SUBVOLUMES, SWAP_SUBVOLUME) if (top / entry[0]).is_dir())
+    finally:
+        runner.run(["umount", str(top)])
+        top.rmdir()
+    return found if found and found[0][0] == ROOT_SUBVOLUME else ()
+
+
+def fstab(text):
+    """genfstab output without subvolid=: after a rollback @ is a new subvolume with a new
+    id, and a stale subvolid next to subvol= would stop the mount."""
+    return re.sub(r"subvolid=\d+,?|,subvolid=\d+", "", text)
+
+
+def root_flags(plan):
+    """Kernel options that mount the root subvolume (GRUB adds its own from grub-mkconfig)."""
+    return ["rootflags=subvol=" + ROOT_SUBVOLUME] if plan.subvolumes else []
 
 
 def mount_boot(runner, plan, device, target):
