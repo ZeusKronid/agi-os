@@ -382,6 +382,19 @@ class PrepareTests(unittest.TestCase):
             room.assert_called_once()
             self.assertEqual(self.calls, [], fstype)
 
+    def test_shrink_refuses_failed_gpt_backup_before_writing(self):
+        # Recovery needs the original table. If it cannot be backed up, leave
+        # the filesystem at its original size as well.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'gpt_backup', side_effect=ValidationError('Cannot back up GPT')):
+                with self.assertRaisesRegex(ValidationError, 'Cannot back up GPT'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual(self.calls, [], fstype)
+
 
 class RestartOperationTests(unittest.TestCase):
     """scan / adopt / remove / mark (CMP-119) behind the same checks."""
