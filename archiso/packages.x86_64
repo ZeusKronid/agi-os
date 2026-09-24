@@ -43,6 +43,8 @@ openssh
 parted
 pciutils
 python
+python-cairo
+python-gobject
 ripgrep
 rsync
 smartmontools

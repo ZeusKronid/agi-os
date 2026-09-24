@@ -66,7 +66,7 @@ def main():
             LOG.log('info' if installed and proc.returncode == 0 else 'error', 'guest.worker-exit',
                     f'Установщик завершился с кодом {proc.returncode}', installed=installed)
         if installed and proc.returncode == 0:
-            send({'kind': 'shutdown', 'text': 'Перехожу к загрузке установленной системы'})
+            send({'kind': 'shutdown', 'text': 'Booting the installed system'})
             subprocess.run(['systemctl', 'poweroff'], check=True)
 
 
