@@ -24,6 +24,12 @@ def live_environment():
     return Path("/run/archiso/bootmnt").is_mount()
 
 
+def copied_to_ram():
+    """Booted with copytoram: the Live runs from memory and archiso unmounted the boot medium,
+    which the preview VM and the install need. The boot entries pass copytoram=n."""
+    return Path("/run/archiso/copytoram").is_dir() and not live_environment()
+
+
 def fingerprint(disk):
     identity = {k: disk.get(k) for k in ("path", "size", "model", "serial", "wwn", "maj:min")}
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()

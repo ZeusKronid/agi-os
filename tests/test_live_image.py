@@ -91,6 +91,27 @@ class BootMediaTests(unittest.TestCase):
         self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
 
 
+class CopyToRamTests(unittest.TestCase):
+    def test_boot_entries_keep_the_boot_medium_mounted(self):
+        # archiso's copytoram=auto copies the image into memory on a USB stick and unmounts it;
+        # the website, the preview VM and the install all run from /run/archiso/bootmnt.
+        entries = [PROFILE / "efiboot/loader/entries/01-archiso-linux.conf", PROFILE / "syslinux/archiso_sys-linux.cfg"]
+        for path in entries:
+            lines = [line for line in path.read_text().splitlines() if line.split()[:1] in (["options"], ["APPEND"])]
+            self.assertEqual(len(lines), 1, path)
+            self.assertIn("copytoram=n", lines[0].split(), path)
+
+    def test_preview_guest_does_not_copy_itself_into_memory(self):
+        runtime = (ROOT / "web/runtime.py").read_text()
+        options = re.search(r"^GUEST_OPTIONS = '([^']*)'", runtime, re.M).group(1)
+        self.assertIn("copytoram=n", options.split())
+
+    def test_smoke_boot_uses_a_usb_stick(self):
+        smoke = (ROOT / "scripts/ci/smoke-boot.py").read_text()
+        self.assertIn("usb-storage,drive=live", smoke)
+        self.assertNotIn("ide-cd,drive=live", smoke)
+
+
 class FirefoxPolicyTests(unittest.TestCase):
     def test_live_browser_neither_saves_passwords_nor_opens_extra_tabs(self):
         # The website asks for the new system's passwords: the Live Firefox must not offer to

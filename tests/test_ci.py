@@ -36,7 +36,8 @@ class SmokeCommandTests(unittest.TestCase):
         port = re.search(r"/dev/virtio-ports/([\w.-]+)", guest).group(1)
         self.assertIn(f'name={marker},string=1', command)
         self.assertIn(f'name={port}', command)
-        self.assertIn('file=/x/live.iso,media=cdrom', command)
+        self.assertIn('file=/x/live.iso,format=raw,readonly=on', command)
+        self.assertIn('usb-storage,drive=live', command)
         self.assertNotIn('pflash', command)
 
     def test_uefi_uses_a_private_copy_of_the_variables(self):
