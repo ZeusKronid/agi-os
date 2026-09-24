@@ -14,9 +14,11 @@ from pathlib import Path
 
 RECORD = Path("/var/lib/agi-os/installation.json")
 HIBERNATE_WAIT = 300
-# A real resume jumps CLOCK_BOOTTIME by the whole time the computer was off (writing the
-# image, powering off, booting, loading it): far more than the snapshot itself takes.
-RESUME_GAP = 10
+# A real resume jumps CLOCK_BOOTTIME by the whole time the computer was off (powering off,
+# booting, loading the image). Without a resume the clocks only drift by the moment the
+# snapshot is taken (~0.2 s). A fast machine is off for little more than that: on the QEMU
+# stand a full hibernate-and-resume cycle took 10 s, so the bar sits well below it.
+RESUME_GAP = 3
 # The kernel's own words when a hibernation did not happen and the session just went on.
 HIBERNATE_ABORTED = ("rolling back", "Image saving failed", "Failed to hibernate",
                      "Cannot find swap device", "Not enough free swap", "hibernation: Error")

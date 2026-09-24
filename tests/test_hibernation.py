@@ -234,6 +234,18 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(json.loads((state / "acceptance.json").read_text())["hibernate"]["result"])
         self.assertFalse(list((self.root / "dev/shm").iterdir()))
 
+    def test_fast_resume_passes_and_snapshot_pause_does_not(self):
+        """The stand's VM is off for ~10 s in a full cycle; without a resume the clocks move ~0.2 s."""
+        for gap, wall, expected in ((9.6, 1012.0, True), (4.0, 1012.0, True), (0.2, 1045.0, False)):
+            state = self.root / f"state-{gap}"
+            ticks = iter([(1000.0, 0.0), (1001.0, 0.0), (wall, gap)])
+            def command(args):
+                return (1, "none") if args[0] == "systemd-detect-virt" else (0, "")
+            with self.subTest(gap=gap), patch.object(verify, "command", side_effect=command), \
+                    patch.object(verify, "clocks", side_effect=lambda: next(ticks)), patch.object(verify.time, "sleep"):
+                passed, detail = verify.hibernate(self.record, state, self.root)
+                self.assertIs(passed, expected, detail)
+
     def test_rolled_back_hibernation_is_not_a_resume(self):
         """Run A: the session went on in the same boot after the kernel rolled back; not a pass."""
         state = self.root / "state"
