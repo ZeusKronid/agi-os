@@ -493,7 +493,9 @@ class Configuration:
             "a separate boot partition and the root",
             self.swap_summary(hardware),
             "Root encryption (LUKS2): you choose when you confirm; the password is entered separately",
-            f"Filesystem: {self.filesystem}; bootloader: {self.bootloader}",
+            f"Filesystem: {self.filesystem}; bootloader: {self.bootloader}"
+            + ("; btrfs subvolumes @, @home, @log, @pkg; a snapshot before every update, undo with "
+               "sudo agi-os-update rollback" if self.filesystem == "btrfs" else ""),
             f"Desktop: {self.desktop}; session: {self.session or 'console'}",
             f"Computer: {self.hostname}; user: {self.username} (sudo with a password)",
             f"Language: {self.locale}; layouts: {', '.join(self.keyboard_layouts)}; time zone: {self.timezone}",
@@ -620,7 +622,10 @@ The current executable storage handlers support GPT, whole disk or next to other
 partition_table="msdos" writes an MBR table instead (whole disk only): only for BIOS
 computers with GRUB, disks up to 2 TiB; choose it when the user asks for MBR or the
 computer's firmware cannot boot GPT disks (some old BIOS machines), otherwise keep "gpt";
-ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. Swap is a zram
+ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. btrfs gets subvolumes
+(@ root, @home, @log, @pkg, @snapshots): before every system update the app takes a
+snapshot of the root, and `sudo agi-os-update rollback` puts the system back to it
+(files in /home stay) — suggest btrfs when the user wants to be able to undo updates. Swap is a zram
 device by default (swap="zram": no hibernation). swap="hibernate" adds, next to zram,
 a swap file as large as the computer's RAM inside the root filesystem (encrypted with
 it when LUKS is chosen) and configures resume for hibernation; it costs that much disk

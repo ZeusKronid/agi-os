@@ -219,8 +219,29 @@ def mount_source_root(runner, device, point):
         raise ValidationError(UNREADABLE) from exc
 
 
-def read_record(runner, root_device, mount):
-    mount_source_root(runner, root_device, mount)
+def source_plan(runner, plan, root_device):
+    """The plan as the preview was really built: its root subvolumes are read from the
+    disk, so a flat btrfs root from an earlier installer is finished as it is."""
+    fstype = runner.run(['blkid', '-s', 'TYPE', '-o', 'value', root_device]).strip()
+    try:
+        return replace(plan, subvolumes=layout.existing_subvolumes(runner, root_device, fstype))
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
+
+
+def mount_source(runner, plan, device, point):
+    """mount_source_root for a root with subvolumes (CMP-153): each read-only in place."""
+    try:
+        layout.mount_root(runner, plan, device, point, SOURCE_MOUNT)
+    except ValidationError as exc:
+        raise ValidationError(UNREADABLE) from exc
+
+
+def read_record(runner, root_device, mount, plan=None):
+    if plan and plan.subvolumes:
+        mount_source(runner, replace(plan, subvolumes=plan.subvolumes[:1]), root_device, mount)
+    else:
+        mount_source_root(runner, root_device, mount)
     try:
         return json.loads((mount / 'var/lib/agi-os/installation.json').read_text())
     finally:
@@ -455,11 +476,17 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
     src_mount = mount / 'source'
     src_mount.mkdir()
-    mount_source_root(runner, src_root, src_mount)
+    # The preview's subvolumes (CMP-153) are mounted in place, so rsync copies each into
+    # the same subvolume of the new root.
+    plan = source_plan(runner, plan, src_root)
+    mount_source(runner, plan, src_root, src_mount)
     source.mount = src_mount
     runner.run(['mount', '-o', SOURCE_MOUNT, source.partition(boot_number), str(src_mount / 'boot')])
     skipped = [f'--exclude={src_mount / path}' for path in skip]
-    used = int(runner.run(['du', '-sxB1', *skipped, str(src_mount)]).split()[0]) + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0])
+    # Not -x: subvolumes are other file systems to du; /boot and snapshots are left out here.
+    used = (int(runner.run(['du', '-sB1', *skipped, f'--exclude={src_mount / "boot"}', f'--exclude={src_mount / ".snapshots"}',
+                            str(src_mount)]).split()[0])
+            + int(runner.run(['du', '-sB1', str(src_mount / 'boot')]).split()[0]))
     needed = used + used // 5 + 2 * GIB + reserve
     emit('final-progress', text=f'Creating partitions on {target} for {used / GIB:.1f} GiB of data')
     prepare_table(runner, request['layout'], disk, plan.table)
@@ -492,7 +519,8 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     layout.mount_root(runner, target_plan, root, dst)
     layout.mount_boot(runner, target_plan, boot, dst)
     emit('final-progress', text='Copying the checked system file by file', step='copy', percent=0)
-    excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
+    # Snapshots of the preview's root are not part of the installed system.
+    excludes = ['--exclude=/boot/*', '--exclude=/.snapshots/*', *[f'--exclude=/{path}' for path in skip]]
     # --no-inc-recursive: rsync counts all files first, so its overall percentage is steady.
     runner.run(['rsync', '-aHAX', '--numeric-ids', '--info=progress2', '--no-inc-recursive', *excludes, f'{src_mount}/', f'{dst}/'],
                timeout=14400, progress=copy_progress('Copying the checked system file by file'))
@@ -503,8 +531,7 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     differences += runner.run(['rsync', '-rcn', '--no-perms', '--no-owner', '--no-group', '--out-format=%n', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600).strip()
     if differences:
         raise ValidationError('The copy did not pass the check: ' + differences.splitlines()[0])
-    runner.run(['umount', str(src_mount / 'boot')])
-    runner.run(['umount', str(src_mount)])
+    runner.run(['umount', '--recursive', str(src_mount)])
     source.mount = None
     return boot, root_partition, root, encrypted, dst
 
@@ -680,7 +707,8 @@ def finalize(request, runner):
         emit('final-progress', text='Opening the preview for checking')
         source.attach()
         src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
-        record = read_record(runner, src_root, mount)
+        plan = source_plan(runner, plan, src_root)
+        record = read_record(runner, src_root, mount, plan)
         check_record(record, config, firmware, encrypted)
         if source.opened:
             runner.run(['cryptsetup', 'close', SOURCE_MAP]); source.opened = False
@@ -693,7 +721,7 @@ def finalize(request, runner):
                 if free < ESP_ROOM:
                     raise ValidationError(f'The EFI system partition {esp} has only {free // MIB} MiB free; systemd-boot '
                                           f'needs {ESP_ROOM // MIB} MiB there. Nothing was changed.')
-                plan = layout.plan_for(config, firmware, shared_esp=True)
+                plan = replace(layout.plan_for(config, firmware, shared_esp=True), subvolumes=plan.subvolumes)
         preview = request['image']['path'] if request['image']['on_target'] else None
         kept = kept_partitions(runner, target, {preview}) if request['layout'] == 'alongside' and disk.get('pttype') else None
         if request['image']['on_target']:
@@ -706,7 +734,7 @@ def finalize(request, runner):
                 root = '/dev/mapper/' + TARGET_MAP
             dst = mount / 'target'
             dst.mkdir()
-            runner.run(['mount', root, str(dst)])
+            layout.mount_root(runner, plan, root, dst)
             runner.run(['mount', boot, str(dst / 'boot')])
             if record.get('hibernation'):
                 discard_hibernation_image(runner, dst)
@@ -738,8 +766,8 @@ def finalize(request, runner):
             resume = None
             if record.get('hibernation'):
                 resume = recreate_swapfile(runner, dst, root_uuid, record, swap_size)
-            (dst / 'etc/fstab').write_text(runner.run(['genfstab', '-U', str(dst)]) + (swap_fstab_line() if resume else ''))
-            options = boot_options(root_uuid, luks_uuid, resume)
+            (dst / 'etc/fstab').write_text(layout.fstab(runner.run(['genfstab', '-U', str(dst)])) + (swap_fstab_line() if resume else ''))
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan))
             defaults = dst / 'etc/default/grub'
             if defaults.exists() and (encrypted or resume):
                 defaults.write_text(grub_defaults(defaults.read_text(), luks_uuid, resume))
@@ -808,7 +836,7 @@ def finalize(request, runner):
         if efi_mounted:
             runner.run(['umount', str(dst / 'efi')])
         runner.run(['umount', str(dst / 'boot')])
-        runner.run(['umount', str(dst)])
+        runner.run(['umount', '--recursive', str(dst)])
         dst = None
         if opened_target:
             runner.run(['cryptsetup', 'close', TARGET_MAP]); opened_target = False

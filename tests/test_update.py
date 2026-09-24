@@ -119,7 +119,7 @@ class ApplyTests(unittest.TestCase):
             patch.object(update, "PACMAN_DB", self.pacman), patch.object(update.os, "geteuid", return_value=0),
             patch.object(update, "free_bytes", return_value=10 * 1024 ** 3),
             patch.object(update, "root_filesystem", return_value="btrfs"),
-            patch.object(update, "snapshot", side_effect=lambda stamp: self.calls.append(["snapshot"]) or "/.snapshots/x"),
+            patch.object(update, "snapshot", side_effect=lambda stamp, **kw: self.calls.append(["snapshot"]) or "/.snapshots/x"),
             patch.object(update, "installed_versions", side_effect=lambda: next(versions)),
             patch.object(update, "stream", side_effect=lambda args: self.calls.append(args)),
             patch.object(update, "run", side_effect=lambda args, **kw: self.calls.append(args) or ""),

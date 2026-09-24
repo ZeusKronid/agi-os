@@ -54,9 +54,9 @@ class PlanTests(unittest.TestCase):
 
     def test_root_stack(self):
         runner = Recorder()
-        plain = layout.plan_for(config("btrfs"), "uefi")
+        plain = layout.plan_for(config("xfs"), "uefi")
         self.assertEqual(layout.create_root(runner, plain, "/dev/vda2", ""), "/dev/vda2")
-        self.assertEqual(runner.calls, [(["mkfs.btrfs", "-f", "/dev/vda2"], None)])
+        self.assertEqual(runner.calls, [(["mkfs.xfs", "-f", "/dev/vda2"], None)])
         runner = Recorder()
         encrypted = layout.plan_for(config(), "uefi", encrypted=True)
         self.assertEqual(layout.create_root(runner, encrypted, "/dev/vda2", "secret-pass"), "/dev/mapper/cryptroot")
