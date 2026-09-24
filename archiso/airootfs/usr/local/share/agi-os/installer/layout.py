@@ -4,7 +4,7 @@ One place per storage layer, so the CMP-123 tasks each extend their own:
 
 - table: "gpt" today; msdos for BIOS and existing MBR disks (CMP-152);
 - partitions: number, role, size, type, name and file system of each entry;
-- root stack, bottom up: optional LUKS2 → (LVM, CMP-154) → file system →
+- root stack, bottom up: optional LUKS2 → optional LVM (CMP-154) → file system →
   (btrfs subvolumes, CMP-153);
 - partitions of other systems kept on the disk and a shared ESP (dual boot, CMP-151).
 
@@ -16,6 +16,7 @@ Functions here only build commands and run them through the caller's runner.
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import secrets
 import tempfile
 
 from domain import GIB, ValidationError
@@ -40,6 +41,13 @@ ROOT_SUBVOLUME = "@"
 SUBVOLUMES = (("@", ""), ("@home", "home"), ("@log", "var/log"), ("@pkg", "var/cache/pacman/pkg"),
               ("@snapshots", ".snapshots"))
 SWAP_SUBVOLUME = ("@swap", "swap")
+# LVM (CMP-154): one volume group on the root partition (inside LUKS when encrypted) with
+# the root logical volume. The group's name is new for every installation: during a copy
+# the preview's group and the target's are active in Live at once, and LVM refuses two
+# groups of one name. The installed system finds its root by file system UUID.
+GROUP_PREFIX = "agi"
+ROOT_VOLUME = "root"
+GROUP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+.-]{0,63}")
 
 
 def partition_path(disk, number):
@@ -68,6 +76,12 @@ class Plan:
     shared_esp: bool = False
     # btrfs subvolumes as (name, path relative to the root), root first; () for a flat root.
     subvolumes: tuple = ()
+    # CMP-154: the root file system on a logical volume of this new volume group.
+    group: str | None = None
+
+    @property
+    def lvm(self):
+        return self.group is not None
 
     def part(self, role):
         return next(p for p in self.partitions if p.role == role)
@@ -83,6 +97,7 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
         raise ValidationError("Unknown firmware type")
     if shared_esp and (firmware != "uefi" or config.bootloader != "systemd-boot"):
         raise ValidationError("Only systemd-boot on UEFI shares the existing EFI system partition")
+    group = GROUP_PREFIX + secrets.token_hex(4) if getattr(config, "lvm", False) else None
     if getattr(config, "partition_table", "gpt") == "msdos":
         if firmware != "bios" or config.bootloader != "grub":
             raise ValidationError("An MBR (msdos) disk is set up only for BIOS computers with GRUB; UEFI needs GPT")
@@ -90,7 +105,8 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
         # /boot is the active partition for BIOSes that look for one.
         parts = (Partition(1, "boot", BOOT_SIZE, MBR_LINUX, "", "ext4"),
                  Partition(2, "root", None, MBR_LINUX, "", None))
-        return Plan(firmware, "msdos", parts, bool(encrypted), config.filesystem)
+        return Plan(firmware, "msdos", parts, bool(encrypted), config.filesystem,
+                    subvolumes=subvolumes_for(config), group=group)
     parts = []
     if firmware == "bios":
         parts.append(Partition(1, "bios", BIOS_BOOT_SIZE, BIOS_BOOT, "BIOS", None))
@@ -100,7 +116,7 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
                            "vfat" if firmware == "uefi" else "ext4"))
     parts.append(Partition(number + 1, "root", None, LINUX, "AGI-ROOT", None))
     return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem, bool(shared_esp),
-                subvolumes_for(config))
+                subvolumes_for(config), group)
 
 
 def subvolumes_for(config):
@@ -168,6 +184,11 @@ def create_root(runner, plan, partition, passphrase, crypt_name=CRYPT_NAME):
                    input_text=passphrase)
         runner.run(["cryptsetup", "open", "--key-file", "-", partition, crypt_name], input_text=passphrase)
         device = "/dev/mapper/" + crypt_name
+    if plan.lvm:
+        runner.run(["pvcreate", "--yes", device])
+        runner.run(["vgcreate", plan.group, device])
+        runner.run(["lvcreate", "--yes", "--extents", "100%FREE", "--name", ROOT_VOLUME, plan.group])
+        device = volume_path(plan.group)
     runner.run(["mkfs." + plan.filesystem, MKFS_FORCE[plan.filesystem], device])
     if plan.subvolumes:
         top = Path(tempfile.mkdtemp(prefix="agi-subvolumes-"))
@@ -217,6 +238,29 @@ def fstab(text):
 def root_flags(plan):
     """Kernel options that mount the root subvolume (GRUB adds its own from grub-mkconfig)."""
     return ["rootflags=subvol=" + ROOT_SUBVOLUME] if plan.subvolumes else []
+
+
+def volume_path(group):
+    return f"/dev/{group}/{ROOT_VOLUME}"
+
+
+def activate_root(runner, device):
+    """The root logical volume on an existing root device (a partition or opened LUKS),
+    activated, as (group, volume path); None when the device holds no LVM."""
+    if runner.run(["blkid", "-s", "TYPE", "-o", "value", device]).strip() != "LVM2_member":
+        return None
+    group = runner.run(["pvs", "--noheadings", "-o", "vg_name", device]).strip()
+    if not GROUP_NAME.fullmatch(group):
+        raise ValidationError("The root partition holds an LVM physical volume without a usable volume group")
+    runner.run(["vgchange", "--activate", "y", group])
+    return group, volume_path(group)
+
+
+def deactivate(run, group):
+    """Deactivate a volume group before its LUKS mapping closes or its device goes away.
+    run is a runner's run or any callable taking the command."""
+    if group:
+        run(["vgchange", "--activate", "n", group])
 
 
 def mount_boot(runner, plan, device, target):

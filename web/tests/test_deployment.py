@@ -217,7 +217,7 @@ class MbrFinalizeTests(unittest.TestCase):
                     return 'ext4\n'
                 return ''
         class Source:
-            mount = None
+            mount, group = None, None
             def open_root(self, number, passphrase):
                 return '/dev/nbd0p2', False
             def partition(self, number):
@@ -358,7 +358,7 @@ class HibernationTests(unittest.TestCase):
                 return ''
 
         class Source:
-            mount = None
+            mount, group = None, None
             def open_root(self, number, passphrase):
                 return '/dev/nbd0p2', False
             def partition(self, number):

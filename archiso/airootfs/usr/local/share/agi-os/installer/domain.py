@@ -36,11 +36,12 @@ CONFIG_SCHEMA = obj({
     "locale_overrides": {"type": "array", "items": obj({"variable": STRING, "locale": STRING})},
     "time_sync": {"type": "boolean"},
     "partition_table": {"type": "string", "enum": ["gpt", "msdos"]},
+    "lvm": {"type": "boolean"},
 })
 # Fields added after the first release: records and scripted test configurations
 # written before them still parse, with the engine's automatic choices.
 LATER_FIELDS = {"console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
-                "partition_table": "gpt"}
+                "partition_table": "gpt", "lvm": False}
 PARTITION_TABLES = ("gpt", "msdos")
 LOCALE = r"(?:[a-z]{2,3}_[A-Z]{2}|C)\.UTF-8"
 LC_VARIABLES = ("LC_ADDRESS", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION", "LC_MEASUREMENT", "LC_MESSAGES",
@@ -288,6 +289,7 @@ class Configuration:
     locale_overrides: tuple = ()
     time_sync: bool = True
     partition_table: str = "gpt"
+    lvm: bool = False
 
     @classmethod
     def parse(cls, data):
@@ -343,6 +345,8 @@ class Configuration:
             raise ValidationError("partition_table: gpt or msdos")
         if data["partition_table"] == "msdos" and data["bootloader"] != "grub":
             raise ValidationError("An MBR (msdos) disk boots with GRUB on BIOS computers; choose grub or a GPT disk")
+        if not isinstance(data["lvm"], bool):
+            raise ValidationError("Invalid field: lvm")
         zone = Path("/usr/share/zoneinfo") / data["timezone"]
         if not zone.resolve().is_relative_to(Path("/usr/share/zoneinfo")) or not zone.is_file():
             raise ValidationError("Unknown time zone")
@@ -490,7 +494,9 @@ class Configuration:
             + (f" · {disk.get('tran') or 'disk'} {'HDD' if disk.get('rota') else 'SSD'}" if disk.get('rota') is not None else ""),
             f"Serial number: {disk.get('serial') or 'unknown'}",
             f"Partitions: the whole disk, {'MBR (msdos)' if self.partition_table == 'msdos' else 'GPT'}, "
-            "a separate boot partition and the root",
+            "a separate boot partition and the root"
+            + (" as an LVM logical volume (volume group on the root partition, inside the encryption when chosen)"
+               if self.lvm else ""),
             self.swap_summary(hardware),
             "Root encryption (LUKS2): you choose when you confirm; the password is entered separately",
             f"Filesystem: {self.filesystem}; bootloader: {self.bootloader}"
@@ -618,6 +624,9 @@ otf-*, *-fonts: emoji, CJK, Nerd Fonts…); [] means the app adds DejaVu and
 Liberation, plus Noto CJK for Chinese/Japanese/Korean. Fontconfig preferences go
 to system_files etc/fonts/local.conf. time_sync enables NTP time synchronization
 (true unless the user declines). keyboard_layouts are the desktop XKB layouts.
+lvm=true puts the root file system on an LVM logical volume (a volume group on the
+root partition; with encryption, LVM inside LUKS). Use it only when the user asks for
+LVM; otherwise false.
 The current executable storage handlers support GPT, whole disk or next to other systems;
 partition_table="msdos" writes an MBR table instead: only for BIOS computers with
 GRUB, disks up to 2 TiB; choose it when the user asks for MBR, the computer's firmware
