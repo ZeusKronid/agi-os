@@ -1,5 +1,6 @@
 """Provider adapters. API credentials stay in this process, outside chat/history."""
 
+import ipaddress
 import json
 import urllib.error
 import urllib.parse
@@ -20,6 +21,18 @@ PROVIDERS = {
 
 class ProviderError(RuntimeError):
     pass
+
+
+def plain_http_allowed(host):
+    """Unencrypted HTTP only inside this computer or the local network, for example
+    Ollama on another PC at home. Host names are refused: they could resolve anywhere."""
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -48,8 +61,9 @@ class APIProvider:
         if url.username or url.password or url.query or url.fragment or not url.hostname:
             raise ProviderError("Enter the API base URL without keys, parameters or credentials")
         if url.scheme != "https" and not (url.scheme == "http" and kind in ("ollama", "compatible")
-                                           and url.hostname in ("127.0.0.1", "localhost", "::1", "10.0.2.2")):
-            raise ProviderError("A remote provider needs HTTPS")
+                                           and plain_http_allowed(url.hostname)):
+            raise ProviderError("A provider outside your local network needs HTTPS; "
+                                "plain HTTP works only with a local-network IP address")
         if kind not in ("ollama", "compatible") and not key.strip():
             raise ProviderError("Enter your API key in the key field")
         self.kind, self.endpoint, self.key = kind, endpoint.rstrip("/"), key.strip()
