@@ -395,6 +395,31 @@ class PrepareTests(unittest.TestCase):
                     self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
             self.assertEqual(self.calls, [], fstype)
 
+    def test_partition_resize_uses_sfdisk_without_wiping_existing_metadata(self):
+        with patch.object(storage_worker, 'sh') as run:
+            storage_worker.resize_partition('/dev/sda', 3, 123456, dry_run=True)
+            storage_worker.resize_partition('/dev/sda', 3, 123456)
+        preview, actual = (call.args[0] for call in run.call_args_list)
+        self.assertIn('--no-act', preview)
+        self.assertNotIn('--no-act', actual)
+        for call in run.call_args_list:
+            args = call.args[0]
+            self.assertEqual(args[-3:], ['-N', '3', '/dev/sda'])
+            self.assertIn('--wipe=never', args)
+            self.assertIn('--wipe-partitions=never', args)
+            self.assertEqual(call.kwargs['input_text'], 'size=123456\n')
+
+    def test_shrink_preflights_partition_boundary_before_filesystem_writes(self):
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'resize_partition', side_effect=ValidationError('Bad boundary')):
+                with self.assertRaisesRegex(ValidationError, 'Bad boundary'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            self.assertEqual([call[0] for call in self.calls], ['sgdisk'], fstype)
+
 
 class RestartOperationTests(unittest.TestCase):
     """scan / adopt / remove / mark (CMP-119) behind the same checks."""
