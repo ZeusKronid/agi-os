@@ -83,6 +83,16 @@ class BootMediaTests(unittest.TestCase):
         self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
 
 
+class WebsiteLayoutTests(unittest.TestCase):
+    def test_found_previews_stay_in_one_column(self):
+        # Sunrise E2E: .notice is a flex column with max-height; with flex-wrap: wrap the list of
+        # found previews moved into a second column past the right edge and its buttons vanished.
+        css = (ROOT / "web/static/style.css").read_text()
+        rules = [line for line in css.splitlines() if line.startswith(".notice {")]
+        self.assertIn("flex-wrap: nowrap", rules[-1])
+        self.assertIn("#orphanList { display: block; }", css)
+
+
 class ChatGPTIsolationTests(unittest.TestCase):
     def test_backend_runs_in_bubblewrap_without_host_home_or_tools(self):
         proc = MagicMock()
