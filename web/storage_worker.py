@@ -75,6 +75,20 @@ def sh(args, timeout=120, input_text=None):
     return output
 
 
+def resize_partition(disk, number, size, dry_run=False):
+    """Change only the partition length, retaining its GPT type, UUID and name.
+
+    Parted's script mode refuses the shrink confirmation after the filesystem
+    has already been resized.  sfdisk's -N accepts an exact sector count and
+    leaves all unspecified fields of that partition alone.
+    """
+    args = ['sfdisk', '--no-reread', '--wipe=never', '--wipe-partitions=never',
+            '--lock=yes', '-N', str(number), disk]
+    if dry_run:
+        args.insert(1, '--no-act')
+    sh(args, input_text=f'size={size}\n')
+
+
 NO_TABLE = 'does not contain a recognized partition table'
 
 
@@ -690,17 +704,18 @@ def prepare(request):
         new_size = (part['size'] - needed) // MIB * MIB
         if new_size < GIB:
             raise ValidationError('The partition is too small to free the space needed')
+        number = partition_number(disk, device)
         backup = gpt_backup(disk)
+        resize_partition(disk, number, new_size // SECTOR, dry_run=True)
         if fstype == 'ntfs':
             sh(['ntfsresize', '--no-action', '--force', '--size', str(new_size), device], timeout=1800)
             sh(['ntfsresize', '--force', '--size', str(new_size), device], timeout=7200, input_text='y\n')
         else:
             sh(['e2fsck', '-f', '-y', device], timeout=1800)
             sh(['resize2fs', device, f'{new_size // MIB}M'], timeout=7200)
-        number = partition_number(disk, device)
         start = int(part['start'])
         new_end = start + new_size // SECTOR - 1
-        sh(['parted', '--script', disk, 'resizepart', str(number), f'{new_end}s'])
+        resize_partition(disk, number, new_size // SECTOR)
         sh(['partprobe', disk])
         sh(['udevadm', 'settle', '--timeout=30'])
         regions = free_regions(inventory_disk(disk))
@@ -767,7 +782,7 @@ def revert(request):
         return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
     if kind == 'shrink':
         delete_partition(state['disk'], state['device'])
-        sh(['parted', '--script', state['disk'], 'resizepart', str(state['number']), f'{state["original_end"]}s'])
+        resize_partition(state['disk'], state['number'], state['original_end'] - state['start'] + 1)
         sh(['partprobe', state['disk']])
         sh(['udevadm', 'settle', '--timeout=30'])
         if state['fstype'] == 'ntfs':
