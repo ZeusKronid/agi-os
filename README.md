@@ -33,11 +33,12 @@ days. Check the image after extraction:
 sha256sum --check agi-os-*.iso.sha256
 ```
 
-Versioned, signed images belong on the
-[Releases page](https://github.com/ZeusKronid/agi-os/releases). The release
-workflow is configured for `v*` tags, but no release has been published yet:
-the project signing key and its public fingerprint still need to be set up.
-See [download and verification](docs/download.md) for the release process.
+Versioned, signed images are published on the
+[Releases page](https://github.com/ZeusKronid/agi-os/releases) from `v*` tags.
+The AGIOS release key fingerprint is
+`BA1D BAF6 09C7 6719 47DD A5E4 D1DF F581 C1F8 77D3`; the
+[public key](docs/agios-release-key.asc) is also in this repository. See
+[download and verification](docs/download.md) before using a release image.
 
 ## Build
 

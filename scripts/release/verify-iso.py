@@ -18,9 +18,8 @@ import subprocess
 import sys
 import tempfile
 
-# The release key's fingerprint, published together with docs/download.md.
-# Empty until the project's signing key is created (see docs/download.md).
-RELEASE_FINGERPRINT = ""
+# The release key's fingerprint, published in README.md and docs/download.md.
+RELEASE_FINGERPRINT = "BA1DBAF609C7671947DDA5E4D1DFF581C1F877D3"
 FINGERPRINT = re.compile(r"[0-9A-F]{40}")
 
 
