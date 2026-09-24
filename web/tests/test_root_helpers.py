@@ -369,6 +369,19 @@ class PrepareTests(unittest.TestCase):
                 self.prepare({'id': 'part:/dev/sdc:2048'}, snapshot)
         self.assertFalse([c for c in self.calls if c[0] == 'sgdisk'])
 
+    def test_shrink_refuses_stale_free_space_before_writing(self):
+        # Files can be added after the place step. Recheck on Build, before even
+        # e2fsck -y, which can change an ext4 volume that no longer fits.
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            self.calls.clear()
+            with patch.object(storage_worker, 'shrink_room', return_value=4 * GIB) as room:
+                with self.assertRaisesRegex(ValidationError, 'shrinkable space'):
+                    self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            room.assert_called_once()
+            self.assertEqual(self.calls, [], fstype)
+
 
 class RestartOperationTests(unittest.TestCase):
     """scan / adopt / remove / mark (CMP-119) behind the same checks."""
