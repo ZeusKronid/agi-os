@@ -59,7 +59,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 cpus=6
 if [[ $mode == disk ]]; then memory=4096 cpus=4; fi
-if [[ $mode == live ]]; then
+# AGIOS_TEST_BRIDGE=none: no test bridge at all, so the Live behaves as on a real computer
+# (for example to check the ChatGPT sign-in link, which the bridge otherwise stands in for).
+if [[ $mode == live && ${AGIOS_TEST_BRIDGE:-} != none ]]; then
     bridge_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/agios-live.XXXXXXXX")
     bridge_args=(--socket "$bridge_dir/llm.sock")
     # AGIOS_TEST_SCRIPTED=<config.json>: a fixed configuration instead of a live model (test only).
@@ -93,10 +95,10 @@ fi
 if [[ $mode == live ]]; then
     args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"
            -fw_cfg name=opt/org.agi-os.test,string=1
-           -device virtio-serial-pci
-           -chardev "socket,id=llm,path=$bridge_dir/llm.sock"
-           -device virtserialport,chardev=llm,name=org.agi-os.llm
-           -chardev "socket,id=qa,path=$repo/.local/live-test/qa.sock,server=on,wait=off"
+           -device virtio-serial-pci)
+    [[ -n $bridge_dir ]] && args+=(-chardev "socket,id=llm,path=$bridge_dir/llm.sock"
+                                   -device virtserialport,chardev=llm,name=org.agi-os.llm)
+    args+=(-chardev "socket,id=qa,path=$repo/.local/live-test/qa.sock,server=on,wait=off"
            -device virtserialport,chardev=qa,name=org.agi-os.qa
            -drive "file=$iso,media=cdrom,readonly=on,if=none,id=live"
            -device ide-cd,drive=live,bootindex=1)
