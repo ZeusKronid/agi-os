@@ -219,7 +219,10 @@ def create_swapfile(runner, root, filesystem, size):
     """
     path = Path(root) / SWAPFILE
     if filesystem == "btrfs":
-        runner.run(["btrfs", "subvolume", "create", str(path.parent)])
+        # With the subvolume layout (CMP-153) @swap is already mounted there; a flat root
+        # gets a nested subvolume, which root snapshots leave out just the same.
+        if not path.parent.is_dir():
+            runner.run(["btrfs", "subvolume", "create", str(path.parent)])
         runner.run(["chmod", "700", str(path.parent)])
         runner.run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size // GIB}g", str(path)])
         output = runner.run(["btrfs", "inspect-internal", "map-swapfile", "-r", str(path)]).strip()
@@ -242,10 +245,10 @@ def resume_parameter(filesystem_uuid, offset):
     return f"resume=UUID={filesystem_uuid} resume_offset={offset}"
 
 
-def boot_options(root_uuid, luks_uuid=None, resume=None):
-    """Kernel options of the systemd-boot entries."""
+def boot_options(root_uuid, luks_uuid=None, resume=None, flags=()):
+    """Kernel options of the systemd-boot entries; flags such as rootflags=subvol=@."""
     root = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}", f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid else [f"root=UUID={root_uuid}"]
-    return " ".join([*root, "rw", *([resume] if resume else [])])
+    return " ".join([*root, *flags, "rw", *([resume] if resume else [])])
 
 
 def grub_defaults(text, luks_uuid=None, resume=None):
@@ -470,7 +473,7 @@ def install(request, runner):
 
         emit("progress", stage=6, text="Setting up boot, your user, the network and your desktop…")
         chroot = ["arch-chroot", str(TARGET)]
-        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]) + (swap_fstab_line() if hibernation else ""))
+        write_file("etc/fstab", layout.fstab(runner.run(["genfstab", "-U", str(TARGET)])) + (swap_fstab_line() if hibernation else ""))
         if hibernation and hibernation["mode"] == "shutdown":
             write_file(HIBERNATE_MODE_FILE, "[Sleep]\nHibernateMode=shutdown\n")
         write_file("etc/hostname", config.hostname + "\n")
@@ -543,7 +546,7 @@ def install(request, runner):
                 if unsigned:
                     raise ValidationError("Not signed for Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
-            options = boot_options(root_uuid, luks_uuid, resume)
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan))
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
             write_file("boot/loader/entries/agi-os.conf", "title AGI OS\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux.img\noptions {options}\n")
