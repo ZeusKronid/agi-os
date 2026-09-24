@@ -159,6 +159,19 @@ class FinalizeTests(unittest.TestCase):
         self.assertEqual(runner.calls[-1], ["vgchange", "--activate", "n", "agi0badcafe"])
         self.assertIsNone(source.group)
 
+    def test_detach_also_closes_a_group_udev_activated_by_itself(self):
+        source = self.finalize_worker.Source(Recorder(), {"format": "raw", "path": "/dev/sdb2"})
+        source.nbd = source.device = "/dev/nbd0"
+        listing = subprocess.CompletedProcess([], 0, "  /dev/nbd0p2 agi0badcafe\n  /dev/sda3 homevg\n", "")
+        with patch.object(self.finalize_worker.subprocess, "run", return_value=listing) as run, \
+                patch.object(self.finalize_worker, "nbd_server", return_value=None):
+            source.detach()
+        commands = [c.args[0] for c in run.call_args_list]
+        self.assertIn(["vgchange", "--activate", "n", "agi0badcafe"], commands)
+        self.assertNotIn(["vgchange", "--activate", "n", "homevg"], commands)
+        self.assertLess(commands.index(["vgchange", "--activate", "n", "agi0badcafe"]),
+                        commands.index(["qemu-nbd", "--disconnect", "/dev/nbd0"]))
+
     def test_record_and_preview_must_agree_on_lvm(self):
         data = test_hibernation.specification(lvm=True)
         config = Configuration.parse(data)

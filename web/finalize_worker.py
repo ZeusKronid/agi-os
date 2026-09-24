@@ -211,9 +211,11 @@ class Source:
     def detach(self):
         if self.mount and self.mount.is_mount():
             subprocess.run(['umount', '-R', str(self.mount)], capture_output=True)
-        if self.group:
-            subprocess.run(['vgchange', '--activate', 'n', self.group], capture_output=True)
-            self.group = None
+        # udev may have activated the preview's volume group by itself when nbd showed it.
+        exposed = (self.nbd + 'p', '/dev/mapper/' + SOURCE_MAP) if self.nbd else ('/dev/mapper/' + SOURCE_MAP,)
+        for group in dict.fromkeys([g for g in (self.group, *groups_on(exposed)) if g]):
+            subprocess.run(['vgchange', '--activate', 'n', group], capture_output=True)
+        self.group = None
         if self.opened:
             subprocess.run(['cryptsetup', 'close', SOURCE_MAP], capture_output=True)
             self.opened = False
@@ -229,6 +231,17 @@ class Source:
         if self.scratch:
             shutil.rmtree(self.scratch, ignore_errors=True)
             self.scratch = None
+
+
+def groups_on(prefixes):
+    """Active LVM volume groups whose physical volumes are on devices with these prefixes."""
+    try:
+        out = subprocess.run(['pvs', '--noheadings', '-o', 'pv_name,vg_name'], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [fields[1] for fields in (line.split() for line in out.splitlines())
+            if len(fields) == 2 and fields[0].startswith(prefixes) and layout.GROUP_NAME.fullmatch(fields[1])]
 
 
 def mount_source_root(runner, device, point):
