@@ -142,6 +142,8 @@ def packages_for(config, hardware, secure_boot=False):
         packages += ["python-gobject", "gtk3"]
     if secure_boot:
         packages.append("sbctl")
+    if config.lvm:
+        packages.append("lvm2")  # its mkinitcpio hook activates the root volume group
     return list(dict.fromkeys(packages))
 
 
@@ -245,9 +247,11 @@ def resume_parameter(filesystem_uuid, offset):
     return f"resume=UUID={filesystem_uuid} resume_offset={offset}"
 
 
-def boot_options(root_uuid, luks_uuid=None, resume=None, flags=()):
-    """Kernel options of the systemd-boot entries; flags such as rootflags=subvol=@."""
-    root = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}", f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid else [f"root=UUID={root_uuid}"]
+def boot_options(root_uuid, luks_uuid=None, resume=None, flags=(), lvm=False):
+    """Kernel options of the systemd-boot entries; flags such as rootflags=subvol=@. On LVM
+    the root is a logical volume inside the opened LUKS container, found by its file system UUID."""
+    unlock = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"] if luks_uuid else []
+    root = [*unlock, f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid and not lvm else [*unlock, f"root=UUID={root_uuid}"]
     return " ".join([*root, *flags, "rw", *([resume] if resume else [])])
 
 
@@ -369,7 +373,7 @@ def preflight(request):
     return config, snapshot, disk
 
 
-def release_target():
+def release_target(group=None):
     # pacstrap -K can leave gpg-agent holding the target keyring open. Only stop
     # daemons belonging to that keyring; never use a global pkill or lazy umount.
     keyring = TARGET / "etc/pacman.d/gnupg"
@@ -382,10 +386,17 @@ def release_target():
     result = subprocess.run(["umount", "--recursive", str(TARGET)], capture_output=True, timeout=60)
     if result.returncode:
         raise ValidationError("Could not unmount the install partitions. Keep the VM running until you check mount.")
+    close_group(group)
     if Path("/dev/mapper", CRYPT_NAME).exists():
         result = subprocess.run(["cryptsetup", "close", CRYPT_NAME], capture_output=True, timeout=30)
         if result.returncode:
             raise ValidationError("Could not close the encrypted partition after installing.")
+
+
+def close_group(group):
+    """The root volume group goes inactive before its LUKS container closes."""
+    if group and subprocess.run(["vgchange", "--activate", "n", group], capture_output=True, timeout=60).returncode:
+        raise ValidationError("Could not deactivate the LVM volume group " + group + " after installing.")
 
 
 def install(request, runner):
@@ -510,7 +521,7 @@ def install(request, runner):
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
         check_generated_files(config, runner)
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
-        if initramfs := initramfs_config(drivers, encrypted, hibernate):
+        if initramfs := initramfs_config(drivers, encrypted, hibernate, plan.lvm):
             write_file("etc/mkinitcpio.conf.d/agi-os.conf", initramfs)
         luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip() if encrypted else None
         time_sync = ["systemd-timesyncd.service"] if config.time_sync else []
@@ -546,7 +557,7 @@ def install(request, runner):
                 if unsigned:
                     raise ValidationError("Not signed for Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
-            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan))
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan), plan.lvm)
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
             write_file("boot/loader/entries/agi-os.conf", "title AGI OS\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux.img\noptions {options}\n")
@@ -584,13 +595,15 @@ def install(request, runner):
     finally:
         request.pop("password", None)
         passphrase = None
-        if mounted or encrypted:
+        if mounted or encrypted or plan.lvm:
             # Cleanup is scoped to our mount tree, including cancellation/failure.
             original = sys.exc_info()[1]
             try:
                 if mounted:
-                    release_target()
-                elif Path("/dev/mapper", CRYPT_NAME).exists():
+                    release_target(plan.group)
+                if not mounted and plan.lvm and Path("/dev", plan.group).exists():
+                    close_group(plan.group)
+                if not mounted and Path("/dev/mapper", CRYPT_NAME).exists():
                     subprocess.run(["cryptsetup", "close", CRYPT_NAME], capture_output=True, timeout=30)
             except ValidationError as cleanup_error:
                 if isinstance(original, (ValidationError, Cancelled)):

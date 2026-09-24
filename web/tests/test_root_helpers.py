@@ -601,7 +601,9 @@ class DualBootFinalizeTests(unittest.TestCase):
                                          {'node': '/dev/nbd0p2', 'start': 2048 + GIB // S, 'size': 14 * GIB // S, 'name': 'AGI-ROOT'}]
             def __init__(self, *a): pass
             def attach(self): return self
+            group = None
             def open_root(self, number, passphrase): return '/dev/nbd0p2', False
+            def close_root(self): pass
             def detach(self): pass
         runner = type('R', (), {'run': lambda _, args, **kw: self.run_command(args, **kw)})()
         with patch.object(finalize_worker, 'checked_request', return_value=(config, disk)), \

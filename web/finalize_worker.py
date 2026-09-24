@@ -155,6 +155,7 @@ class Source:
         self.nbd = None
         self.scratch = None
         self.opened = False
+        self.group = None  # the preview's LVM volume group while it is active
         self.mount = None
 
     def attach(self):
@@ -189,12 +190,30 @@ class Source:
             # Writable like the overlay under it: an ext4 or xfs journal replays through it.
             self.runner.run(['cryptsetup', 'open', '--key-file', '-', device, SOURCE_MAP], input_text=passphrase)
             self.opened = True
-            return '/dev/mapper/' + SOURCE_MAP, True
-        return device, False
+            return self.volume('/dev/mapper/' + SOURCE_MAP), True
+        return self.volume(device), False
+
+    def volume(self, device):
+        """The root logical volume when the preview's root is LVM (CMP-154)."""
+        if found := layout.activate_root(self.runner, device):
+            self.group, device = found
+        return device
+
+    def close_root(self):
+        """Close the root stack after reading the record: the group, then LUKS."""
+        if self.group:
+            layout.deactivate(self.runner.run, self.group)
+            self.group = None
+        if self.opened:
+            self.runner.run(['cryptsetup', 'close', SOURCE_MAP])
+            self.opened = False
 
     def detach(self):
         if self.mount and self.mount.is_mount():
             subprocess.run(['umount', '-R', str(self.mount)], capture_output=True)
+        if self.group:
+            subprocess.run(['vgchange', '--activate', 'n', self.group], capture_output=True)
+            self.group = None
         if self.opened:
             subprocess.run(['cryptsetup', 'close', SOURCE_MAP], capture_output=True)
             self.opened = False
@@ -250,7 +269,7 @@ def read_record(runner, root_device, mount, plan=None):
         runner.run(['umount', str(mount)])
 
 
-def check_record(record, config, firmware, encrypted):
+def check_record(record, config, firmware, encrypted, lvm=False):
     installed = Configuration.parse({**record['configuration'], 'disk': config.disk})
     if installed.digest() != config.digest():
         raise ValidationError('The preview holds a different configuration than the one you confirmed')
@@ -258,6 +277,8 @@ def check_record(record, config, firmware, encrypted):
         raise ValidationError('The preview was installed for a different boot type than this computer')
     if bool(record.get('encrypted')) != encrypted:
         raise ValidationError('The encryption state does not match the installation record')
+    if lvm != config.lvm:
+        raise ValidationError('The LVM layout of the preview does not match the installation record')
 
 
 def prepare_table(runner, layout, disk, table='gpt'):
@@ -576,7 +597,8 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     if encrypted:
         emit('final-progress', text='Encrypting the root partition of the target disk (LUKS2)')
     # The preview's file system decides, not the plan's: they match unless the record was forged.
-    target_plan = replace(plan, encrypted=encrypted, filesystem=fstype)
+    target_plan = replace(plan, encrypted=encrypted, filesystem=fstype,
+                          group=plan.group if getattr(source, 'group', None) else None)
     root = layout.create_root(runner, target_plan, root_partition, passphrase, TARGET_MAP)
     dst = mount / 'target'
     dst.mkdir()
@@ -684,7 +706,7 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
                  + (', '.join(plan['packages']) or 'no extra ones needed'))
         # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
         dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
-        if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation'))):
+        if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation')), config.lvm):
             dropin.parent.mkdir(exist_ok=True)
             dropin.write_text(initramfs)
         elif dropin.exists():
@@ -760,6 +782,7 @@ def finalize(request, runner):
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])
     opened_target = False
+    target_group = None
     dst = None
     efi_mounted = False
     try:
@@ -770,9 +793,8 @@ def finalize(request, runner):
         src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
         plan = source_plan(runner, plan, src_root)
         record = read_record(runner, src_root, mount, plan)
-        check_record(record, config, firmware, encrypted)
-        if source.opened:
-            runner.run(['cryptsetup', 'close', SOURCE_MAP]); source.opened = False
+        check_record(record, config, firmware, encrypted, bool(source.group))
+        source.close_root()
         esp, windows = None, False
         if request['layout'] == 'alongside' and firmware == 'uefi':
             esp = existing_esp(runner, disk)
@@ -793,6 +815,9 @@ def finalize(request, runner):
                 runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
                 opened_target = True
                 root = '/dev/mapper/' + TARGET_MAP
+            # A promoted LVM root keeps the preview's volume group (same name, same UUIDs).
+            if found := layout.activate_root(runner, root):
+                target_group, root = found
             dst = mount / 'target'
             dst.mkdir()
             layout.mount_root(runner, plan, root, dst)
@@ -804,6 +829,7 @@ def finalize(request, runner):
             # The swap directory (a subvolume on btrfs) is recreated, not copied.
             skip = [str(Path(SWAPFILE).parent)] if record.get('hibernation') else []
             swap_size = swapfile_size(record) if skip else 0
+            target_group = plan.group  # created by the copy; deactivated even if the copy fails
             boot, root_partition, root, encrypted, dst = copy(runner, request, disk, source, plan, passphrase, mount,
                                                               skip, swap_size)
             opened_target = encrypted
@@ -828,7 +854,7 @@ def finalize(request, runner):
             if record.get('hibernation'):
                 resume = recreate_swapfile(runner, dst, root_uuid, record, swap_size)
             (dst / 'etc/fstab').write_text(layout.fstab(runner.run(['genfstab', '-U', str(dst)])) + (swap_fstab_line() if resume else ''))
-            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan))
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan), bool(target_group))
             defaults = dst / 'etc/default/grub'
             if defaults.exists() and (encrypted or resume):
                 defaults.write_text(grub_defaults(defaults.read_text(), luks_uuid, resume))
@@ -906,6 +932,8 @@ def finalize(request, runner):
         runner.run(['umount', str(dst / 'boot')])
         runner.run(['umount', '--recursive', str(dst)])
         dst = None
+        layout.deactivate(runner.run, target_group)
+        target_group = None
         if opened_target:
             runner.run(['cryptsetup', 'close', TARGET_MAP]); opened_target = False
         emit('finalized', text='The system on ' + target + ' is ready to boot. Shut down Live, remove the stick and power on the computer.',
@@ -915,6 +943,8 @@ def finalize(request, runner):
         request.pop('passphrase', None)
         if dst and dst.exists():
             subprocess.run(['umount', '-R', str(dst)], capture_output=True)
+        if target_group:
+            subprocess.run(['vgchange', '--activate', 'n', target_group], capture_output=True)
         if opened_target:
             subprocess.run(['cryptsetup', 'close', TARGET_MAP], capture_output=True)
         source.detach()
