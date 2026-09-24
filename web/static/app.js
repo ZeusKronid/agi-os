@@ -127,7 +127,7 @@ function render(state) {
     document.querySelectorAll('#pips i').forEach((pip, i) => pip.classList.toggle('on', i <= step));
     $('chapter').textContent = CHAPTERS[step];
     sun.dots = [.14, .38, .62, .86].map((f, i) => [f, i < step ? 'done' : i === step ? 'current' : 'next']);
-    $('model').textContent = state.model || 'no model';
+    $('model').textContent = state.model ? state.model + (state.provider ? ' · ' + state.provider.split(' — ')[0] : '') : 'no model';
     $('modelDot').className = 'dot ' + (state.model ? 'ok' : 'off');
     $('status').textContent = state.status;
 
@@ -683,8 +683,14 @@ $('diagnosticsButton').onclick = async () => {
 $('poweroffLive').onclick = () => powerAction('poweroff');
 
 /* ── model settings ───────────────────────────────────── */
-const PROVIDER_NOTES = {chatgpt: 'Sign-in opens in a new tab of this browser. Finish it there.', ollama: 'For Ollama on the QEMU host, use http://10.0.2.2:11434.',
-                        compatible: 'Any OpenAI-compatible API with structured JSON replies.'};
+const PROVIDER_NOTES = {chatgpt: 'Sign-in opens in a new tab of this browser. Finish it there.',
+    anthropic: 'Claude works with an API key from the Claude Console; the key stays in memory here and never enters the chat. '
+        + 'Signing in with a Claude subscription is not offered: Anthropic does not allow apps like this one to use claude.ai sign-in.',
+    gemini: 'Gemini works with an API key from Google AI Studio; the key stays in memory here and never enters the chat. '
+        + 'Signing in with a Google or Gemini subscription is not offered: Google does not allow other apps to use it.',
+    ollama: 'Ollama on this computer or another one in your network, e.g. http://192.168.1.20:11434 (start it there with OLLAMA_HOST=0.0.0.0). '
+        + 'Plain HTTP works only with a local-network IP address. Models run on that machine: Live keeps its whole system in memory and does not run them itself.',
+    compatible: 'Any OpenAI-compatible API with structured JSON replies. Plain HTTP works only with a local-network IP address.'};
 function pickProvider(kind) {
     providerKind = kind;
     document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.setAttribute('aria-checked', String(seg.dataset.kind === kind)));
@@ -692,9 +698,22 @@ function pickProvider(kind) {
     $('endpointField').hidden = kind === 'chatgpt';
     $('providerNote').textContent = PROVIDER_NOTES[kind] || 'The key stays in memory on this computer and never enters the chat. API usage may be billed separately.';
     $('providerSubmit').textContent = kind === 'chatgpt' ? 'Sign in to ChatGPT' : 'Connect';
+    $('listModelsRow').hidden = kind === 'chatgpt';
+    $('providerModels').replaceChildren();
     $('providerError').hidden = true;
 }
 document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.onclick = () => pickProvider(seg.dataset.kind));
+$('listModels').onclick = async () => {
+    const button = $('listModels');
+    button.disabled = true; $('providerError').hidden = false; $('providerError').className = 'hint'; $('providerError').textContent = 'Asking the provider…';
+    try {
+        const {models} = await api('provider/models', {kind: providerKind, endpoint: $('endpoint').value, key: $('key').value});
+        $('providerModels').replaceChildren(...models.map(name => Object.assign(document.createElement('option'), {value: name})));
+        $('providerError').textContent = models.length ? models.length + ' models: pick one in the Model field.' : 'The provider listed no models.';
+        if (models.length && !$('providerModel').value) $('providerModel').focus();
+    } catch (error) { $('providerError').className = 'line error'; $('providerError').textContent = error.message; }
+    finally { button.disabled = false; }
+};
 $('settingsButton').onclick = $('connectButton').onclick = () => { pickProvider(providerKind); $('settings').showModal(); };
 $('closeSettings').onclick = () => $('settings').close();
 $('providerForm').onsubmit = async event => {
