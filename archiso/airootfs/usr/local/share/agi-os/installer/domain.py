@@ -619,9 +619,11 @@ Liberation, plus Noto CJK for Chinese/Japanese/Korean. Fontconfig preferences go
 to system_files etc/fonts/local.conf. time_sync enables NTP time synchronization
 (true unless the user declines). keyboard_layouts are the desktop XKB layouts.
 The current executable storage handlers support GPT, whole disk or next to other systems;
-partition_table="msdos" writes an MBR table instead (whole disk only): only for BIOS
-computers with GRUB, disks up to 2 TiB; choose it when the user asks for MBR or the
-computer's firmware cannot boot GPT disks (some old BIOS machines), otherwise keep "gpt";
+partition_table="msdos" writes an MBR table instead: only for BIOS computers with
+GRUB, disks up to 2 TiB; choose it when the user asks for MBR, the computer's firmware
+cannot boot GPT disks (some old BIOS machines) or the system goes next to a BIOS
+Windows on an MBR disk (the disk keeps its table; two free primary entries needed,
+the preview then lives in memory or on another medium); otherwise keep "gpt";
 ext4/btrfs/xfs/f2fs; grub on BIOS/UEFI or systemd-boot on UEFI. btrfs gets subvolumes
 (@ root, @home, @log, @pkg, @snapshots): before every system update the app takes a
 snapshot of the root, and `sudo agi-os-update rollback` puts the system back to it

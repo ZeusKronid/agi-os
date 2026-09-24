@@ -234,9 +234,83 @@ class MbrFinalizeTests(unittest.TestCase):
         self.assertEqual(inputs[append], f'start=2048, size={GIB // 512}, type=83, bootable\n'
                                          f'start={2048 + GIB // 512}, size={last - (2048 + GIB // 512) + 1}, type=83\n')
         self.assertIn(['mkfs.ext4', '-F', '/dev/sda1'], calls)
+
+    def test_copy_next_to_windows_on_mbr_appends_two_inactive_primaries(self):
+        windows = [{'node': '/dev/sda1', 'start': 2048, 'size': 100 * 2048, 'type': '7', 'bootable': True},
+                   {'node': '/dev/sda2', 'start': 206848, 'size': 30 * GIB // 512, 'type': '7'}]
+        free = 206848 + 30 * GIB // 512
+        mine = [{'node': '/dev/sda3', 'start': free, 'size': GIB // 512, 'type': '83'},
+                {'node': '/dev/sda4', 'start': free + GIB // 512, 'size': 20 * GIB // 512, 'type': '83'}]
+        for existing, fits in ((windows, True), (windows + [{'node': '/dev/sda3', 'start': free, 'size': 2048, 'type': '83'}], False)):
+            calls, inputs = [], []
+            class Runner:
+                def run(self, args, input_text=None, **kw):
+                    calls.append(args); inputs.append(input_text)
+                    if args[0] == 'du':
+                        return f'{4 * GIB}\t/x\n'
+                    if args[:2] == ['sfdisk', '--json']:
+                        return dos(existing + mine) if any(c[:2] == ['sfdisk', '--append'] for c in calls) else dos(existing)
+                    if args[:2] == ['sfdisk', '--dump']:
+                        return 'label: dos\n'
+                    return 'ext4\n' if args[0] == 'blkid' else ''
+            class Source:
+                mount = None
+                def open_root(self, number, passphrase):
+                    return '/dev/nbd0p2', False
+                def partition(self, number):
+                    return f'/dev/nbd0p{number}'
+            import tempfile
+            with self.subTest(fits=fits), tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'), \
+                    patch.object(finalize_worker, 'BACKUPS', Path(tmp)):
+                (Path(tmp) / 'm').mkdir()
+                disk = {'path': '/dev/sda', 'size': 64 * GIB, 'pttype': 'dos'}
+                if not fits:
+                    with self.assertRaises(ValidationError):
+                        finalize_worker.copy(Runner(), {'layout': 'alongside'}, disk, Source(), mbr_plan(), '', Path(tmp) / 'm')
+                    self.assertFalse([c for c in calls if c[0] in ('sfdisk', 'sgdisk', 'mkfs.ext4') and c[1] != '--json'])
+                    continue
+                boot, root_partition, *_ = finalize_worker.copy(Runner(), {'layout': 'alongside'}, disk, Source(),
+                                                                mbr_plan(), '', Path(tmp) / 'm')
+                self.assertEqual((boot, root_partition), ('/dev/sda3', '/dev/sda4'))
+                self.assertTrue((Path(tmp) / 'agi-final-sda.sfdisk').is_file())
+                append = calls.index(['sfdisk', '--append', '--wipe-partitions', 'never', '/dev/sda'])
+                self.assertNotIn('bootable', inputs[append])  # Windows' partition stays the active one.
+                self.assertTrue(inputs[append].startswith(f'start={free}, size={GIB // 512}, type=83\n'))
+                self.assertFalse([c for c in calls if c[0] == 'sgdisk' or c[:3] == ['sfdisk', '--wipe', 'always']])
+
+    def test_bios_windows_is_found_by_its_boot_manager_and_chainloaded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            preview = Path(tmp)
+            def mount(device, fstype, point):
+                point.mkdir(parents=True, exist_ok=True)
+                if device == '/dev/sda1':
+                    (point / 'bootmgr').write_text('')
+                return device != '/dev/sda3'
+            disk = {'pttype': 'dos', 'partitions': [
+                {'path': '/dev/sda3', 'fstype': 'ntfs', 'mounted': False},
+                {'path': '/dev/sda1', 'fstype': 'ntfs', 'mounted': False},
+                {'path': '/dev/sda2', 'fstype': 'ntfs', 'mounted': False}]}
+            with patch.object(finalize_worker.storage_worker, 'PREVIEW', preview), \
+                    patch.object(finalize_worker.storage_worker, 'read_only_mount', side_effect=mount), \
+                    patch.object(finalize_worker.subprocess, 'run'):
+                self.assertEqual(finalize_worker.bios_windows(disk)['path'], '/dev/sda1')
+                self.assertIsNone(finalize_worker.bios_windows({**disk, 'pttype': 'gpt'}))
+        entry = finalize_worker.bios_windows_entry('1234-ABCD')
+        self.assertIn('search --no-floppy --fs-uuid --set=root 1234-ABCD', entry)
+        self.assertIn('chainloader +1', entry)
+        self.assertIn('insmod part_msdos', entry)
+
+    def test_alongside_keeps_the_table_type(self):
+        for pttype, table in (('dos', 'gpt'), ('gpt', 'msdos')):
+            plan = mbr_plan() if table == 'msdos' else finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'bios')
+            with self.subTest(pttype=pttype), self.assertRaises(ValidationError):
+                finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'alongside')
+            finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'erase')
+        finalize_worker.check_table(mbr_plan(), {'pttype': 'dos', 'size': 64 * GIB}, 'alongside')
+        finalize_worker.check_table(mbr_plan(), {'pttype': None, 'size': 64 * GIB}, 'alongside')
         with self.assertRaises(ValidationError):
-            finalize_worker.copy(Runner(), {'layout': 'alongside'}, {'path': '/dev/sda', 'size': 64 * GIB},
-                                 Source(), mbr_plan(), '', Path('/nonexistent-agios-test'))
+            finalize_worker.check_table(mbr_plan(), {'pttype': None, 'size': 4096 * GIB}, 'erase')
 
 
 class HibernationTests(unittest.TestCase):
