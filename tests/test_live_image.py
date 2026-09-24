@@ -94,6 +94,8 @@ class FirefoxPolicyTests(unittest.TestCase):
         self.assertIs(policies["DisableTelemetry"], True)
         self.assertEqual(policies["OverrideFirstRunPage"], "")
         self.assertIs(policies["Preferences"]["signon.generation.enabled"]["Value"], False)
+
+
 class WebsiteLayoutTests(unittest.TestCase):
     def test_found_previews_stay_in_one_column(self):
         # Sunrise E2E: .notice is a flex column with max-height; with flex-wrap: wrap the list of
