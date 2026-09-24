@@ -119,7 +119,6 @@ class SwapFileTests(unittest.TestCase):
 
 
 class StandTests(unittest.TestCase):
-    @unittest.skipUnless(os.access("/dev/kvm", os.R_OK | os.W_OK), "KVM device unavailable")
     def test_disk_vm_does_not_reset_on_emulated_watchdog(self):
         """Exercise the disk launch path that previously reset after a valid UEFI resume."""
         source = Path(__file__).resolve().parents[1] / "scripts/run-live-web-vm.sh"
@@ -128,6 +127,10 @@ class StandTests(unittest.TestCase):
             (root / "scripts").mkdir()
             script = root / "scripts/run-live-web-vm.sh"
             shutil.copy2(source, script)
+            kvm_check = "[[ -r /dev/kvm && -w /dev/kvm ]] || { echo 'KVM unavailable'; exit 1; }"
+            contents = script.read_text()
+            self.assertIn(kvm_check, contents)
+            script.write_text(contents.replace(kvm_check, ": # fake QEMU does not need KVM", 1))
             (root / ".local/live-test").mkdir(parents=True)
             (root / ".local/live-test-target.qcow2").touch()
             (root / ".local/live-test/OVMF_VARS-uefi.fd").touch()
