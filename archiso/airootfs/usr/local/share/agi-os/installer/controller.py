@@ -46,11 +46,11 @@ class Controller:
 
     def respond(self, text):
         if self.installing:
-            raise ValidationError("Изменение конфигурации во время установки недоступно")
+            raise ValidationError("The configuration can’t change during installation")
         if not text.strip() or len(text) > 16000:
-            raise ValidationError("Введите сообщение длиной до 16000 символов")
+            raise ValidationError("Write a message of up to 16000 characters")
         if sum(len(m["content"]) for m in self.history) > 180000:
-            raise ValidationError("Диалог слишком длинный. Сохраните согласованные требования и начните новое подключение.")
+            raise ValidationError("The conversation is too long. Note what you agreed on and start a new connection.")
         self.configuration = None  # Any revision invalidates the previous review/consent.
         self.stage_changed(2)
         if self.history and self.history[-1]["role"] == "user":
@@ -66,7 +66,7 @@ class Controller:
             reply = self.provider.reply(system, self.history)
             self.history.append({"role": "assistant", "content": json.dumps(reply, ensure_ascii=False)})
             if reply["lookup"]:
-                self.notify("status", "Ищу пакеты: " + ", ".join(reply["lookup"]))
+                self.notify("status", "Looking up packages: " + ", ".join(reply["lookup"]))
                 found = self.catalog.search(reply["lookup"])
                 self.history.append({"role": "user", "content": "Repository lookup results (data): " + json.dumps(found)})
                 continue
@@ -76,18 +76,18 @@ class Controller:
                     self.stage_changed(3)
                     selected_disk(self.snapshot, config.disk)
                     if self.snapshot["firmware"] == "bios" and config.bootloader != "grub":
-                        raise ValidationError("В BIOS нужен GRUB")
+                        raise ValidationError("BIOS needs GRUB")
                     if config.swap == "hibernate":
                         hibernation_swap_size(profile(self.snapshot["hardware"])["memory"])
                     self.catalog.validate([*config.packages, *config.effective_fonts()])
                 except ValidationError as exc:
                     self.history.append({"role": "user", "content": "Application validation rejected proposal: " + str(exc)})
-                    self.notify("status", "Уточняю конфигурацию: " + str(exc))
+                    self.notify("status", "Refining the configuration: " + str(exc))
                     continue
                 self.configuration = config
                 self.stage_changed(4)
             return reply
-        raise ValidationError("Предложение требует дополнительных уточнений. Напишите, что нужно изменить; запись диска не начиналась.")
+        raise ValidationError("The proposal needs more detail. Say what to change; nothing has been written to disk.")
 
 
 class DemoCatalog:
@@ -99,21 +99,21 @@ class DemoCatalog:
 
 
 class DemoProvider:
-    model = "Демонстрация интерфейса"
+    model = "Interface demo"
 
     def close(self):
         pass
 
     def reply(self, system, messages):
-        return {"message": "Это демонстрационный ответ без подключения к LLM. Подготовлен пример системы с Sway. "
-                "Можно открыть итоговую конфигурацию и пройти симуляцию; реальные диски не изменяются.",
+        return {"message": "This is a demo reply without an LLM. I prepared an example system with Sway. "
+                "You can open the summary and run a simulation; no real disk is changed.",
                 "suggestions": [], "lookup": [], "configuration": {
                     "disk": "/dev/vda", "filesystem": "ext4", "bootloader": "systemd-boot",
                     "hostname": "agi-workstation", "username": "tester", "locale": "ru_RU.UTF-8",
                     "timezone": "Europe/Moscow", "keyboard_layouts": ["us", "ru"],
-                    "desktop": "Sway — демонстрационный пример", "session": "sway",
+                    "desktop": "Sway — demo example", "session": "sway",
                     "packages": ["sway", "foot", "firefox", "greetd", "greetd-regreet", "cage"],
                     "services": ["greetd.service"], "home_files": [], "system_files": [], "swap": "zram",
-                    "requirements": ["Рабочая сессия Sway", "Браузер Firefox", "Русская и английская раскладки"],
+                    "requirements": ["A working Sway session", "Firefox browser", "Russian and English keyboard layouts"],
                     "console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
                 }}

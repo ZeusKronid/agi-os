@@ -26,8 +26,8 @@ def sample_record(**changes):
               'configuration': DemoProvider().reply('', [])['configuration'], 'encrypted': True, 'firmware': 'uefi',
               'target': {'path': '/dev/vda', 'size': 64 * GIB, 'model': 'Disk', 'serial': 'AGIOS_TARGET', 'wwn': ''},
               'hardware': demo(), 'vm': {'memory': 4096, 'cpus': 4},
-              'storage': {'kind': 'partition', 'title': 'Новый раздел', 'revert': 'Удалить запись раздела'},
-              'journal': [{'time': 't', 'text': 'Хранилище превью подготовлено'}]}
+              'storage': {'kind': 'partition', 'title': 'A new partition in free space on /dev/vda', 'revert': 'delete one added partition entry; existing partitions stay'},
+              'journal': [{'time': 't', 'text': 'Preview storage prepared'}]}
     record.update(changes)
     return record
 
@@ -112,7 +112,7 @@ class GapStorageTests(unittest.TestCase):
         part = {'path': str(self.device), 'size': 4 * 2**20}
         entry = storage_worker.partition_entry(disk, part)
         self.assertIsNone(entry['record'])
-        self.assertIn('Записи превью нет', entry['problem'])
+        self.assertIn('No preview record', entry['problem'])
         storage_worker.write_gap(str(self.device), preview_record.encode_gap(preview_record.clean(sample_record())))
         entry = storage_worker.partition_entry(disk, part)
         self.assertEqual(entry['record']['status'], 'ready')
