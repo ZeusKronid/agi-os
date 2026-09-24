@@ -1,0 +1,27 @@
+/* Helios notifications: a Surface card, the summary in Newsreader, the body in Ink Muted. */
+#XfceNotifyWindow {
+    background-color: #110e0c;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    color: #f6f2ec;
+}
+#XfceNotifyWindow label#summary {
+    font-family: "Newsreader";
+    font-size: 13pt;
+    font-weight: normal;
+    color: #f6f2ec;
+}
+#XfceNotifyWindow label#body {
+    font-family: "Geist";
+    font-size: 9.5pt;
+    color: #8f887e;
+}
+#XfceNotifyWindow button {
+    background: transparent;
+    border: 1px solid rgba(255, 106, 61, 0.36);
+    border-radius: 7px;
+    box-shadow: none;
+    color: #f6f2ec;
+}
+#XfceNotifyWindow button:hover { border-color: #ff6a3d; }
+#XfceNotifyWindow progressbar progress { background-color: #ff6a3d; border: none; }
