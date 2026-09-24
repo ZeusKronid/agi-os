@@ -184,7 +184,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertFalse(any("/usr/bin/sway" in c for c in calls))
         bash = next(c for c in calls if "/usr/bin/bash" in c)
-        self.assertEqual(bash, ["arch-chroot", bash[1], "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
+        self.assertEqual(bash, ["arch-chroot", bash[1], "env", "LC_ALL=C.UTF-8", "/usr/bin/bash", "-n", "/etc/profile.d/agi.sh"])
 
     def test_systemd_failure_explains_file_modes(self):
         config = dataclasses.replace(self.config(), system_files=(("etc/systemd/user/agi.service",
