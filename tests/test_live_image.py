@@ -72,6 +72,11 @@ class LiveImageTests(unittest.TestCase):
     def test_chatgpt_backend_packages_remain(self):
         self.assertTrue({"openai-codex", "bubblewrap"} <= packages())
 
+    def test_ntfs_resize_tools_are_in_live(self):
+        # Arch split the FUSE driver from the userspace tools. The storage helper
+        # needs ntfsresize to offer and perform a data-preserving NTFS shrink.
+        self.assertIn("ntfsprogs", packages())
+
 
 class BootMediaTests(unittest.TestCase):
     def test_boot_cd_does_not_get_a_failing_loop_unit(self):
