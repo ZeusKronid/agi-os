@@ -23,6 +23,11 @@ BOOT_SIZE = GIB
 BIOS_BOOT_SIZE = 2 * MIB
 # sgdisk type codes. XBOOTLDR: /boot next to an ESP shared with other systems.
 BIOS_BOOT, ESP, LINUX, XBOOTLDR = "ef02", "ef00", "8300", "ea00"
+# MBR (msdos) partition type of Linux file systems.
+MBR_LINUX = "83"
+# MBR entries hold 32-bit sector numbers: nothing may end beyond 2 TiB.
+MBR_SECTORS = 2**32
+SECTOR = 512
 ESP_GUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 MKFS_FORCE = {"ext4": "-F", "btrfs": "-f", "xfs": "-f", "f2fs": "-f"}
 
@@ -36,8 +41,8 @@ class Partition:
     number: int
     role: str        # "bios" (GRUB core on BIOS/GPT), "boot" (/boot) or "root"
     size: int | None  # bytes; None takes the rest of the disk
-    typecode: str
-    name: str
+    typecode: str    # sgdisk code on GPT, MBR type byte (hex) on msdos
+    name: str        # GPT partition name; MBR entries have none
     filesystem: str | None  # of the partition itself; the root's is in the plan's stack
 
 
@@ -66,6 +71,14 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
         raise ValidationError("Unknown firmware type")
     if shared_esp and (firmware != "uefi" or config.bootloader != "systemd-boot"):
         raise ValidationError("Only systemd-boot on UEFI shares the existing EFI system partition")
+    if getattr(config, "partition_table", "gpt") == "msdos":
+        if firmware != "bios" or config.bootloader != "grub":
+            raise ValidationError("An MBR (msdos) disk is set up only for BIOS computers with GRUB; UEFI needs GPT")
+        # GRUB's core image goes to the gap after the MBR (partitions start at 1 MiB);
+        # /boot is the active partition for BIOSes that look for one.
+        parts = (Partition(1, "boot", BOOT_SIZE, MBR_LINUX, "", "ext4"),
+                 Partition(2, "root", None, MBR_LINUX, "", None))
+        return Plan(firmware, "msdos", parts, bool(encrypted), config.filesystem)
     parts = []
     if firmware == "bios":
         parts.append(Partition(1, "bios", BIOS_BOOT_SIZE, BIOS_BOOT, "BIOS", None))
@@ -77,8 +90,38 @@ def plan_for(config, firmware, encrypted=False, shared_esp=False):
     return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem, bool(shared_esp))
 
 
+def mbr_script(entries):
+    """sfdisk input for MBR entries (start sector or None, size in sectors or None, type,
+    active); None lets sfdisk align the start or take the rest of the free space."""
+    lines = []
+    for start, size, typecode, active in entries:
+        fields = [f"start={start}" if start is not None else "", f"size={size}" if size is not None else "",
+                  f"type={typecode}", "bootable" if active else ""]
+        lines.append(", ".join(f for f in fields if f))
+    return "\n".join(lines) + "\n"
+
+
+def check_mbr_size(disk_size):
+    if disk_size // SECTOR > MBR_SECTORS:
+        raise ValidationError("An MBR (msdos) table covers only the first 2 TiB of this disk; choose GPT")
+
+
+def apply_table(runner, plan, disk, disk_size=None):
+    """Replace the disk's table with the plan's partitions."""
+    if plan.table == "msdos":
+        if disk_size is not None:
+            check_mbr_size(disk_size)
+        runner.run(["sgdisk", "--zap-all", disk])
+        entries = [(None, None if p.size is None else p.size // SECTOR, p.typecode, p.role == "boot")
+                   for p in plan.partitions]
+        runner.run(["sfdisk", "--wipe", "always", "--label", "dos", disk], input_text=mbr_script(entries))
+        return
+    for command in table_commands(plan, disk):
+        runner.run(command)
+
+
 def table_commands(plan, disk):
-    """Commands that replace the disk's table with the plan's partitions."""
+    """Commands that replace the disk's GPT with the plan's partitions."""
     args = ["sgdisk"]
     for part in plan.partitions:
         end = "0" if part.size is None else f"+{part.size // MIB}M"

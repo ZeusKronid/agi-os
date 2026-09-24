@@ -339,6 +339,7 @@ def preflight(request):
         raise ValidationError("The disk changed after you confirmed it; nothing was written")
     if snapshot["firmware"] == "bios" and config.bootloader != "grub":
         raise ValidationError("BIOS computers need the GRUB bootloader")
+    layout.plan_for(config, snapshot["firmware"])  # The partition table must suit the firmware.
     if type(request.setdefault("secure_boot", False)) is not bool:
         raise ValidationError("Invalid Secure Boot choice")
     if request["secure_boot"] and (snapshot["firmware"] != "uefi" or config.bootloader != "systemd-boot"):
@@ -357,7 +358,7 @@ def preflight(request):
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("A previous operation still holds the install directory; check its state first")
     tools = ("fallocate", "mkswap", "filefrag") if config.filesystem != "btrfs" else ("btrfs",)
-    for command in ("sgdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
+    for command in ("sgdisk", "sfdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
                     "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount",
                     *(tools if config.swap == "hibernate" else ())):
         if not shutil.which(command):
@@ -421,8 +422,7 @@ def install(request, runner):
     mounted = False
     try:
         emit("progress", stage=5, text="Creating the agreed partitions on " + config.disk)
-        for command in layout.table_commands(plan, config.disk):
-            runner.run(command)
+        layout.apply_table(runner, plan, config.disk, disk["size"])
         runner.run(["partprobe", config.disk])
         runner.run(["udevadm", "settle", "--timeout=30"])
         layout.format_boot(runner, plan, boot)
