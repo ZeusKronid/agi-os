@@ -99,12 +99,14 @@ class GapStorageTests(unittest.TestCase):
 
     def test_gap_must_be_unused_by_the_nested_disk(self):
         table = {'partitiontable': {'label': 'gpt', 'firstlba': 34, 'partitions': [{'start': 2048, 'size': 100}]}}
-        with patch.object(storage_worker, 'sh', return_value=json.dumps(table)):
+        with patch.object(storage_worker, 'partition_table', return_value=table['partitiontable']):
             self.assertTrue(storage_worker.gap_free('/dev/x'))
         table['partitiontable']['partitions'][0]['start'] = 40
-        with patch.object(storage_worker, 'sh', return_value=json.dumps(table)):
+        with patch.object(storage_worker, 'partition_table', return_value=table['partitiontable']):
             self.assertFalse(storage_worker.gap_free('/dev/x'))
-        with patch.object(storage_worker, 'sh', side_effect=ValidationError('no table')):
+        with patch.object(storage_worker, 'partition_table', return_value=None):
+            self.assertTrue(storage_worker.gap_free('/dev/x'))
+        with patch.object(storage_worker, 'partition_table', side_effect=ValidationError('unreadable')):
             self.assertTrue(storage_worker.gap_free('/dev/x'))
 
     def test_partition_entry_reports_missing_record(self):
