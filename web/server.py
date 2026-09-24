@@ -667,13 +667,25 @@ async def stop(request):
     if state.lock.locked() or state.final['phase'] == 'working':
         raise web.HTTPConflict(text='Wait for the current operation to finish')
     async with state.lock:
-        if state.build_task and not state.build_task.done():
+        building = bool(state.build_task and not state.build_task.done())
+        if building:
             state.build_task.cancel()
             await asyncio.gather(state.build_task, return_exceptions=True)
+        clean = True
         if state.vm:
-            await state.vm.stop()
+            if building or not state.vm.running:
+                # Cancelling a build stops the installer VM at once; the preview is unfinished anyway.
+                await state.vm.stop()
+            else:
+                # A preview the user keeps is turned off like a computer, never cut off: a power cut
+                # leaves its file systems dirty and loses what the guest has not written yet.
+                state.status = 'Turning off the preview, as with its power button…'
+                clean = await state.vm.shutdown()
+                if not clean:
+                    log.warning('vm.stop.forced', 'The preview did not turn itself off in time and was stopped')
         if state.disk_ready:
-            state.phase, state.status = 'stopped', 'VM stopped. The preview is kept'
+            state.phase, state.status = 'stopped', ('VM turned off. The preview is kept' if clean else
+                                                    'The preview did not turn itself off in time and was stopped. The preview is kept')
         if state.record_dirty:
             await state.save_record('Preview VM stopped')
         state.persist()
@@ -961,11 +973,16 @@ async def cleanup(app):
         state.scan_task.cancel()
     if state.final_task and not state.final_task.done():
         await asyncio.shield(state.final_task)
-    if state.build_task and not state.build_task.done():
+    building = bool(state.build_task and not state.build_task.done())
+    if building:
         state.build_task.cancel()
         await asyncio.gather(state.build_task, return_exceptions=True)
     if state.vm:
-        await state.vm.stop()
+        if building:
+            await state.vm.stop()
+        else:
+            # The Live is shutting down: give a kept preview a short chance to turn itself off.
+            await state.vm.shutdown(timeout=30)
     await asyncio.to_thread(state.provider.close)
 
 

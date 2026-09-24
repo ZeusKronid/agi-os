@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 import sys
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -151,6 +152,51 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(sorted(p.name for p in (root / 'vm').iterdir()), sorted(['web-newest', vm.directory.name]))
         self.assertTrue((restored.directory / 'guest-console.log').exists())  # resuming prunes nothing
 
+    async def test_stop_turns_a_kept_preview_off_and_cancels_a_build_hard(self):
+        # A kept preview is powered off like a computer (a power cut leaves its file systems
+        # dirty); cancelling a build still stops the installer VM at once.
+        state = self.app['state']
+        state.vm = self.fake_vm()({'format': 'raw', 'path': '/dev/vda2'})
+        state.vm.running = True
+        state.disk_ready = True
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['clean'])
+        self.assertEqual((await response.json())['status'], 'VM turned off. The preview is kept')
+        state.vm.running, state.vm.stops = True, []
+        state.build_task = asyncio.ensure_future(asyncio.sleep(3600))
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['hard'])
+        state.vm, state.build_task = None, None
+
+    async def test_runtime_shutdown_presses_the_power_button_then_falls_back(self):
+        import runtime
+        root = Path(self.directory.name)
+        with patch.object(runtime, 'DATA_ROOT', root):
+            vm = runtime.VirtualMachine({'format': 'qcow2', 'path': str(root / 'none.qcow2')})
+        commands = []
+        class Process:
+            def __init__(self, exits):
+                self.returncode, self.exits = None, exits
+            async def wait(self):
+                while not self.exits and self.returncode is None:
+                    await asyncio.sleep(0.01)
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
+        async def qmp(command):
+            commands.append(command)
+        vm.qmp = qmp
+        vm.process = Process(exits=True)
+        self.assertTrue(await vm.shutdown(timeout=1))
+        self.assertEqual((commands, vm.process.returncode), (['system_powerdown'], 0))
+        vm.process = Process(exits=False)  # a desktop asks to confirm; nobody answers
+        self.assertFalse(await vm.shutdown(timeout=0.05))
+        self.assertEqual(vm.process.returncode, -15)
+
     async def test_runtime_refuses_to_start_outside_live(self):
         import runtime
         with patch.object(runtime, 'DATA_ROOT', Path(self.directory.name)), \
@@ -212,7 +258,13 @@ class LocalApiTests(AioHTTPTestCase):
                 assert hardware is not None and 'gpus' in hardware  # the real computer's inventory reaches the guest
                 notify({'kind': 'progress', 'text': 'Installing'})
                 notify({'kind': 'installed', 'text': 'Installed'})
-            async def stop(self): self.running = False
+            async def stop(self):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['hard']
+            async def shutdown(self, timeout=90):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['clean']
+                return True
         return VM
 
     async def test_successful_build_enables_finalize_and_revert(self):
