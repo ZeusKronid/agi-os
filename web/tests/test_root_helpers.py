@@ -666,7 +666,7 @@ class DualBootFinalizeTests(unittest.TestCase):
         self.assertEqual(bootctl[-3:], ['--esp-path=/efi', '--boot-path=/boot', 'install'])
         self.assertEqual((target / 'efi/loader/loader.conf').read_text(), 'default agi-os.conf\ntimeout 3\n')
         self.assertEqual((target / 'efi/EFI/BOOT/BOOTX64.EFI').read_bytes(), b'foreign fallback loader')
-        self.assertIn(['arch-chroot', str(target), 'systemctl', 'disable', 'systemd-boot-update.service'], self.calls)
+        self.assertIn(['arch-chroot', str(target), 'systemctl', 'mask', 'systemd-boot-update.service'], self.calls)
         self.assertIn('UUID=ESP-UUID /efi vfat umask=0077 0 2', (target / 'etc/fstab').read_text())
         self.assertEqual(record['dual_boot'], {'esp': self.ESP, 'shared_esp': True, 'windows': True})
         umounts = [c[1] for c in self.calls if c[0] == 'umount']
