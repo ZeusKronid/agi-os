@@ -62,12 +62,11 @@ class LiveImageTests(unittest.TestCase):
         self.assertIn("http://localhost:8787", launcher)
         self.assertNotIn("app.py", launcher)
 
-    def test_website_keeps_the_sunrise_fonts_and_english(self):
-        # The website serves these fonts and translates engine messages with english.py.
+    def test_website_keeps_the_sunrise_fonts(self):
+        # The native installer is gone, but the website still serves these fonts.
         fonts = AIROOTFS / "usr/share/fonts/agios"
         for name in ("Geist.ttf", "GeistMono.ttf", "Newsreader.ttf", "Newsreader-Italic.ttf"):
             self.assertTrue((fonts / name).is_file(), name)
-        self.assertTrue((APP / "english.py").is_file())
 
     def test_chatgpt_backend_packages_remain(self):
         self.assertTrue({"openai-codex", "bubblewrap"} <= packages())
