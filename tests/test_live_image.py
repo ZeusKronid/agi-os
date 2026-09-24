@@ -63,6 +63,17 @@ class LiveImageTests(unittest.TestCase):
         self.assertTrue({"openai-codex", "bubblewrap"} <= packages())
 
 
+class BootMediaTests(unittest.TestCase):
+    def test_boot_cd_does_not_get_a_failing_loop_unit(self):
+        # CMP-148: systemd-loop@<cd>.service for the hybrid ISO failed and left the Live "degraded".
+        rule = AIROOTFS / "etc/udev/rules.d/98-agi-no-cdrom-loop.rules"
+        self.assertLess(rule.name, "99-systemd.rules")
+        lines = [line for line in rule.read_text().splitlines() if line and not line.startswith("#")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('ENV{ID_CDROM}=="1"', lines[0])
+        self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
+
+
 class ChatGPTIsolationTests(unittest.TestCase):
     def test_backend_runs_in_bubblewrap_without_host_home_or_tools(self):
         proc = MagicMock()
