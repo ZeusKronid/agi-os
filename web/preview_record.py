@@ -47,23 +47,23 @@ def text(value, limit=500):
 
 def integer(value, low=0, high=2**63):
     if type(value) is not int or not low <= value <= high:
-        raise ValidationError('Некорректное число в записи превью')
+        raise ValidationError('Invalid number in the preview record')
     return value
 
 
 def clean(record):
     """A complete, bounded copy of a record, or ValidationError."""
     if not isinstance(record, dict) or record.get('version') != VERSION:
-        raise ValidationError('Запись превью неизвестной версии')
+        raise ValidationError('Preview record of an unknown version')
     if record.get('status') not in STATUSES:
-        raise ValidationError('Неизвестное состояние в записи превью')
+        raise ValidationError('Unknown status in the preview record')
     config = Configuration.parse(record.get('configuration'))
     target = record.get('target')
     if not isinstance(target, dict):
-        raise ValidationError('В записи превью нет целевого диска')
+        raise ValidationError('The preview record has no target disk')
     storage = record.get('storage')
     if not isinstance(storage, dict) or storage.get('kind') not in KINDS:
-        raise ValidationError('Неизвестный вид хранилища в записи превью')
+        raise ValidationError('Unknown storage kind in the preview record')
     vm = record.get('vm') if isinstance(record.get('vm'), dict) else {}
     try:
         hardware = profile(record.get('hardware'))
@@ -77,7 +77,7 @@ def clean(record):
                                fstype=text(storage.get('fstype'), 10))
     record_id = record.get('id')
     if not isinstance(record_id, str) or not record_id.isalnum() or len(record_id) > 64:
-        raise ValidationError('Некорректный идентификатор записи превью')
+        raise ValidationError('Invalid preview record ID')
     journal = record.get('journal') if isinstance(record.get('journal'), list) else []
     return {
         'version': VERSION, 'id': record_id, 'status': record['status'],
@@ -114,7 +114,7 @@ def encode_gap(record):
     body = zlib.compress(json.dumps(record, ensure_ascii=False, sort_keys=True).encode(), 9)
     frame = MAGIC + b'%d\n' % len(body) + body + hashlib.sha256(body).hexdigest().encode() + b'\n'
     if len(frame) > GAP_BYTES:
-        raise ValidationError('Запись превью не помещается в служебную область раздела')
+        raise ValidationError('The preview record does not fit in the partition’s record area')
     return frame
 
 
@@ -143,7 +143,7 @@ def decode_gap(data):
 def encode_file(record):
     data = json.dumps(record, ensure_ascii=False, indent=1, sort_keys=True).encode()
     if len(data) > FILE_LIMIT:
-        raise ValidationError('Запись превью слишком большая')
+        raise ValidationError('The preview record is too large')
     return data
 
 

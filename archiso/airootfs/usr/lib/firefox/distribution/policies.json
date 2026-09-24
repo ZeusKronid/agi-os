@@ -3,8 +3,14 @@
     "OverrideFirstRunPage": "",
     "OverridePostUpdatePage": "",
     "DontCheckDefaultBrowser": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "PasswordManagerEnabled": false,
+    "OfferToSaveLogins": false,
     "Preferences": {
-      "browser.translations.automaticallyPopup": {"Value": false, "Status": "default"}
+      "browser.translations.automaticallyPopup": {"Value": false, "Status": "default"},
+      "datareporting.policy.dataSubmissionPolicyBypassNotification": {"Value": true, "Status": "locked"},
+      "signon.generation.enabled": {"Value": false, "Status": "locked"}
     }
   }
 }

@@ -6,6 +6,8 @@ check   (root, daily timer) refreshes a private copy of the sync databases and
 apply   (root) one complete, checked update: power and free space first, a btrfs
         snapshot of the root, the keyring before everything else, then
         `pacman -Su`; bootloader refresh, `.pacnew` files and "reboot needed" after.
+rollback (root) puts the root subvolume back to a snapshot taken before an update
+        (btrfs subvolume layout, CMP-153); the kernel files of /boot come back with it.
 --gui   (user) the same as a window: the list, one button, the password only
         on sudo's stdin.
 
@@ -13,12 +15,14 @@ Nothing here reads provider credentials or talks to a model.
 """
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -34,6 +38,14 @@ PACMAN_DB = Path("/var/lib/pacman")
 SNAPSHOTS = Path("/.snapshots")
 SNAPSHOT_PREFIX = "pre-update-"
 KEEP_SNAPSHOTS = 3
+# /boot is its own partition, outside the root snapshot: the kernel and initramfs images of
+# that moment are kept next to the snapshot, so a rollback never boots a kernel whose
+# modules are gone.
+BOOT_COPY_SUFFIX = ".boot"
+BOOT_IMAGES = ("vmlinuz-*", "initramfs-*.img", "*-ucode.img")
+ROOT_SUBVOLUME = "@"
+ROLLBACK_PREFIX = "@rollback-"
+TOP = Path("/run/agi-os-rollback")
 MIN_FREE = 2 * 1024 ** 3
 MIN_BATTERY = 30
 KERNELS = {"linux", "linux-lts", "linux-zen", "linux-hardened", "linux-rt", "linux-rt-lts"}
@@ -51,7 +63,7 @@ def run(args, timeout=600, input_text=None):
                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     if result.returncode:
         detail = (result.stdout + result.stderr).strip()[-2000:]
-        raise UpdateError(f"Ошибка {args[0]} (код {result.returncode})\n{detail}")
+        raise UpdateError(f"{args[0]} failed (code {result.returncode})\n{detail}")
     return result.stdout
 
 
@@ -65,8 +77,8 @@ def stream(args):
         tail = (tail + [line])[-40:]
     if proc.wait():
         detail = "".join(tail).strip()[-2000:]
-        log(f"{args[0]}: код {proc.returncode}\n{detail}")
-        raise UpdateError(f"Ошибка {args[0]} (код {proc.returncode})\n{detail}")
+        log(f"{args[0]}: code {proc.returncode}\n{detail}")
+        raise UpdateError(f"{args[0]} failed (code {proc.returncode})\n{detail}")
 
 
 def boot_id(proc=Path("/proc")):
@@ -116,13 +128,13 @@ def notice_text(status):
     lines = []
     count = len(status.get("updates", []))
     if count:
-        lines.append(f"AGI OS: доступно обновлений: {count}" + (" (включая ядро)" if status.get("kernel") else "")
-                     + ". Установить: sudo agi-os-update apply")
+        lines.append(f"AGI OS: updates available: {count}" + (" (including the kernel)" if status.get("kernel") else "")
+                     + ". Install: sudo agi-os-update apply")
     if status.get("reboot_required"):
-        lines.append("AGI OS: обновление установлено; перезагрузите компьютер, чтобы применить его полностью.")
+        lines.append("AGI OS: an update is installed; restart the computer to apply it fully.")
     if status.get("pacnew"):
-        lines.append("AGI OS: есть новые версии файлов настроек (.pacnew): " + ", ".join(status["pacnew"][:5])
-                     + ". Сравните их с текущими файлами и перенесите нужные изменения.")
+        lines.append("AGI OS: new versions of settings files are available (.pacnew): " + ", ".join(status["pacnew"][:5])
+                     + ". Compare them with the current files and carry over the changes you need.")
     return "".join(line + "\n" for line in lines)
 
 
@@ -139,7 +151,7 @@ def write_status(status, state=None):
 
 def require_root():
     if os.geteuid() != 0:
-        raise UpdateError("Нужны права администратора: sudo agi-os-update " + " ".join(sys.argv[1:]))
+        raise UpdateError("Administrator rights needed: sudo agi-os-update " + " ".join(sys.argv[1:]))
 
 
 def locked():
@@ -148,7 +160,7 @@ def locked():
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise UpdateError("Уже идёт проверка или установка обновлений") from None
+        raise UpdateError("An update check or installation is already running") from None
     return handle
 
 
@@ -159,14 +171,14 @@ def check(db=None, pacman_db=None):
     local = db / "local"
     if not local.is_symlink():
         if local.exists():
-            raise UpdateError("Служебная база проверки обновлений повреждена: " + str(local))
+            raise UpdateError("The update check’s private database is damaged: " + str(local))
         local.symlink_to(pacman_db / "local")
     run(["pacman", "-Sy", "--dbpath", str(db), "--logfile", "/dev/null"], timeout=600)
     result = subprocess.run(["pacman", "-Qu", "--dbpath", str(db)], capture_output=True, text=True,
                             timeout=120, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     # pacman -Qu exits 1 when nothing is outdated.
     if result.returncode not in (0, 1):
-        raise UpdateError("Не удалось сравнить версии пакетов")
+        raise UpdateError("Could not compare package versions")
     updates = parse_updates(result.stdout)
     return {"updates": updates, "kernel": any(u["name"] in KERNELS for u in updates)}
 
@@ -198,20 +210,95 @@ def root_filesystem():
     return subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "/"], capture_output=True, text=True).stdout.strip()
 
 
-def snapshot(stamp, snapshots=None, keep=KEEP_SNAPSHOTS):
+def snapshot(stamp, snapshots=None, keep=KEEP_SNAPSHOTS, boot=None):
     """Read-only btrfs snapshot of the root; the oldest pre-update snapshots beyond `keep` go."""
     snapshots = snapshots or SNAPSHOTS
     if not snapshots.exists():
         run(["btrfs", "subvolume", "create", str(snapshots)])
     target = snapshots / (SNAPSHOT_PREFIX + stamp)
     run(["btrfs", "subvolume", "snapshot", "-r", "/", str(target)])
-    old = sorted(p for p in snapshots.iterdir() if p.name.startswith(SNAPSHOT_PREFIX))[:-keep]
+    if boot:
+        save_boot(target.with_name(target.name + BOOT_COPY_SUFFIX), boot)
+    old = sorted(p for p in snapshots.iterdir()
+                 if p.name.startswith(SNAPSHOT_PREFIX) and not p.name.endswith(BOOT_COPY_SUFFIX))[:-keep]
     for path in old:
         try:
             run(["btrfs", "subvolume", "delete", str(path)])
+            shutil.rmtree(path.with_name(path.name + BOOT_COPY_SUFFIX), ignore_errors=True)
         except UpdateError:
-            log("Не удалось удалить старый снимок " + str(path))
+            log("Could not delete the old snapshot " + str(path))
     return str(target)
+
+
+def save_boot(copy, boot):
+    """The kernel, initramfs and microcode images of /boot at the moment of a snapshot."""
+    copy.mkdir(mode=0o700)
+    for pattern in BOOT_IMAGES:
+        for image in boot.glob(pattern):
+            if image.is_file():
+                shutil.copy2(image, copy / image.name)
+
+
+def snapshot_names(snapshots=None):
+    snapshots = snapshots or SNAPSHOTS
+    try:
+        return sorted(p.name for p in snapshots.iterdir()
+                      if p.name.startswith(SNAPSHOT_PREFIX) and not p.name.endswith(BOOT_COPY_SUFFIX) and p.is_dir())
+    except OSError:
+        return []  # No snapshots directory, or not readable without root.
+
+
+def mounted(field, path="/"):
+    return subprocess.run(["findmnt", "-n", "-v", "-o", field, path], capture_output=True, text=True).stdout.strip()
+
+
+def rollback(name=None, snapshots=None, boot=None, top=None, root=None):
+    """Make a pre-update snapshot the root again. The current root is kept as
+    @rollback-<time> (only the newest such copy stays); the next boot starts the snapshot.
+    /home, /var/log and the package cache are subvolumes of their own and do not change."""
+    snapshots, boot, top = snapshots or SNAPSHOTS, boot or Path("/boot"), top or TOP
+    status = read_status()
+    current_boot_id = boot_id()
+    if (status.get("rollback") and current_boot_id
+            and status.get("applied_boot_id") == current_boot_id):
+        raise UpdateError("Rollback is waiting for a restart: sudo systemctl reboot first.")
+    root = root or {"fstype": mounted("FSTYPE"), "fsroot": mounted("FSROOT"), "source": mounted("SOURCE")}
+    if root["fstype"] != "btrfs" or root["fsroot"] != "/" + ROOT_SUBVOLUME:
+        raise UpdateError("Rollback needs the btrfs subvolume layout (root in @); this system has no snapshots to go back to.")
+    names = snapshot_names(snapshots)
+    if not names:
+        raise UpdateError("There are no snapshots yet: one is taken before every update (sudo agi-os-update apply).")
+    name = name or names[-1]
+    if name not in names:
+        raise UpdateError("Unknown snapshot " + name + ". Available: " + ", ".join(names))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    top.mkdir(parents=True, exist_ok=True)
+    run(["mount", "-o", "subvolid=5", root["source"], str(top)])
+    try:
+        for old in top.glob(ROLLBACK_PREFIX + "*"):
+            run(["btrfs", "subvolume", "delete", str(old)])
+        kept = top / (ROLLBACK_PREFIX + stamp)
+        # The running root stays mounted by its id; only its name at the top level changes.
+        os.rename(top / ROOT_SUBVOLUME, kept)
+        try:
+            run(["btrfs", "subvolume", "snapshot", str(top / "@snapshots" / name), str(top / ROOT_SUBVOLUME)])
+        except UpdateError:
+            os.rename(kept, top / ROOT_SUBVOLUME)
+            raise
+    finally:
+        run(["umount", str(top)])
+    images = snapshots / (name + BOOT_COPY_SUFFIX)
+    restored = []
+    if images.is_dir():
+        for image in sorted(images.iterdir()):
+            shutil.copy2(image, boot / image.name)
+            restored.append(image.name)
+    status["rollback"] = {"at": stamp, "snapshot": name, "previous_root": kept.name, "boot": restored}
+    status["reboot_required"] = True
+    status["applied_boot_id"] = boot_id()
+    write_status(status)
+    log(f"Rollback to {name}; the previous root is {kept.name}")
+    return status["rollback"]
 
 
 def bootloader(record_path=None, boot=Path("/boot")):
@@ -221,12 +308,47 @@ def bootloader(record_path=None, boot=Path("/boot")):
         return "systemd-boot" if (boot / "loader/loader.conf").exists() else "grub"
 
 
-def refresh_bootloader(kind, changed, firmware=None):
+def shared_esp(record_path=None):
+    try:
+        record = json.loads((record_path or RECORD).read_text())
+        return record.get("dual_boot", {}).get("shared_esp") is True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+@contextmanager
+def preserve_efi_fallback(esp):
+    """Keep another system's existing fallback loader when bootctl writes its own.
+
+    The recovery copy stays on the ESP until the original is restored. If bootctl
+    or the copy back fails, it is not discarded by Live's temporary cleanup.
+    """
+    fallback = esp / "EFI/BOOT/BOOTX64.EFI"
+    if not fallback.is_file():
+        yield
+        return
+    with tempfile.NamedTemporaryFile(prefix=".agi-original-", dir=fallback.parent, delete=False) as copy:
+        backup = Path(copy.name)
+        with fallback.open("rb") as original:
+            shutil.copyfileobj(original, copy)
+        copy.flush()
+        os.fsync(copy.fileno())
+    try:
+        yield
+    finally:
+        os.replace(backup, fallback)
+
+
+def refresh_bootloader(kind, changed, firmware=None, esp=Path("/efi")):
     """Re-deploy the bootloader binary after its package changed; kernels need nothing:
     the entries point to fixed /boot paths and mkinitcpio's hook rebuilt the images."""
     done = []
     if kind == "systemd-boot" and "systemd" in changed:
-        run(["bootctl", "--graceful", "update"])
+        if shared_esp():
+            with preserve_efi_fallback(esp):
+                run(["bootctl", "--esp-path=/efi", "--boot-path=/boot", "--graceful", "update"])
+        else:
+            run(["bootctl", "--graceful", "update"])
         done.append("systemd-boot")
     elif kind == "grub" and "grub" in changed:
         firmware = firmware or ("uefi" if Path("/sys/firmware/efi").is_dir() else "bios")
@@ -238,7 +360,7 @@ def refresh_bootloader(kind, changed, firmware=None):
             source = run(["findmnt", "-n", "-o", "SOURCE", "/boot"]).strip()
             disk = run(["lsblk", "-n", "-d", "-o", "PKNAME", source]).strip()
             if not disk:
-                raise UpdateError("Не удалось определить диск загрузчика GRUB")
+                raise UpdateError("Could not find the GRUB bootloader disk")
             run(["grub-install", "--target=i386-pc", "/dev/" + disk])
         run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
         done.append("grub")
@@ -268,52 +390,52 @@ def apply(force=False):
     try:
         if (PACMAN_DB / "db.lck").exists():
             if subprocess.run(["pgrep", "-x", "pacman"], capture_output=True).returncode == 0:
-                raise UpdateError("Менеджер пакетов занят другой операцией. Дождитесь её окончания и повторите.")
+                raise UpdateError("The package manager is busy with another operation. Wait for it to finish and try again.")
             # The lock lives on disk and survives a reboot; removing it is the user's decision.
-            raise UpdateError("Осталась блокировка от прерванной операции pacman (/var/lib/pacman/db.lck). "
-                              "Если никакой менеджер пакетов сейчас не запущен, удалите её: "
-                              "sudo rm /var/lib/pacman/db.lck — и повторите.")
+            raise UpdateError("An interrupted pacman operation left a lock (/var/lib/pacman/db.lck). "
+                              "If no package manager is running now, remove it: "
+                              "sudo rm /var/lib/pacman/db.lck — and try again.")
         low = on_battery_below()
         if low is not None and not force:
-            raise UpdateError(f"Заряд батареи {low}% без зарядки. Подключите питание: обрыв во время "
-                              "обновления ядра может помешать загрузке.")
+            raise UpdateError(f"Battery at {low}% and not charging. Plug in the power: losing power during "
+                              "a kernel update can stop the computer from booting.")
         if free_bytes("/") < MIN_FREE:
-            raise UpdateError("На системном разделе меньше 2 ГиБ свободного места. Освободите место "
-                              "(например, sudo pacman -Sc) и повторите.")
+            raise UpdateError("Less than 2 GiB free on the system partition. Free up space "
+                              "(for example, sudo pacman -Sc) and try again.")
         stamp = time.strftime("%Y%m%d-%H%M%S")
         status = read_status()
         status.pop("error", None)
         taken = None
         if root_filesystem() == "btrfs":
-            emit("Создаю снимок системы перед обновлением…")
+            emit("Taking a system snapshot before the update…")
             try:
-                taken = snapshot(stamp)
-                emit("Снимок: " + taken)
+                taken = snapshot(stamp, boot=Path("/boot"))
+                emit("Snapshot: " + taken)
             except UpdateError as exc:
                 # For example an active swap file in the root subvolume; the update itself is still safe.
-                emit("Снимок не создан, обновляю без него: " + str(exc).splitlines()[-1])
+                emit("No snapshot taken, updating without one: " + str(exc).splitlines()[-1])
         before = installed_versions()
-        emit("Обновляю ключи репозиториев…")
+        emit("Updating the repository keys…")
         stream(["pacman", "-Sy", "--needed", "--noconfirm", "archlinux-keyring"])
-        emit("Устанавливаю обновления…")
+        emit("Installing updates…")
         try:
             stream(["pacman", "-Su", "--noconfirm"])
         except UpdateError as exc:
-            hint = ("Часть пакетов могла обновиться. Не перезагружайтесь и не устанавливайте отдельные "
-                    "пакеты до повторной попытки: sudo agi-os-update apply. Если pacman задаёт вопрос "
-                    "(конфликт пакетов), выполните в терминале sudo pacman -Syu и ответьте на него")
+            hint = ("Some packages may be updated already. Do not restart or install single "
+                    "packages before you try again: sudo agi-os-update apply. If pacman asks a question "
+                    "(a package conflict), run sudo pacman -Syu in a terminal and answer it")
             if taken:
-                hint += f". Снимок системы до обновления: {taken}"
+                hint += f". System snapshot from before the update: {taken}"
             raise UpdateError(hint + "\n" + str(exc)) from None
         changed = changed_packages(before, installed_versions())
-        emit(f"Обновлено пакетов: {len(changed)}")
+        emit(f"Packages updated: {len(changed)}")
         refreshed = refresh_bootloader(bootloader(), changed)
         if refreshed:
-            emit("Загрузчик обновлён: " + ", ".join(refreshed))
+            emit("Bootloader updated: " + ", ".join(refreshed))
             if shutil.which("sbctl"):
                 # Secure Boot: the freshly copied loader must be signed again before the next boot.
                 run(["sbctl", "sign-all"])
-                emit("Загрузчик подписан заново (sbctl)")
+                emit("Bootloader signed again (sbctl)")
         status.update({"checked_at": stamp, "updates": [], "kernel": False,
                        "reboot_required": reboot_required(changed), "applied_boot_id": boot_id(),
                        "pacnew": pacnew_files(),
@@ -321,10 +443,10 @@ def apply(force=False):
                                       "bootloader": refreshed, "result": "ok"}})
         write_status(status)
         if status["reboot_required"]:
-            emit("Перезагрузите компьютер, чтобы запустить обновлённое ядро и службы.")
+            emit("Restart the computer to run the updated kernel and services.")
         if status["pacnew"]:
-            emit("Новые версии файлов настроек ждут сравнения (.pacnew): " + ", ".join(status["pacnew"]))
-        emit("Обновление завершено.")
+            emit("New versions of settings files are waiting to be compared (.pacnew): " + ", ".join(status["pacnew"]))
+        emit("Update finished.")
         return status
     except UpdateError as exc:
         status = read_status()
@@ -334,7 +456,7 @@ def apply(force=False):
             write_status(status)
         except OSError:
             pass
-        log("Ошибка обновления: " + str(exc))
+        log("Update failed: " + str(exc))
         raise
     finally:
         handle.close()
@@ -350,13 +472,13 @@ def run_check():
             status.update(check(), checked_at=stamp)
             status.pop("error", None)
         except UpdateError as exc:
-            status.update(error="Проверка обновлений не удалась: " + str(exc).splitlines()[0], checked_at=stamp)
+            status.update(error="Update check failed: " + str(exc).splitlines()[0], checked_at=stamp)
         # The reminder to reboot ends with the first boot after the update.
         if status.get("reboot_required") and status.get("applied_boot_id") != boot_id():
             status["reboot_required"] = False
         status["pacnew"] = pacnew_files()
         write_status(status)
-        log(f"Проверка: обновлений {len(status.get('updates', []))}" + (", " + status["error"] if status.get("error") else ""))
+        log(f"Check: {len(status.get('updates', []))} updates" + (", " + status["error"] if status.get("error") else ""))
         return status
     finally:
         handle.close()
@@ -364,12 +486,12 @@ def run_check():
 
 def describe(status):
     if not status:
-        return "Обновления ещё не проверялись. Проверить: sudo agi-os-update check"
-    lines = [f"Последняя проверка: {status.get('checked_at', 'нет')}"]
+        return "Updates have not been checked yet. Check: sudo agi-os-update check"
+    lines = [f"Last check: {status.get('checked_at', 'never')}"]
     if status.get("error"):
         lines.append(status["error"])
     updates = status.get("updates", [])
-    lines.append(f"Доступно обновлений: {len(updates)}" + (" (включая ядро)" if status.get("kernel") else ""))
+    lines.append(f"Updates available: {len(updates)}" + (" (including the kernel)" if status.get("kernel") else ""))
     lines += [f"  {u['name']} {u['old']} → {u['new']}" for u in updates[:200]]
     notice = notice_text({k: v for k, v in status.items() if k != "updates"})
     if notice:
@@ -403,7 +525,7 @@ def gui():
     import gi
     gi.require_version("Gtk", "3.0")
     from gi.repository import GLib, Gtk
-    window = Gtk.Window(title="AGI OS — Обновления")
+    window = Gtk.Window(title="AGI OS — Updates")
     window.set_default_size(680, 520)
     window.set_border_width(20)
     window.connect("destroy", Gtk.main_quit)
@@ -413,11 +535,11 @@ def gui():
     scroll = Gtk.ScrolledWindow()
     scroll.add(output)
     box.pack_start(scroll, True, True, 0)
-    password = Gtk.Entry(visibility=False, placeholder_text="Ваш пароль (как для sudo)")
+    password = Gtk.Entry(visibility=False, placeholder_text="Your password (the one for sudo)")
     box.pack_start(password, False, False, 0)
     row = Gtk.Box(spacing=10)
-    check_button = Gtk.Button(label="Проверить сейчас")
-    apply_button = Gtk.Button(label="Обновить систему")
+    check_button = Gtk.Button(label="Check now")
+    apply_button = Gtk.Button(label="Update the system")
     apply_button.get_style_context().add_class("suggested-action")
     row.pack_end(apply_button, False, False, 0)
     row.pack_end(check_button, False, False, 0)
@@ -432,14 +554,14 @@ def gui():
     def finished(code):
         for widget in (check_button, apply_button, password):
             widget.set_sensitive(True)
-        append("\n" + ("Готово." if code == 0 else "Не выполнено: проверьте пароль и сообщения выше.") + "\n\n")
+        append("\n" + ("Done." if code == 0 else "Not done: check the password and the messages above.") + "\n\n")
         append(describe(read_status()) + "\n")
 
     def start(args):
         secret = password.get_text()
         password.set_text("")
         if not secret:
-            append("\nВведите пароль, чтобы продолжить.\n")
+            append("\nEnter your password to continue.\n")
             return
         for widget in (check_button, apply_button, password):
             widget.set_sensitive(False)
@@ -501,7 +623,8 @@ def target_files(session, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="agi-os-update", description="AGI OS system updates")
-    parser.add_argument("action", nargs="?", choices=("status", "check", "apply"), default="status")
+    parser.add_argument("action", nargs="?", choices=("status", "check", "apply", "rollback"), default="status")
+    parser.add_argument("snapshot", nargs="?", help="with rollback: the snapshot to go back to (default: the newest)")
     parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     parser.add_argument("--force", action="store_true", help="update even on a low battery")
     parser.add_argument("--quiet", action="store_true")
@@ -523,11 +646,27 @@ def main(argv=None):
             require_root()
             if not args.yes:
                 print(describe(read_status()))
-                if input("Установить все обновления сейчас? [y/N] ").strip().lower() not in ("y", "yes", "д", "да"):
+                if input("Install all updates now? [y/N] ").strip().lower() not in ("y", "yes"):
                     return 1
             apply(force=args.force)
             return 0
+        if args.action == "rollback":
+            require_root()
+            names = snapshot_names()
+            if not args.yes:
+                print("Snapshots taken before updates: " + (", ".join(names) or "none"))
+                chosen = args.snapshot or (names[-1] if names else "")
+                if input(f"Go back to {chosen}? Files in /home stay as they are. [y/N] ").strip().lower() not in ("y", "yes"):
+                    return 1
+            with locked():
+                done = rollback(args.snapshot)
+            print(f"The system is back at {done['snapshot']} after a restart. The previous state is kept as "
+                  f"{done['previous_root']} until the next rollback. Restart now: sudo systemctl reboot")
+            return 0
         print(describe(read_status()))
+        if snapshot_names():
+            print("Snapshots before updates: " + ", ".join(snapshot_names())
+                  + ". To undo the last update: sudo agi-os-update rollback")
         return 0
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)

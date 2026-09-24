@@ -20,7 +20,7 @@ from providers import ProviderError, parse_json_reply
 class ChatGPTProvider:
     def __init__(self, token_source=None):
         if not shutil.which("bwrap") or not shutil.which("codex"):
-            raise ProviderError("Для входа через ChatGPT нужны пакеты bubblewrap и openai-codex")
+            raise ProviderError("ChatGPT sign-in needs the bubblewrap and openai-codex packages")
         self.token_source = token_source
         home = str(Path.home())
         args = ["bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
@@ -58,13 +58,14 @@ class ChatGPTProvider:
         self.owner.start()
         self.proc = started.get()
         if self.proc is None:
-            raise ProviderError("Не удалось запустить службу ChatGPT")
+            raise ProviderError("Could not start the ChatGPT service")
         self.events = queue.Queue()
         self.responses = {}
         self.ids = 0
         self.model = ""
         self.login_id = None
         self.thread_id = None
+        self.turn_lock = threading.Lock()
         self.reader = threading.Thread(target=self._reader, daemon=True)
         self.reader.start()
         try:
@@ -87,27 +88,29 @@ class ChatGPTProvider:
 
     def send(self, payload):
         if self.closed.is_set() or self.proc.poll() is not None:
-            raise ProviderError("Соединение ChatGPT закрыто. Подключитесь снова через «Сменить провайдера».")
+            raise ProviderError("The ChatGPT connection closed. Connect again from the model button at the top of the page.")
         try:
             self.proc.stdin.write(json.dumps(payload) + "\n")
             self.proc.stdin.flush()
         except (OSError, ValueError):
-            raise ProviderError("Соединение ChatGPT закрыто. Подключитесь снова через «Сменить провайдера».") from None
+            raise ProviderError("The ChatGPT connection closed. Connect again from the model button at the top of the page.") from None
 
-    def next_event(self, timeout=120):
+    def next_event(self, timeout=120, idle=False):
         try:
             event = self.events.get(timeout=timeout)
         except queue.Empty:
-            raise ProviderError("Истекло время ожидания ChatGPT") from None
+            if idle:
+                return None  # The caller polls: nothing arrived yet.
+            raise ProviderError("ChatGPT timed out") from None
         if event.get("closed"):
-            raise ProviderError("Служба ChatGPT завершилась. Проверьте поддержку bubblewrap и версию Codex.")
+            raise ProviderError("The ChatGPT service stopped. Check bubblewrap support and the Codex version.")
         if (self.token_source and event.get("method") == "account/chatgptAuthTokens/refresh"
                 and "id" in event):
             try:
                 tokens = self.token_source()
                 previous = event.get("params", {}).get("previousAccountId")
                 if previous and previous != tokens["chatgptAccountId"]:
-                    raise ProviderError("Аккаунт на хосте изменился; перезапустите мост")
+                    raise ProviderError("The host account changed; restart the bridge")
                 self.send({"id": event["id"], "result": tokens})
             except Exception:
                 self.send({"id": event["id"], "error": {"code": -32000,
@@ -130,11 +133,11 @@ class ChatGPTProvider:
                 if event.get("id") == request_id and "method" not in event:
                     if "error" in event:
                         # Raw backend errors can contain configuration or auth data.
-                        raise ProviderError("ChatGPT не выполнил запрос " + method)
+                        raise ProviderError("ChatGPT didn’t complete the request " + method)
                     return event.get("result", {})
                 if "method" in event and "id" not in event:
                     deferred.append(event)
-            raise ProviderError("Истекло время запроса ChatGPT")
+            raise ProviderError("The ChatGPT request timed out")
         finally:
             for event in deferred:
                 self.events.put(event)
@@ -150,17 +153,25 @@ class ChatGPTProvider:
                 if event["params"].get("loginId") != self.login_id:
                     continue
                 if not event["params"].get("success"):
-                    raise ProviderError("Вход в ChatGPT не завершён")
+                    raise ProviderError("ChatGPT sign-in didn’t finish")
                 self.login_id = None
                 return self.models()
-        raise ProviderError("Время входа в ChatGPT истекло")
+        raise ProviderError("ChatGPT sign-in timed out")
 
     def models(self):
         return [model["model"] for model in self.rpc("model/list", {})["data"]]
 
-    def reply(self, system, messages):
+    # The page can cancel a request: reply() then interrupts the turn on the app-server.
+    cancellable = True
+
+    def reply(self, system, messages, cancel=None):
         if not self.model:
-            raise ProviderError("Выберите модель ChatGPT")
+            raise ProviderError("Pick a ChatGPT model")
+        # One turn at a time: a cancelled turn finishes its interrupt before the next starts.
+        with self.turn_lock:
+            return self._reply(system, messages, cancel or threading.Event())
+
+    def _reply(self, system, messages, cancel):
         # Each turn receives the app's bounded conversation; no persisted thread
         # can introduce tools or state from another installer session.
         thread = self.rpc("thread/start", {"model": self.model, "ephemeral": True,
@@ -173,7 +184,15 @@ class ChatGPTProvider:
         text = ""
         end = time.monotonic() + 180
         while time.monotonic() < end:
-            event = self.next_event(max(0.1, end - time.monotonic()))
+            if cancel.is_set():
+                try:
+                    self.rpc("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id})
+                except ProviderError:
+                    pass  # The app-server may have finished the turn meanwhile.
+                raise ProviderError("The request to ChatGPT was cancelled")
+            event = self.next_event(min(0.5, max(0.1, end - time.monotonic())), idle=True)
+            if event is None:
+                continue
             params = event.get("params", {})
             if params.get("threadId") != self.thread_id:
                 continue
@@ -181,11 +200,11 @@ class ChatGPTProvider:
                 text = params["item"].get("text", "")
             if event.get("method") == "turn/completed" and params.get("turn", {}).get("id") == turn_id:
                 if params["turn"].get("status") != "completed":
-                    raise ProviderError("ChatGPT не завершил ответ")
+                    raise ProviderError("ChatGPT didn’t finish the reply")
                 self.rpc("thread/unsubscribe", {"threadId": self.thread_id})
                 return parse_json_reply(text)
         self.rpc("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id})
-        raise ProviderError("Ответ ChatGPT занял слишком много времени")
+        raise ProviderError("ChatGPT took too long to reply")
 
     JOIN_TIMEOUT = 5
 

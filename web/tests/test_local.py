@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 import sys
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -71,7 +72,9 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertIsNone(state.vm)
         state.persist()
         self.assertNotIn('public-test-fixture', state.record.read_text())
-        self.assertNotIn('password', json.dumps(state.public()))
+        public = json.dumps(state.public())
+        self.assertNotIn('public-test-fixture', public)
+        self.assertNotRegex(public, r'"[^"]*password[^"]*":')  # no password field; summary prose may say “password”
 
     async def test_login_commands_need_their_own_confirmation(self):
         state = self.app['state']
@@ -84,7 +87,7 @@ class LocalApiTests(AioHTTPTestCase):
                 'passphrase': 'private-passphrase', 'memory': 4096, 'cpus': 4}
         response = await self.request('/api/build', body)
         self.assertEqual(response.status, 400)
-        self.assertIn('при входе', (await response.json())['error'])
+        self.assertIn('at login', (await response.json())['error'])
         self.assertIsNone(state.build_task)
         with patch.object(state, 'build', return_value=asyncio.sleep(0)) as build:
             response = await self.request('/api/build', {**body, 'login_reviewed': True})
@@ -105,7 +108,7 @@ class LocalApiTests(AioHTTPTestCase):
         state.preview = {'option': {'title': 'RAM', 'revert': 'x'}, 'image': {'format': 'qcow2', 'path': '/p'}, 'revert': {'kind': 'ram'}}
         state.disk_ready = True
         body = {'layout': 'erase', 'confirmation': config.disk, 'accepted': True, 'enroll_keys': True}
-        for signed, reason in ((False, 'не подписана'), (True, 'Setup Mode')):
+        for signed, reason in ((False, 'not signed'), (True, 'Setup Mode')):
             state.built = {'configuration': config.as_dict(), 'consent': state.current_consent(), 'encrypted': False,
                            'secure_boot': signed}
             response = await self.request('/api/final/finalize', body)
@@ -149,6 +152,51 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(sorted(p.name for p in (root / 'vm').iterdir()), sorted(['web-newest', vm.directory.name]))
         self.assertTrue((restored.directory / 'guest-console.log').exists())  # resuming prunes nothing
 
+    async def test_stop_turns_a_kept_preview_off_and_cancels_a_build_hard(self):
+        # A kept preview is powered off like a computer (a power cut leaves its file systems
+        # dirty); cancelling a build still stops the installer VM at once.
+        state = self.app['state']
+        state.vm = self.fake_vm()({'format': 'raw', 'path': '/dev/vda2'})
+        state.vm.running = True
+        state.disk_ready = True
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['clean'])
+        self.assertEqual((await response.json())['status'], 'VM turned off. The preview is kept')
+        state.vm.running, state.vm.stops = True, []
+        state.build_task = asyncio.ensure_future(asyncio.sleep(3600))
+        response = await self.request('/api/stop', {})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(state.vm.stops, ['hard'])
+        state.vm, state.build_task = None, None
+
+    async def test_runtime_shutdown_presses_the_power_button_then_falls_back(self):
+        import runtime
+        root = Path(self.directory.name)
+        with patch.object(runtime, 'DATA_ROOT', root):
+            vm = runtime.VirtualMachine({'format': 'qcow2', 'path': str(root / 'none.qcow2')})
+        commands = []
+        class Process:
+            def __init__(self, exits):
+                self.returncode, self.exits = None, exits
+            async def wait(self):
+                while not self.exits and self.returncode is None:
+                    await asyncio.sleep(0.01)
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
+        async def qmp(command):
+            commands.append(command)
+        vm.qmp = qmp
+        vm.process = Process(exits=True)
+        self.assertTrue(await vm.shutdown(timeout=1))
+        self.assertEqual((commands, vm.process.returncode), (['system_powerdown'], 0))
+        vm.process = Process(exits=False)  # a desktop asks to confirm; nobody answers
+        self.assertFalse(await vm.shutdown(timeout=0.05))
+        self.assertEqual(vm.process.returncode, -15)
+
     async def test_runtime_refuses_to_start_outside_live(self):
         import runtime
         with patch.object(runtime, 'DATA_ROOT', Path(self.directory.name)), \
@@ -163,7 +211,7 @@ class LocalApiTests(AioHTTPTestCase):
         seen = []
         state = self.app['state']
 
-        def connect(model, show_login):
+        def connect(model, show_login, current=None):
             show_login('file:///etc/shadow')
             seen.append(state.login_url)
             show_login('https://auth.openai.com/oauth/authorize?state=x')
@@ -174,6 +222,42 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(seen, [None, 'https://auth.openai.com/oauth/authorize?state=x'])
         self.assertIsNone((await response.json())['login_url'])
+
+    async def test_chatgpt_on_the_test_bridge_reuses_the_open_port(self):
+        # The stand's bridge port opens only once: connecting "ChatGPT" again used to open it a
+        # second time and answer 500 (EBUSY). The provider that holds it is reused instead.
+        import provider as live_provider
+        class Bridge(live_provider.BridgeProvider):
+            def __init__(self): self.model, self.closed = 'scripted-test', False
+            def close(self): self.closed = True
+        current = live_provider.LiveProvider(Bridge())
+        with patch.object(live_provider, 'PORT', SimpleNamespace(exists=lambda: True)), \
+                patch.object(live_provider, 'LiveProvider', side_effect=AssertionError('opened twice')):
+            self.assertIs(live_provider.connect_chatgpt('other', current=current), current)
+        self.assertEqual(current.model, 'other')
+        self.assertFalse(current.backend.closed)
+
+    async def test_provider_models_are_listed_without_keeping_the_key(self):
+        """CMP-126: the page offers the provider's models instead of a typed id."""
+        seen = []
+        def models(provider):
+            seen.append((provider.kind, provider.endpoint, provider.key))
+            return ['b-model', 'a-model', 'b-model']
+        with patch.object(server.APIProvider, 'models', models):
+            response = await self.request('/api/provider/models', {'kind': 'anthropic', 'key': 'sk-test'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['models'], ['a-model', 'b-model'])
+        self.assertEqual(seen, [('anthropic', 'https://api.anthropic.com/v1', 'sk-test')])
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'chatgpt'})).status, 400)
+        self.assertEqual((await self.request('/api/provider/models', {'kind': 'ollama', 'endpoint': 'http://8.8.8.8'})).status, 400)
+
+    async def test_status_names_the_connected_provider(self):
+        state = self.app['state']
+        api = server.APIProvider('ollama', 'http://127.0.0.1:11434')
+        api.model = 'llama3'
+        import provider as live
+        state.provider = live.LiveProvider(api)
+        self.assertEqual(state.public()['provider'], 'Ollama — local model')
 
     async def test_foreign_origin_cannot_start_vm(self):
         response = await self.request('/api/build', {}, {'Origin': 'https://example.org'})
@@ -210,7 +294,13 @@ class LocalApiTests(AioHTTPTestCase):
                 assert hardware is not None and 'gpus' in hardware  # the real computer's inventory reaches the guest
                 notify({'kind': 'progress', 'text': 'Installing'})
                 notify({'kind': 'installed', 'text': 'Installed'})
-            async def stop(self): self.running = False
+            async def stop(self):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['hard']
+            async def shutdown(self, timeout=90):
+                self.running = False
+                self.stops = getattr(self, 'stops', []) + ['clean']
+                return True
         return VM
 
     async def test_successful_build_enables_finalize_and_revert(self):
@@ -252,6 +342,8 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertFalse(state.disk_ready)
         self.assertFalse(state.public()['can_resume'])
         self.assertTrue(state.public()['can_revert'])
+        # The put-back dialog of an unfinished build describes the chosen storage's undo.
+        self.assertEqual(state.public()['preview_revert'], option['revert'])
 
     async def test_failed_file_check_goes_back_to_the_model(self):
         state = self.app['state']
@@ -277,7 +369,7 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(state.error, failure)
         self.assertEqual(state.controller.history[-1]['role'], 'user')
         self.assertIn('invalid section name', state.controller.history[-1]['content'])
-        self.assertIn('агента', state.status)
+        self.assertIn('Ask the agent to fix them', state.status)
 
     async def test_in_memory_preview_is_forgotten_after_live_restart(self):
         state = self.app['state']
@@ -298,8 +390,8 @@ class PreviewRecordApiTests(AioHTTPTestCase):
     fake_plan, fake_vm = LocalApiTests.fake_plan, LocalApiTests.fake_vm
 
     def partition_option(self):
-        return {'id': 'part:/dev/vda:2048', 'kind': 'partition', 'title': 'Новый раздел', 'detail': '',
-                'revert': 'Удалить одну запись раздела', 'destructive': False, 'confirm': None, 'fits': True,
+        return {'id': 'part:/dev/vda:2048', 'kind': 'partition', 'title': 'A new partition in free space on /dev/vda', 'detail': '',
+                'revert': 'delete one added partition entry; existing partitions stay', 'destructive': False, 'confirm': None, 'fits': True,
                 'available': 20 * 2**30}
 
     async def build_on_partition(self, fail=False):
@@ -329,7 +421,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         self.assertEqual(marks[-1]['status'], 'ready')
         self.assertTrue(marks[-1]['encrypted'])
         texts = [e['text'] for e in marks[-1]['journal']]
-        self.assertIn('Система установлена в превью', texts)
+        self.assertIn('System installed in the preview', texts)
         self.assertTrue(any('Installing' in t for t in texts))
         dump = json.dumps(marks)
         self.assertNotIn('public-test-fixture', dump)
@@ -344,7 +436,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
     def found(self, status='ready', **record_changes):
         from test_preview_record import sample_record
         record = sample_record(status=status, **record_changes)
-        record['target'].update(path='/dev/sdz', size=64 * 2**30, model='Демонстрационный диск', serial='DEMO-ONLY', wwn='')
+        record['target'].update(path='/dev/sdz', size=64 * 2**30, model='Demo disk', serial='DEMO-ONLY', wwn='')
         import preview_record
         return {'id': 'partition:/dev/vda2', 'kind': 'partition', 'disk': '/dev/vda', 'device': '/dev/vda2',
                 'size': 20 * 2**30, 'medium': 'Disk', 'problem': None, 'record': preview_record.clean(record)}
@@ -353,7 +445,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         state = self.app['state']
         state.found = [self.found('ready'), {**self.found('failed'), 'id': 'file:/dev/sdb1', 'device': '/dev/sdb1'},
                        {'id': 'partition:/dev/vda3', 'kind': 'partition', 'disk': '/dev/vda', 'device': '/dev/vda3',
-                        'size': 1, 'medium': 'Disk', 'problem': 'Записи превью нет', 'record': None}]
+                        'size': 1, 'medium': 'Disk', 'problem': 'No preview record', 'record': None}]
         found = {f['id']: f for f in state.public()['found']}
         self.assertTrue(found['partition:/dev/vda2']['can_continue'])
         self.assertFalse(found['partition:/dev/vda2']['can_retry'])
@@ -430,7 +522,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         async def privileged(script, request):
             calls.append(request['op'])
             if request['op'] == 'remove':
-                return {'reverted': True, 'text': 'Раздел превью удалён'}
+                return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
             return {'found': []}
         with patch.object(server, 'privileged', privileged):
             response = await self.request('/api/previews/retry', {'id': 'partition:/dev/vda2'})
@@ -455,19 +547,19 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         state.found = [self.found('ready')]
         async def privileged(script, request):
             if request['op'] == 'remove':
-                return {'reverted': True, 'text': 'Раздел превью удалён'}
+                return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
             return {'found': []}
         with patch.object(server, 'privileged', privileged):
             response = await self.request('/api/previews/remove', {'id': 'partition:/dev/vda2'})
             self.assertEqual(response.status, 200)
             response = await self.request('/api/previews/remove', {'id': 'partition:/dev/vda9'})
             self.assertEqual(response.status, 400)
-        self.assertEqual(state.status, 'Раздел превью удалён')
+        self.assertEqual(state.status, 'Preview partition deleted; other partitions stay')
 
     async def test_site_restart_during_installation_is_not_a_success(self):
         state = self.app['state']
         state.controller.configuration = demo_configuration()
-        state.preview = {'option': {'title': 'Раздел', 'revert': 'x'}, 'image': {'format': 'raw', 'path': '/dev/vda2'},
+        state.preview = {'option': {'title': 'Partition', 'revert': 'x'}, 'image': {'format': 'raw', 'path': '/dev/vda2'},
                          'revert': {'kind': 'partition'}}
         state.persist()
         state.restore()

@@ -141,8 +141,8 @@ class ExplicitChoiceTests(RegionalTestCase):
         summary = self.config(locale_overrides=[{"variable": "LC_TIME", "locale": "en_GB.UTF-8"}], time_sync=False).summary(
             {"size": 64 * 2**30, "model": "disk"})
         self.assertIn("LC_TIME=en_GB.UTF-8", summary)
-        self.assertIn("NTP): выключена", summary)
-        self.assertIn("Консоль: раскладка ruwin_alt_sh-UTF-8 (автоматически), шрифт cyr-sun16 (автоматически)", summary)
+        self.assertIn("Time sync (NTP): off", summary)
+        self.assertIn("Console: keymap ruwin_alt_sh-UTF-8 (automatic), font cyr-sun16 (automatic)", summary)
 
 
 class WorkerRegionalTests(RegionalTestCase):
@@ -183,7 +183,7 @@ class WorkerRegionalTests(RegionalTestCase):
         import worker
         config = self.config()
         with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "TARGET", Path(tmp)):
-            with self.assertRaisesRegex(ValidationError, "раскладки консоли"):
+            with self.assertRaisesRegex(ValidationError, "no console keymap"):
                 worker.check_console(config)
 
 
@@ -216,17 +216,17 @@ class VerifyRegionalTests(unittest.TestCase):
         checks = self.run_checks("KEYMAP=ruwin_alt_sh-UTF-8\nFONT=cyr-sun16\n", ["LANG=ru_RU.UTF-8", "LC_TIME=en_GB.UTF-8"],
                                  "C\nC.utf8\nPOSIX\nen_US.utf8\nru_RU.utf8")
         self.assertTrue(all(checks.values()), checks)
-        self.assertIn("Шрифт с кириллицей для интерфейса", checks)
-        self.assertIn("Синхронизация времени (NTP)", checks)
+        self.assertIn("Interface font with Cyrillic", checks)
+        self.assertIn("Time sync (NTP)", checks)
 
     def test_each_regional_problem_is_reported(self):
         ok_console, ok_conf, ok_locales = "KEYMAP=ruwin_alt_sh-UTF-8\nFONT=cyr-sun16\n", ["LANG=ru_RU.UTF-8", "LC_TIME=en_GB.UTF-8"], "en_US.utf8\nru_RU.utf8"
-        cases = [(("KEYMAP=us\nFONT=cyr-sun16\n", ok_conf, ok_locales), {}, "Консоль: раскладка ruwin_alt_sh-UTF-8"),
-                 (("KEYMAP=ruwin_alt_sh-UTF-8\n", ok_conf, ok_locales), {}, "Консоль: шрифт cyr-sun16"),
-                 ((ok_console, ["LANG=ru_RU.UTF-8"], ok_locales), {}, "Форматы: LC_TIME=en_GB.UTF-8"),
-                 ((ok_console, ok_conf, "en_US.utf8"), {}, "Локали сгенерированы: en_US.UTF-8, ru_RU.UTF-8"),
-                 ((ok_console, ok_conf, ok_locales), {"fonts_lang": ""}, "Шрифт с кириллицей для интерфейса"),
-                 ((ok_console, ok_conf, ok_locales), {"timesync": 1}, "Синхронизация времени (NTP)")]
+        cases = [(("KEYMAP=us\nFONT=cyr-sun16\n", ok_conf, ok_locales), {}, "Console: keymap ruwin_alt_sh-UTF-8"),
+                 (("KEYMAP=ruwin_alt_sh-UTF-8\n", ok_conf, ok_locales), {}, "Console: font cyr-sun16"),
+                 ((ok_console, ["LANG=ru_RU.UTF-8"], ok_locales), {}, "Formats: LC_TIME=en_GB.UTF-8"),
+                 ((ok_console, ok_conf, "en_US.utf8"), {}, "Locales generated: en_US.UTF-8, ru_RU.UTF-8"),
+                 ((ok_console, ok_conf, ok_locales), {"fonts_lang": ""}, "Interface font with Cyrillic"),
+                 ((ok_console, ok_conf, ok_locales), {"timesync": 1}, "Time sync (NTP)")]
         for args, kwargs, failing in cases:
             with self.subTest(failing=failing):
                 checks = self.run_checks(*args, **kwargs)
@@ -236,7 +236,7 @@ class VerifyRegionalTests(unittest.TestCase):
     def test_console_system_skips_gui_font_checks(self):
         checks = self.run_checks("KEYMAP=ruwin_alt_sh-UTF-8\nFONT=cyr-sun16\n", ["LANG=ru_RU.UTF-8", "LC_TIME=en_GB.UTF-8"],
                                  "en_US.utf8\nru_RU.utf8", graphical=False)
-        self.assertNotIn("Шрифты интерфейса установлены", checks)
+        self.assertNotIn("Interface fonts installed", checks)
 
     def test_locale_names_match_locale_a(self):
         self.assertEqual(verify.normalized_locale("ru_RU.UTF-8"), "ru_RU.utf8")

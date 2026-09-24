@@ -147,8 +147,8 @@ class ReviewTests(unittest.TestCase):
         self.assertTrue(context["preview_cannot_verify"])
         config = Configuration.parse(DemoProvider().reply("", [])["configuration"])
         summary = config.summary(demo_inventory()["disks"][0], demo_inventory()["hardware"])
-        self.assertIn("Оборудование компьютера", summary)
-        self.assertIn("НЕ проверяет", summary)
+        self.assertIn("This computer’s hardware:", summary)
+        self.assertIn("does NOT check: ", summary)
         self.assertIn("bluez", summary)
 
 
@@ -163,9 +163,10 @@ class HardeningTests(unittest.TestCase):
 
     def test_undetected_hardware_is_never_reported_as_verified(self):
         nothing = hardware.profile({"detected": False})
-        self.assertTrue(any("не определено" in u for u in hardware.driver_plan(nothing)["unverified"]))
-        self.assertTrue(any("не удалось определить" in line for line in hardware.describe(nothing)))
-        self.assertEqual({True: "включён", False: "выключен"}.get(nothing["secure_boot"], "нет данных"), "нет данных")
+        self.assertTrue(any("undetected hardware" in u for u in hardware.driver_plan(nothing)["unverified"]))
+        self.assertTrue(any("could not be detected" in line for line in hardware.describe(nothing)))
+        self.assertIsNone(nothing["secure_boot"])
+        self.assertIn("Secure Boot: unknown", hardware.describe(nothing)[-1])
 
     def test_user_chosen_power_daemon_is_still_enabled(self):
         plan = hardware.driver_plan(laptop(), ("power-profiles-daemon",), "sway")
@@ -236,7 +237,7 @@ class CounterpartTests(unittest.TestCase):
 
     def test_memory_is_shown_as_installed_size(self):
         h = laptop(); h["memory"] = int(15.3 * 2**30)
-        self.assertIn("~16 ГиБ", hardware.describe(h)[0])
+        self.assertIn("~16 GiB", hardware.describe(h)[0])
 
 
 class FinalizationTests(unittest.TestCase):

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-6"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-7"></head>
 <body>
 <canvas id="sky" aria-hidden="true"></canvas>
 
@@ -30,17 +30,26 @@
         <p>We’ll run it right here, on this computer, before anything touches the disk.</p>
       </div>
       <div id="messages"></div>
-      <div id="thinking" class="line status" hidden><span class="typing"><i></i><i></i><i></i></span><span id="thinkingText">The agent is thinking about the configuration…</span></div>
+      <div id="thinking" class="thinking" hidden>
+        <div class="line status"><span class="typing"><i></i><i></i><i></i></span><span id="thinkingText">The agent is thinking about the configuration…</span><span id="thinkingTime" class="elapsed"></span><button type="button" id="cancelChat" class="btn ghost">Cancel</button></div>
+        <ol id="thinkingSteps" class="turn-steps"></ol>
+      </div>
       <div id="error" class="line error" hidden></div>
     </div>
     <div class="dock">
       <div id="welcome" class="chips">
-        <button class="chip" data-prompt="A light desktop with XFCE, Firefox and a terminal. English, US keyboard, Berlin time. User tester, computer name agios.">A desktop for everyday tasks</button>
+        <button class="chip" data-prompt="I’m not sure what I need. Ask me a couple of simple questions about how I’ll use this computer, then recommend a system.">Help me choose</button>
+        <button class="chip" data-prompt="A computer for everyday things: the web, documents, photos and video calls. Recommend a system and tell me why it suits me.">Everyday use</button>
         <button class="chip" data-prompt="Help me build a Linux setup for development. Suggest a desktop and tools.">A setup for development</button>
+        <button class="chip" data-prompt="I want to watch videos, listen to music and play games. Recommend a system for that.">Media and games</button>
+        <button class="chip" data-prompt="My computer is old or I want something minimal and fast. Recommend a light system.">Light and fast</button>
         <button class="chip" data-prompt="I don’t want to choose anything — install the standard AGIOS system with default settings.">Choose for me</button>
       </div>
       <div id="suggestions" class="chips"></div>
       <div id="consentError" class="line error" hidden></div>
+      <p id="kept" class="hint kept" hidden>The agreed configuration is unchanged: the agent’s last reply did not change it. Answer the agent to change it, or go on with it.</p>
+      <p id="changedNote" class="line warn" hidden>The agent changed the configuration after the preview was built. The preview still runs the previous system.</p>
+      <button id="rebuildButton" class="cta" hidden><span class="rebuild-text">Rebuild the preview with the changes</span><b>↻</b></button>
       <button id="placeButton" class="cta" hidden><span id="placeText">All set — find room for the preview</span><b>↑</b></button>
       <button id="previewButton" class="cta" hidden>Back to the preview<b>↑</b></button>
       <button id="connectButton" class="cta" hidden>Connect a model to start<b>→</b></button>
@@ -67,7 +76,7 @@
       <div class="row"><button id="resumeInline" class="btn outline">Start again</button><button id="reconnect" class="btn outline">Reconnect</button><button id="revertInline" class="btn outline">Put everything back</button><button class="btn ghost" data-log>Log</button></div>
     </div>
   </section>
-  <p id="said" class="said" hidden><span class="who">AGIOS</span><span id="saidText"></span></p>
+  <div id="said" class="said" hidden><span class="who">AGIOS</span><span id="saidText"></span><button type="button" id="cancelSaid" class="btn ghost" hidden>Cancel</button><button type="button" id="rebuildSaid" class="btn outline" hidden><span class="rebuild-text">Rebuild the preview with the changes</span></button></div>
   <div id="vmbar" class="vmbar" hidden>
     <button id="toChat" class="icon bare" aria-label="Back to the conversation" title="Back to the conversation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 8H3M7 4 3 8l4 4"/></svg></button>
     <button id="putBack" class="btn quiet">Put it back</button>
@@ -152,6 +161,7 @@
       <label class="check"><input type="radio" name="layout" value="alongside" checked><span><b>Keep what’s on the disk</b> — install next to your files and other systems, in free space</span></label>
       <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the disk</b> — delete everything on it and install on the whole disk</span></label>
       <p id="layoutWarning" class="hint"></p>
+      <p id="changedWarning" class="line warn" hidden>The agent changed the configuration after this preview was built. Install puts the system you tried on the disk, without those changes. To include them, rebuild the preview first.</p>
       <label class="field" id="finalPassphraseField" hidden><span>Encryption password</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
       <div id="secureBootFinal" hidden><label class="check"><input type="checkbox" id="enrollKeys"><span>Enroll this system’s Secure Boot keys in the computer’s firmware (together with Microsoft’s)</span></label><p id="secureBootHint" class="hint"></p></div>
       <label class="check"><input type="checkbox" id="finalAccepted"><span>I tried the system in the preview and want to install it</span></label>
@@ -182,12 +192,14 @@
     <button type="button" class="seg" data-kind="chatgpt">ChatGPT</button><button type="button" class="seg" data-kind="openai">OpenAI</button><button type="button" class="seg" data-kind="anthropic">Anthropic</button><button type="button" class="seg" data-kind="gemini">Gemini</button><button type="button" class="seg" data-kind="ollama">Ollama</button><button type="button" class="seg" data-kind="compatible">Other API</button>
   </div>
   <p id="providerNote" class="hint"></p>
-  <label class="field"><span>Model</span><input id="providerModel" autocomplete="off" placeholder="Leave empty to pick one after signing in"></label>
+  <label class="field"><span>Model</span><input id="providerModel" autocomplete="off" list="providerModels" placeholder="Leave empty to pick one after signing in"></label>
+  <datalist id="providerModels"></datalist>
+  <div class="row end" id="listModelsRow"><button type="button" id="listModels" class="btn ghost">List this provider’s models</button></div>
   <label class="field" id="endpointField"><span>API base URL</span><input id="endpoint" autocomplete="off" placeholder="Optional for a standard provider"></label>
   <label class="field" id="keyField"><span>API key</span><input id="key" type="password" autocomplete="off"></label>
   <p id="providerError" class="line error" role="alert" hidden></p>
   <div class="row end"><button type="button" id="closeSettings" class="btn ghost">Close</button><button type="submit" id="providerSubmit" class="btn primary">Connect</button></div>
 </form></dialog>
 
-<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-6"></script>
+<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-7"></script>
 </body></html>

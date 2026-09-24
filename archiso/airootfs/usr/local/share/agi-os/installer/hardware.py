@@ -27,8 +27,8 @@ PORTABLE_CHASSIS = {8: "Portable", 9: "Laptop", 10: "Notebook", 14: "Sub Noteboo
 CHASSIS = {3: "Desktop", 4: "Low Profile Desktop", 5: "Pizza Box", 6: "Mini Tower", 7: "Tower", 11: "Hand Held",
            13: "All In One", 15: "Space-saving", 16: "Lunch Box", 17: "Main Server Chassis", 23: "Rack Mount Chassis",
            35: "Mini PC", 36: "Stick PC", **PORTABLE_CHASSIS}
-USB_CLASSES = {"01": "звук", "02": "модем", "03": "ввод", "06": "камера", "07": "принтер", "08": "накопитель",
-               "0e": "видео", "e0": "беспроводное", "ff": "устройство"}
+USB_CLASSES = {"01": "audio", "02": "modem", "03": "input", "06": "camera", "07": "printer", "08": "storage",
+               "0e": "video", "e0": "wireless", "ff": "device"}
 # First NVIDIA device ID of the Turing generation: nvidia-open (the open kernel
 # modules) supports Turing and newer only; older chips use nouveau from mesa.
 NVIDIA_OPEN_FROM = 0x1E00
@@ -127,7 +127,7 @@ def usb_devices():
             continue  # hubs
         vendor, product_id = read_text(device / "idVendor"), read_text(device / "idProduct")
         name = read_text(device / "product") or read_text(device / "manufacturer") or f"{vendor}:{product_id}"
-        found.append({"class": clean(klass, 4), "class_name": USB_CLASSES.get(klass, "устройство"), "vendor": clean(VENDORS.get(vendor, ""), 60),
+        found.append({"class": clean(klass, 4), "class_name": USB_CLASSES.get(klass, "device"), "vendor": clean(VENDORS.get(vendor, ""), 60),
                       "vendor_id": clean(vendor, 4), "device_id": clean(product_id, 4), "name": clean(name), "driver": "", "bus": "usb"})
     return found
 
@@ -197,7 +197,7 @@ def detect():
 def profile(data):
     """Bounded, complete copy of an inventory from any source (channel, record, older build)."""
     if not isinstance(data, dict):
-        raise ValueError("Некорректная инвентаризация оборудования")
+        raise ValueError("Invalid hardware inventory")
 
     def devices(items, extra=()):
         if not isinstance(items, list):
@@ -238,29 +238,29 @@ def describe(hardware):
     h = profile(hardware)
     lines = []
     if not h["detected"]:
-        lines.append("Оборудование не удалось определить (lspci недоступен): графика, Wi-Fi и звук не проверены")
+        lines.append("The hardware could not be detected (lspci is unavailable): graphics, Wi-Fi and sound are not checked")
     # MemTotal excludes firmware-reserved memory: a 16 GiB machine reports ~15.3 GiB.
-    lines.append(f"Процессор: {h['cpu']['model'] or h['cpu']['vendor'] or 'не определён'}; "
-                 f"память: ~{2 * math.ceil(h['memory'] / 2**31)} ГиБ (системе доступно {h['memory'] / 2**30:.1f} ГиБ)")
+    lines.append(f"CPU: {h['cpu']['model'] or h['cpu']['vendor'] or 'unknown'}; "
+                 f"memory: ~{2 * math.ceil(h['memory'] / 2**31)} GiB ({h['memory'] / 2**30:.1f} GiB available to the system)")
     chassis = h["chassis"]
     model = " ".join(filter(None, [chassis["vendor"], chassis["product"]]))
-    lines.append(f"Корпус: {'ноутбук' if chassis['portable'] else 'стационарный компьютер'}{' — ' + model if model else ''}"
-                 + ("; батарея есть" if chassis["battery"] else ""))
+    lines.append(f"Computer: {'laptop' if chassis['portable'] else 'desktop'}{' — ' + model if model else ''}"
+                 + ("; has a battery" if chassis["battery"] else ""))
     if h["virtualization"] not in ("none", "unknown", ""):
-        lines.append(f"Виртуальная машина: {h['virtualization']}")
+        lines.append(f"Virtual machine: {h['virtualization']}")
 
     def named(d):
-        return f"{d['vendor']} {d['name']}".strip() + (f" (драйвер {d['driver']})" if d.get("driver") else "")
-    lines.append("Графика: " + ("; ".join(named(g) for g in h["gpus"]) or "не определена"))
-    lines.append("Сеть: " + ("; ".join(("Wi-Fi " if n["kind"] == "wifi" else "Ethernet ") + named(n) for n in h["network"]) or "не определена"))
-    lines.append("Звук: " + ("; ".join(named(a) for a in h["audio"]) or "не определён"))
-    lines.append("Bluetooth: " + ("; ".join(named(b) for b in h["bluetooth"]) or "нет"))
+        return f"{d['vendor']} {d['name']}".strip() + (f" (driver {d['driver']})" if d.get("driver") else "")
+    lines.append("Graphics: " + ("; ".join(named(g) for g in h["gpus"]) or "not detected"))
+    lines.append("Network: " + ("; ".join(("Wi-Fi " if n["kind"] == "wifi" else "Ethernet ") + named(n) for n in h["network"]) or "not detected"))
+    lines.append("Sound: " + ("; ".join(named(a) for a in h["audio"]) or "not detected"))
+    lines.append("Bluetooth: " + ("; ".join(named(b) for b in h["bluetooth"]) or "none"))
     others = [u for u in h["usb"] if u["class"] != "e0"]
     if others:
         lines.append("USB: " + "; ".join(f"{u['class_name']} — {named(u)}" for u in others[:8]))
-    lines.append("TPM: " + ("есть" if h["tpm"] else "нет") + "; Secure Boot: "
-                 + {True: "включён", False: "выключен", None: "нет данных"}[h["secure_boot"]]
-                 + ("; прошивка в режиме Setup Mode — можно записать свои ключи" if h["setup_mode"] else ""))
+    lines.append("TPM: " + ("yes" if h["tpm"] else "no") + "; Secure Boot: "
+                 + {True: "on", False: "off", None: "unknown"}[h["secure_boot"]]
+                 + ("; the firmware is in Setup Mode — you can enroll your own keys" if h["setup_mode"] else ""))
     return lines
 
 
@@ -276,7 +276,7 @@ def driver_plan(hardware, packages=(), session=""):
     add, services, modules, notes, unverified = [], [], [], [], []
     add += {"Intel": ["intel-ucode"], "AMD": ["amd-ucode"]}.get(h["cpu"]["vendor"], ["intel-ucode", "amd-ucode"])
     if not h["detected"]:
-        unverified.append("оборудование не определено: графика, Wi-Fi, звук и Bluetooth")
+        unverified.append("undetected hardware: graphics, Wi-Fi, sound and Bluetooth")
     real_gpus = [g for g in h["gpus"] if g["vendor_id"] not in VIRTUAL_VENDORS]
     # The engine always installs `linux`; extra kernels need their own NVIDIA module.
     kernels = [k for k in EXTRA_KERNELS if k in chosen]
@@ -297,39 +297,39 @@ def driver_plan(hardware, packages=(), session=""):
                     add.append("nvidia-utils")
                     modules += NVIDIA_MODULES
                     if chosen & NVIDIA_MODULE_PACKAGES:
-                        notes.append(f"{label}: используется выбранный вами модуль NVIDIA; модули включаются в initramfs")
+                        notes.append(f"{label}: using the NVIDIA module you chose; the modules go into the initramfs")
                     elif set(kernels) - {"linux-lts"}:
                         add += ["nvidia-open-dkms", "linux-headers", *(k + "-headers" for k in kernels)]
-                        notes.append(f"{label}: драйвер NVIDIA nvidia-open-dkms собирается для каждого ядра "
-                                     f"(linux, {', '.join(kernels)}); модули включаются в initramfs")
+                        notes.append(f"{label}: the NVIDIA driver nvidia-open-dkms is built for each kernel "
+                                     f"(linux, {', '.join(kernels)}); the modules go into the initramfs")
                     else:
                         add += ["nvidia-open", *(["nvidia-open-lts"] if kernels else [])]
-                        notes.append(f"{label}: драйвер NVIDIA — открытые модули ядра nvidia-open (Turing и новее) "
-                                     "и закрытая пользовательская часть nvidia-utils; модули включаются в initramfs")
+                        notes.append(f"{label}: NVIDIA driver — the open kernel modules nvidia-open (Turing and newer) "
+                                     "and the closed user-space part nvidia-utils; the modules go into the initramfs")
                 else:
                     add.append("vulkan-nouveau")
-                    notes.append(f"{label}: старше Turing — в официальных репозиториях нет поддерживаемого проприетарного "
-                                 "драйвера, используется nouveau из mesa")
+                    notes.append(f"{label}: older than Turing — the official repositories have no supported proprietary "
+                                 "driver, so nouveau from mesa is used")
         if h["gpus"] and not real_gpus:
-            notes.append("Графика виртуальная: только mesa")
+            notes.append("The graphics are virtual: mesa only")
     for gpu in real_gpus:
-        unverified.append(f"графика {gpu['vendor']} {gpu['name']}".strip())
+        unverified.append(f"graphics {gpu['vendor']} {gpu['name']}".strip())
     wifi = [n for n in h["network"] if n["kind"] == "wifi"]
     if wifi:
         add.append("wireless-regdb")
         for device in wifi:
             if device["vendor_id"] == "14e4":
-                notes.append(f"Wi-Fi Broadcom {device['name']}: часть чипов работает только с проприетарным драйвером — "
-                             "если Wi-Fi не заработает, установите broadcom-wl-dkms и linux-headers из extra")
+                notes.append(f"Wi-Fi Broadcom {device['name']}: some chips work only with the proprietary driver — "
+                             "if Wi-Fi does not work, install broadcom-wl-dkms and linux-headers from extra")
             elif device["bus"] == "pci" and not device["driver"]:
-                notes.append(f"Wi-Fi {device['vendor']} {device['name']}: в Live драйвер не загрузился — возможно, нужна прошивка или драйвер вне репозиториев")
+                notes.append(f"Wi-Fi {device['vendor']} {device['name']}: the driver did not load in Live — it may need firmware or a driver from outside the repositories")
         unverified.append("Wi-Fi " + "; ".join(f"{n['vendor']} {n['name']}".strip() for n in wifi))
     if h["audio"]:
         add += ["sof-firmware", "alsa-ucm-conf"] if any(a["vendor_id"] == "8086" for a in h["audio"]) else ["alsa-ucm-conf"]
         # PipeWire needs its session manager and compatibility layers; only PulseAudio replaces the stack.
         if session and not any(p == "pulseaudio" or p.startswith("pulseaudio-") for p in chosen):
             add += ["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber"]
-        unverified.append("звук " + "; ".join(f"{a['vendor']} {a['name']}".strip() for a in h["audio"]))
+        unverified.append("sound " + "; ".join(f"{a['vendor']} {a['name']}".strip() for a in h["audio"]))
     if h["bluetooth"]:
         add += ["bluez", "bluez-utils"]
         services.append("bluetooth.service")
@@ -338,16 +338,16 @@ def driver_plan(hardware, packages=(), session=""):
         if not chosen & POWER_MANAGERS:
             add.append("power-profiles-daemon")
             services.append("power-profiles-daemon.service")  # also when the user chose the package themselves
-        unverified.append("батарея, энергосбережение и клавиши ноутбука")
+        unverified.append("battery, power saving and laptop keys")
     if h["secure_boot"]:
-        notes.append("Secure Boot включён: подпишите систему своими ключами (отметка Secure Boot перед превью, "
-                     "ключи записываются при установке в режиме Setup Mode) или отключите Secure Boot в UEFI")
+        notes.append("Secure Boot is on: sign the system with your own keys (the Secure Boot option before the preview; "
+                     "the keys are enrolled during installation in Setup Mode) or turn Secure Boot off in UEFI")
     add = [p for p in dict.fromkeys(add) if p not in chosen]
     return {"packages": add, "services": list(dict.fromkeys(services)), "modules": list(dict.fromkeys(modules)),
             "notes": notes, "unverified": unverified}
 
 
-def initramfs_config(plan, encrypted, hibernate=False):
+def initramfs_config(plan, encrypted, hibernate=False, lvm=False):
     """mkinitcpio drop-in for this plan, or '' when the stock configuration is right.
 
     NVIDIA's own modules replace the generic kms hook (it would pull nouveau, which
@@ -356,16 +356,18 @@ def initramfs_config(plan, encrypted, hibernate=False):
     filesystems, so the saved image is restored before anything is mounted read-write.
     """
     modules = list(plan.get("modules", []))
-    if not modules and not encrypted and not hibernate:
+    if not modules and not encrypted and not hibernate and not lvm:
         return ""
+    # lvm2 activates the root volume group after encrypt opened it and before resume reads
+    # the swap file on the root logical volume.
     hooks = ["base", "udev", "autodetect", "microcode", "modconf", *([] if modules else ["kms"]),
              "keyboard", "keymap", "consolefont", "block", *(["encrypt"] if encrypted else []),
-             *(["resume"] if hibernate else []), "filesystems", "fsck"]
+             *(["lvm2"] if lvm else []), *(["resume"] if hibernate else []), "filesystems", "fsck"]
     return ("MODULES=(" + " ".join(modules) + ")\n" if modules else "") + "HOOKS=(" + " ".join(hooks) + ")\n"
 
 
 def demo():
-    return profile({"cpu": {"vendor": "Intel", "model": "Демонстрационный процессор"}, "memory": 16 * 2**30,
+    return profile({"cpu": {"vendor": "Intel", "model": "Demo CPU"}, "memory": 16 * 2**30,
                     "virtualization": "none",
                     "chassis": {"type": "Notebook", "vendor": "Demo", "product": "Laptop", "portable": True, "battery": True},
                     "gpus": [{"class": "0300", "class_name": "VGA compatible controller", "vendor": "Intel", "vendor_id": "8086",
@@ -374,6 +376,6 @@ def demo():
                                  "device_id": "272b", "name": "Wi-Fi 7 BE200", "driver": "iwlwifi", "bus": "pci", "kind": "wifi"}],
                     "audio": [{"class": "0403", "class_name": "Audio device", "vendor": "Intel", "vendor_id": "8086",
                                "device_id": "7a50", "name": "HD Audio", "driver": "snd_hda_intel", "bus": "pci"}],
-                    "bluetooth": [{"class": "e0", "class_name": "беспроводное", "vendor": "Intel", "vendor_id": "8087",
+                    "bluetooth": [{"class": "e0", "class_name": "wireless", "vendor": "Intel", "vendor_id": "8087",
                                    "device_id": "0036", "name": "BE200 Bluetooth", "driver": "", "bus": "usb"}],
                     "usb": [], "tpm": True, "secure_boot": False})

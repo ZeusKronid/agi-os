@@ -82,6 +82,9 @@ class WorkerSigningTests(unittest.TestCase):
                          f"consolefonts/{config.effective_console_font()}.psfu.gz"):
                 (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
                 (target / "usr/share/kbd" / name).touch()
+            preset = target / "etc/mkinitcpio.d/linux.preset"
+            preset.parent.mkdir(parents=True, exist_ok=True)
+            preset.write_text("ALL_kver='/boot/vmlinuz-linux'\nPRESETS=('default')\ndefault_image='/boot/initramfs-linux.img'\n")
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
@@ -141,6 +144,9 @@ class WorkerSigningTests(unittest.TestCase):
     def test_sbctl_unsigned_parsing(self):
         self.assertEqual(worker.sbctl_unsigned(UNSIGNED), ["/boot/EFI/Linux/x.efi"])
         self.assertEqual(worker.sbctl_unsigned(SIGNED), [])
+        shared = "✗ /efi/EFI/Microsoft/Boot/bootmgfw.efi is not signed\n✓ /efi/EFI/systemd/systemd-bootx64.efi is signed\n"
+        self.assertEqual(worker.sbctl_unsigned(shared), [])  # Microsoft's own loader next to Windows (CMP-151)
+        self.assertEqual(worker.sbctl_unsigned(shared + UNSIGNED), ["/boot/EFI/Linux/x.efi"])
 
     def test_sbctl_is_added_only_when_chosen(self):
         config = Configuration.parse(specification())
@@ -236,6 +242,21 @@ class VerifyTests(unittest.TestCase):
                 self.assertTrue(verify.boot_chain_signed({"signed": True, "verified": True}, root))
                 (efivars / verify.SECURE_BOOT_VAR).write_bytes(b"\x06\x00\x00\x00\x01")
                 self.assertTrue(verify.boot_chain_signed({"signed": True}, root))
+
+    def test_shared_esp_loader_is_checked_where_it_boots_from(self):
+        """CMP-151: next to Windows systemd-boot lives on the shared ESP at /efi."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for relative in verify.SIGNED_BOOT_FILES:
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(pe_image(0x400))  # stale copies on the XBOOTLDR /boot
+            for relative in ("efi/EFI/BOOT/BOOTX64.EFI", "efi/EFI/systemd/systemd-bootx64.efi"):
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(pe_image(0))
+            self.assertFalse(verify.boot_chain_signed({"signed": True}, root))
+            for relative in ("efi/EFI/BOOT/BOOTX64.EFI", "efi/EFI/systemd/systemd-bootx64.efi"):
+                (root / relative).write_bytes(pe_image(0x400))
+            self.assertTrue(verify.boot_chain_signed({"signed": True}, root))
 
     def test_secure_boot_checks_follow_the_record(self):
         with tempfile.TemporaryDirectory() as tmp:

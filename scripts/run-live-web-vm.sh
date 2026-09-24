@@ -28,7 +28,7 @@ done
 # .local/live-test/OVMF_VARS-uefi-sb.fd, so --mode disk then boots with Secure Boot on.
 machine=q35
 [[ $firmware == uefi-sb ]] && machine=q35,smm=on
-if [[ -z $iso ]]; then
+if [[ -z $iso && $mode == live ]]; then
     shopt -s nullglob; images=(out/agi-os-20*-x86_64.iso); ((${#images[@]})) || { echo 'Build an ISO first: scripts/build-iso.sh' >&2; exit 1; }
     iso=${images[${#images[@]}-1]}
 fi
@@ -59,7 +59,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 cpus=6
 if [[ $mode == disk ]]; then memory=4096 cpus=4; fi
-if [[ $mode == live ]]; then
+# AGIOS_TEST_BRIDGE=none: no test bridge at all, so the Live behaves as on a real computer
+# (for example to check the ChatGPT sign-in link, which the bridge otherwise stands in for).
+if [[ $mode == live && ${AGIOS_TEST_BRIDGE:-} != none ]]; then
     bridge_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/agios-live.XXXXXXXX")
     bridge_args=(--socket "$bridge_dir/llm.sock")
     # AGIOS_TEST_SCRIPTED=<config.json>: a fixed configuration instead of a live model (test only).
@@ -80,6 +82,12 @@ args=(-name "AGIOS Live boot — test computer ($firmware)" -machine "$machine" 
       -drive "file=$repo/$target,format=qcow2,if=none,id=target,discard=unmap,detect-zeroes=unmap"
       -device virtio-blk-pci,drive=target,serial=AGIOS_TARGET,bootindex=3
       -qmp "unix:$repo/.local/live-test/qmp.sock,server=on,wait=off")
+if [[ $mode == disk ]]; then
+    # Q35's emulated ICH9 TCO watchdog may fire after a hibernation image is
+    # restored. Its default reset action destroys the resumed session; keep the
+    # watchdog event visible through QMP without resetting this test computer.
+    args+=(-action watchdog=none)
+fi
 if [[ $firmware == uefi || $firmware == uefi-sb ]]; then
     vars=.local/live-test/OVMF_VARS-$firmware.fd code=/usr/share/edk2/x64/OVMF_CODE.4m.fd
     [[ -f $vars ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"
@@ -93,10 +101,10 @@ fi
 if [[ $mode == live ]]; then
     args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"
            -fw_cfg name=opt/org.agi-os.test,string=1
-           -device virtio-serial-pci
-           -chardev "socket,id=llm,path=$bridge_dir/llm.sock"
-           -device virtserialport,chardev=llm,name=org.agi-os.llm
-           -chardev "socket,id=qa,path=$repo/.local/live-test/qa.sock,server=on,wait=off"
+           -device virtio-serial-pci)
+    [[ -n $bridge_dir ]] && args+=(-chardev "socket,id=llm,path=$bridge_dir/llm.sock"
+                                   -device virtserialport,chardev=llm,name=org.agi-os.llm)
+    args+=(-chardev "socket,id=qa,path=$repo/.local/live-test/qa.sock,server=on,wait=off"
            -device virtserialport,chardev=qa,name=org.agi-os.qa
            -drive "file=$iso,media=cdrom,readonly=on,if=none,id=live"
            -device ide-cd,drive=live,bootindex=1)
@@ -113,7 +121,9 @@ if [[ $mode == live ]]; then
                -device ide-cd,drive=testcache,bus=ide.1)
     fi
 else
-    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)")
+    # The installed system's serial console (add console=ttyS0 to its kernel command line to see it).
+    args+=(-nic "user,model=$([[ ${AGIOS_TEST_HARDWARE:-} == laptop ]] && echo e1000e || echo virtio-net-pci)"
+           -serial "file:$repo/.local/live-test/serial.log")
 fi
 if [[ ${AGIOS_TEST_HARDWARE:-} == laptop ]]; then
     chassis=.local/live-test/smbios-chassis-notebook.bin

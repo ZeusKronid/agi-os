@@ -1,4 +1,4 @@
-/* AGIOS Live workspace — the Helios «Sunrise» design of the site and the native installer. */
+/* AGIOS Live workspace — the Helios «Sunrise» design of the site. */
 @font-face { font-family: 'Newsreader'; font-style: normal; font-weight: 200 800; src: local('Newsreader'), url('/fonts/Newsreader.ttf') format('truetype'); }
 @font-face { font-family: 'Newsreader'; font-style: italic; font-weight: 200 800; src: local('Newsreader Italic'), url('/fonts/Newsreader-Italic.ttf') format('truetype'); }
 @font-face { font-family: 'Geist'; font-weight: 100 900; src: local('Geist'), url('/fonts/Geist.ttf') format('truetype'); }
@@ -241,7 +241,9 @@ dialog form { display: grid; gap: 14px; }
 }
 
 /* ── swarm features in the sunrise workspace: found previews, hardware, agent files, login review, Secure Boot, version ── */
-.notice { flex-direction: column; align-items: stretch; max-height: 60vh; overflow: auto; }
+.notice { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 60vh; overflow: auto; }
+/* A column that wraps would move the found previews into a second column past the edge (max-height). */
+#orphanList { display: block; }
 .found-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .found { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); }
 .found b { font: 400 16px var(--serif); color: var(--ink); }
@@ -266,3 +268,13 @@ pre.code .c { color: var(--dim); } pre.code .s { color: var(--accent); } pre.cod
 .about #updateResult { flex-basis: 100%; text-align: right; color: var(--muted); }
 .about #updateResult p { margin: 2px 0; } .about #updateResult a { color: var(--accent); }
 .about #updateResult pre { max-height: 120px; overflow: auto; text-align: left; white-space: pre-wrap; }
+
+/* The request to the model (CMP-129): its steps, the seconds it takes, and a way out. */
+.thinking { display: grid; gap: 6px; }
+.thinking .btn { margin-left: auto; }
+.elapsed { color: var(--dim); font-variant-numeric: tabular-nums; }
+.turn-steps { margin: 0; padding: 0 0 0 16px; font: 11.5px/1.6 var(--mono); color: var(--dim); }
+.turn-steps:empty { display: none; }
+.turn-steps li:last-child { color: var(--muted); }
+.kept { text-align: center; }
+.said .btn { flex: none; margin-left: auto; }

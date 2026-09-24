@@ -67,14 +67,14 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(first['AGIOS_OPERATION'], 'build-0123456789ab')
         self.assertNotIn('_CMDLINE', first)
         self.assertEqual(second['MESSAGE'], 'hi')
-        self.assertTrue(files['vm/web-20260923-120000-abcdef/qemu.log'].startswith('[… начало обрезано'))
+        self.assertTrue(files['vm/web-20260923-120000-abcdef/qemu.log'].startswith('[… beginning cut'))
         self.assertIn('tester', files['session.json'])
 
     def test_unreadable_journal_is_explained(self):
         with tempfile.TemporaryDirectory() as root, \
                 patch.object(diagnostics, 'command', return_value=('', 'No journal files were opened due to insufficient permissions.')):
             files = unpack(diagnostics.bundle({}, {}, Path(root), Path(root)))
-        self.assertIn('Журнал недоступен', files['journal-agios.jsonl'])
+        self.assertIn('Journal unavailable', files['journal-agios.jsonl'])
 
 
 class StorageHelperLogTests(unittest.TestCase):
