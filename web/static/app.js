@@ -6,7 +6,7 @@ const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
 let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', installStep = 1, stopping = false, chatView = false, changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
 let providerKind = 'chatgpt', shown = 0, placeStep = 1, foundAsk = '', lastFound = '', lastFiles = '', lastHardware = '', lastLogin = '';
-let sentAt = 0, cancelling = false, rebuildAsk = false, rebuilding = false;
+let sentAt = 0, cancelling = false, rebuildAsk = false, rebuilding = false, lastDock = 0;
 
 async function api(path, data) {
     const response = await fetch('/api/' + path, data === undefined ? {} : {
@@ -312,6 +312,10 @@ function render(state) {
     renderSecureBoot(state);
     renderFinalNotes(state);
     aimSun(state, place);
+    // The dock grows with suggestions, notes and buttons: keep the newest line of the
+    // conversation above it instead of under its top edge.
+    const dock = document.querySelector('.dock').offsetHeight;
+    if (dock !== lastDock) { lastDock = dock; $('lines').scrollTop = $('lines').scrollHeight; }
 }
 const horizon = () => Math.min(230, Math.max(170, innerHeight * .24));
 function aimSun(state, place) {
