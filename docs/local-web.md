@@ -131,7 +131,8 @@ connect a provider.
   (`POST /api/provider/models`, the key is not kept) and the status line names
   the provider. Plain HTTP is accepted only for Ollama/OpenAI-compatible servers
   at a loopback, private or link-local IP address (Ollama on another PC at
-  home); everything else needs HTTPS. Live does not run Ollama itself: its whole
+  home); everything else needs HTTPS, including 100.64.0.0/10 (carrier-grade
+  NAT; for Tailscale use `tailscale serve` with HTTPS). Live does not run Ollama itself: its whole
   system lives in memory, a model of several GiB would not fit next to the preview.
   Sign-in with a Claude or Gemini subscription is deliberately not offered:
   Anthropic does not allow third-party products to offer claude.ai login unless
