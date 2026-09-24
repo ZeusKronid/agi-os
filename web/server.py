@@ -554,7 +554,7 @@ async def configure(request):
                 if url.startswith('https://'):
                     state.login_url = url
             try:
-                provider = await asyncio.to_thread(connect_chatgpt, data.get('model') or None, show_login)
+                provider = await asyncio.to_thread(connect_chatgpt, data.get('model') or None, show_login, state.provider)
             finally:
                 state.login_url = None
         else:
@@ -563,7 +563,8 @@ async def configure(request):
             if not provider.model:
                 raise ValidationError('Enter a model')
             provider = LiveProvider(provider)
-        await asyncio.to_thread(state.provider.close)
+        if provider is not state.provider:
+            await asyncio.to_thread(state.provider.close)
         state.provider = state.controller.provider = provider
         log.info('provider.connected', f'Model connected: {kind}', kind=kind, model=provider.model)
     return web.json_response(state.public())
