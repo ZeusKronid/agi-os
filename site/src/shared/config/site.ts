@@ -20,8 +20,8 @@ export const siteConfig = {
     repo,
     docs: '/docs',
     install: '/install',
-    // TODO: заменить на страницу релиза с ISO и контрольной суммой, когда она появится.
-    download: repo,
+    // Страница релиза с ISO, контрольной суммой и заметками.
+    download: `${repo}/releases/latest`,
     evidence: `${repo}/tree/HEAD/docs/test-results`,
     // TODO: заменить на реальную страницу пожертвований, когда она появится.
     donate: repo,

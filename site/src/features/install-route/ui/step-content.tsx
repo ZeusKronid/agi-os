@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { isoCommandName, isoDisplayName, release } from '@/entities/release'
+import { siteConfig } from '@/shared/config'
 import { ButtonLink } from '@/shared/ui/button'
 import { CommandLine } from '@/shared/ui/command-line'
 import { ArrowDownIcon } from '@/shared/ui/icon'
@@ -52,11 +53,12 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
               Download ISO <ArrowDownIcon />
             </ButtonLink>
           </div>
-          {release.version === null && (
-            <p className="text-sm text-ink-muted">
-              The release page with the image and its checksum is on its way. Until then the button opens the repository.
-            </p>
-          )}
+          <p className="text-sm text-ink-muted">
+            Checksum and release notes are on the{' '}
+            <a href={siteConfig.links.download} target="_blank" rel="noreferrer" className="underline underline-offset-4 hover:text-ink">
+              release page ↗
+            </a>
+          </p>
         </>
       )
 
