@@ -13,7 +13,7 @@ def target_inventory():
     """Physical disks of this computer that may receive the system. Never the Live medium."""
     snapshot = inventory()
     if not snapshot['live']:
-        raise ValidationError('Установка доступна только в загруженной Live-среде')
+        raise ValidationError('Installing is available only in the booted Live environment')
     return restrict_test_targets(snapshot)
 
 
@@ -24,7 +24,7 @@ def restrict_test_targets(snapshot):
         for disk in snapshot['disks']:
             if (disk.get('serial') or '').strip() != 'AGIOS_TARGET':
                 disk['eligible'] = False
-                disk['reason'] = 'В тесте разрешён только отдельный диск AGIOS_TARGET'
+                disk['reason'] = 'In a test only the separate AGIOS_TARGET disk is allowed'
     return snapshot
 
 
@@ -36,4 +36,4 @@ def consent(config, snapshot):
                'hardware': hardware_digest(snapshot['hardware'], config.packages, config.session)}
     digest = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     return {**binding, 'digest': digest, 'disk': disk,
-            'warning': 'Все разделы и данные выбранного диска будут удалены до запуска превью.'}
+            'warning': 'All partitions and data on the selected disk are deleted before the preview starts.'}

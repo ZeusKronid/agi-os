@@ -1,53 +1,193 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — ваша система</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AGIOS — your system</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/style.css?v=sunrise-6"></head>
 <body>
-<header><a class="brand" href="/">AGI<span>OS</span><small>LIVE WORKSPACE</small></a><div class="local"><i></i> Live-среда AGIOS</div><button id="diagnosticsButton" class="quiet" title="Архив журналов, состояния и версий для сообщения об ошибке. Пароли и ключи убираются автоматически; диалог с агентом включён целиком — проверьте архив перед отправкой">Диагностика</button><button id="settingsButton" class="quiet">Подключение модели</button></header>
+<canvas id="sky" aria-hidden="true"></canvas>
+
+<header class="hud">
+  <span class="brand">AGIOS</span>
+  <div class="pips" aria-label="Where you are"><span id="pips"><i></i><i></i><i></i><i></i></span><b id="chapter">Talk</b></div>
+  <div class="hud-right">
+    <span id="safety" class="pill safety"><i class="dot ok"></i><span>Nothing written to disk</span></span>
+    <button id="diagnosticsButton" class="pill" title="An archive of logs, state and versions for a bug report. Passwords and keys are removed; the conversation with the agent is included in full — check the archive before sending it">Diagnostics</button>
+    <button id="settingsButton" class="pill"><i class="dot off" id="modelDot"></i><span id="model">no model</span></button>
+  </div>
+</header>
+
+<section id="orphans" class="notice" hidden>
+  <div class="found-head"><span>Previews from earlier sessions</span><button id="rescan" class="btn ghost">Look again</button></div>
+  <p class="hint">A preview lives on a disk or stick, so it survives a Live restart. A ready preview can be continued without the encryption password, an unfinished one retried with the same configuration, and any of them removed — other partitions and files stay as they are. A continued preview is used as is: start it and check the system before installing.</p>
+  <p id="scanError" class="line error" hidden></p>
+  <div id="orphanList"></div>
+</section>
+<div id="toast" role="alert" hidden></div>
+
 <main>
-<section class="conversation"><div class="section-head"><div><span class="eyebrow">01 / ОБСУЖДЕНИЕ</span><h1>Какой будет ваша система?</h1></div></div>
-<div id="messages" aria-live="polite"><div class="welcome"><div class="spark">✳</div><h2>Начнём с вашей идеи</h2><p>Расскажите, для чего нужен компьютер. Вместе выберем окружение, приложения и настройки — и запустим вашу систему здесь, прежде чем что-то менять на диске.</p><button class="suggestion" data-prompt="Хочу лёгкую систему с XFCE, браузером Firefox и терминалом. Русский и английский языки, часовой пояс Europe/Moscow. Имя пользователя tester, имя компьютера agios.">Рабочий стол для повседневных задач ↗</button><button class="suggestion" data-prompt="Хочу собрать Linux для разработки. Помоги выбрать окружение и инструменты.">Среда для разработки ↗</button><button class="suggestion" data-prompt="Не хочу ничего выбирать — поставь стандартную систему AGIOS с настройками по умолчанию.">Выберите за меня ↗</button></div></div>
-<div id="error" role="alert" hidden></div><form id="chatForm"><textarea id="prompt" placeholder="Например: лёгкий Linux для разработки на Python…" rows="3" maxlength="16000" required></textarea><div class="composer-bottom"><span id="model">Подключение…</span><button id="send" type="submit">Отправить ↑</button></div></form><p class="hint">Сначала система запускается в превью. Диск компьютера меняется только после вашего отдельного подтверждения.</p>
+  <section id="talk" class="talk">
+    <div id="lines" class="lines" aria-live="polite">
+      <div id="hello" class="hello">
+        <span class="caps">Live workspace</span>
+        <h1>Describe the system you <em>want</em></h1>
+        <p>We’ll run it right here, on this computer, before anything touches the disk.</p>
+      </div>
+      <div id="messages"></div>
+      <div id="thinking" class="line status" hidden><span class="typing"><i></i><i></i><i></i></span><span id="thinkingText">The agent is thinking about the configuration…</span></div>
+      <div id="error" class="line error" hidden></div>
+    </div>
+    <div class="dock">
+      <div id="welcome" class="chips">
+        <button class="chip" data-prompt="A light desktop with XFCE, Firefox and a terminal. English, US keyboard, Berlin time. User tester, computer name agios.">A desktop for everyday tasks</button>
+        <button class="chip" data-prompt="Help me build a Linux setup for development. Suggest a desktop and tools.">A setup for development</button>
+        <button class="chip" data-prompt="I don’t want to choose anything — install the standard AGIOS system with default settings.">Choose for me</button>
+      </div>
+      <div id="suggestions" class="chips"></div>
+      <div id="consentError" class="line error" hidden></div>
+      <button id="placeButton" class="cta" hidden><span id="placeText">All set — find room for the preview</span><b>↑</b></button>
+      <button id="previewButton" class="cta" hidden>Back to the preview<b>↑</b></button>
+      <button id="connectButton" class="cta" hidden>Connect a model to start<b>→</b></button>
+      <form id="chatForm" class="ask"><input id="prompt" autocomplete="off" maxlength="16000" placeholder="Describe your system in your own words…" aria-label="Message"><button id="send" class="send" aria-label="Send">↑</button></form>
+    </div>
+  </section>
+
+  <section id="rise" class="rise" hidden>
+    <span class="caps" id="riseLabel">Building the preview</span>
+    <div class="pct"><span id="pct">0</span><small>%</small></div>
+    <p id="riseText" class="caption"></p>
+  </section>
+  <section id="below" class="below" hidden>
+    <div id="substeps" class="substeps"></div>
+    <div class="row"><button id="stopBuild" class="btn ghost">Stop VM</button><button id="retryFinal" class="btn outline" hidden>Try again</button><button class="btn ghost" data-log>Log</button></div>
+  </section>
+
+  <p id="vmStatus" class="vm-status" hidden><i class="dot"></i><span></span></p>
+  <section id="vm" class="vm" hidden>
+    <div id="screen" tabindex="0" aria-label="Screen of the preview VM"></div>
+    <div id="vmState" class="vm-state" hidden>
+      <span class="caps" id="vmStateLabel">VM stopped · preview kept</span>
+      <p id="vmStateText"></p>
+      <div class="row"><button id="resumeInline" class="btn outline">Start again</button><button id="reconnect" class="btn outline">Reconnect</button><button id="revertInline" class="btn outline">Put everything back</button><button class="btn ghost" data-log>Log</button></div>
+    </div>
+  </section>
+  <p id="said" class="said" hidden><span class="who">AGIOS</span><span id="saidText"></span></p>
+  <div id="vmbar" class="vmbar" hidden>
+    <button id="toChat" class="icon bare" aria-label="Back to the conversation" title="Back to the conversation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 8H3M7 4 3 8l4 4"/></svg></button>
+    <button id="putBack" class="btn quiet">Put it back</button>
+    <div class="mid">
+      <button id="stop" class="icon round" aria-label="Stop VM" title="Stop VM"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
+      <button id="resume" class="icon round" aria-label="Start the VM again" title="Start again" hidden><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3.5v9l7-4.5z"/></svg></button>
+      <form id="changeForm" class="ask"><input id="changePrompt" autocomplete="off" maxlength="16000" placeholder="Ask for a change while you try it…" aria-label="Ask for a change"><button class="send" aria-label="Send">↑</button></form>
+    </div>
+    <button id="install" class="btn primary">Install <span class="arr">→</span></button>
+    <button id="fullscreen" class="icon bare" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg></button>
+  </div>
+
+  <section id="done" class="after" hidden>
+    <span class="caps">Installed</span>
+    <h1>Good <em>morning</em></h1>
+    <div id="finalWarnings" class="warnings" hidden></div>
+    <p id="doneCheck" class="hint" hidden></p>
+    <p id="doneText">Remove the AGIOS stick and restart — the computer boots your system, and the first-boot check opens there.</p>
+    <div class="row"><button id="rebootLive" class="btn primary">Restart the computer</button><button id="poweroffLive" class="btn outline">Power off</button><button class="btn ghost" data-log>Log</button></div>
+    <p id="powerMessage" class="hint"></p>
+  </section>
+</main>
+
+<p id="status" class="status-line"></p>
+<footer id="about" class="about"><span id="version">AGIOS</span><button id="checkUpdates" class="btn ghost" title="Asks api.github.com only when you press this">Check for updates</button><div id="updateResult" hidden></div></footer>
+
+<div id="veil" class="veil"></div>
+
+<section id="placeSheet" class="sheet" role="dialog" aria-modal="true" aria-label="Find room for the preview" inert>
+  <div class="grab"></div><button class="btn ghost close" data-close>Back ✕</button>
+  <div class="sheet-in steps">
+    <section id="placeStep1" class="place-step">
+      <div class="step-head"><span class="caps">Step 1 of 2 · where the preview lives</span><h2>Find room for the <em>preview</em></h2><p id="estimate" class="hint"></p></div>
+      <div id="options" class="options wide" role="radiogroup" aria-label="Where the preview lives"></div>
+      <details id="hardware" class="agreed" hidden><summary>This computer</summary><ul id="hardwareLines" class="hw"></ul><p id="hardwareDrivers" class="hint"></p></details>
+      <p id="hardwareUnverified" class="hint"></p>
+      <details id="files" class="agreed" hidden><summary>Settings files from the agent</summary><p class="hint">These files are written into the new system. The installer checks their syntax before installing and again inside the preview with the programs themselves (foot, sway, Hyprland and others); an error stops the preview and goes back to the agent.</p><div id="fileList"></div></details>
+      <div class="step-foot"><details class="agreed"><summary>What you agreed on</summary><dl id="facts"></dl></details><button type="button" id="placeNext" class="btn primary">Continue <span class="arr">→</span></button></div>
+    </section>
+    <form id="buildForm" class="place-step" hidden>
+      <div class="step-head"><span class="caps">Step 2 of 2 · settings and password</span><h2>Build the <em>preview</em></h2></div>
+      <div class="chosen"><div><b id="chosenTitle"></b><small id="chosenUndo"></small></div><button type="button" id="placeBack" class="btn ghost">← Change the place</button></div>
+      <div class="step-cols">
+        <div class="col">
+          <div class="pair">
+            <label class="field"><span>VM memory</span><select id="memory"><option value="2048">2 GiB</option><option value="3072">3 GiB</option><option value="4096" selected>4 GiB</option><option value="6144">6 GiB</option><option value="8192">8 GiB</option></select></label>
+            <label class="field"><span>CPUs</span><select id="cpus"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
+          </div>
+          <label class="check"><input type="checkbox" id="encrypt"><span>Encrypt the system root (LUKS2) — asked for on every boot</span></label>
+          <label class="check" id="secureBootField" hidden><input type="checkbox" id="secureBoot"><span>Sign the bootloader and kernel for Secure Boot (own keys; enrolled when you install on the computer)</span></label>
+          <p id="replanning" class="hint" hidden><span class="spin"></span> Measuring again…</p>
+          <div id="optionConfirm" hidden><p id="optionWarning" class="line error"></p><label class="field"><span id="optionPathLabel">Type the path to confirm</span><input id="optionPath" autocomplete="off"></label></div>
+        </div>
+        <div class="col">
+          <div id="login" hidden><span class="caps accent">Runs when you log in</span><p class="hint">These commands start automatically as you when you log in or on the login screen. Make sure you need and understand each one — if not, ask the agent to remove it.</p><ul id="loginList" class="login"></ul>
+            <label class="check"><input type="checkbox" id="loginReviewed"><span>I read what starts at login and want it</span></label></div>
+          <label class="check"><input type="checkbox" id="optionAccepted"><span id="optionAcceptText">I understand what happens</span></label>
+          <label class="field"><span>Password for your user in the new system</span><input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="8+ characters"></label>
+          <label class="field" id="passphraseField" hidden><span>Encryption password</span><input id="passphrase" type="password" autocomplete="new-password" minlength="8" maxlength="512" placeholder="8+ characters"></label>
+          <div id="buildNeeds" class="needs"></div>
+          <button id="build" class="btn primary" type="submit">Build the preview <span class="arr">→</span></button>
+          <p class="hint">Passwords go only to the installer; the agent never sees them.</p>
+        </div>
+      </div>
+    </form>
+  </div>
 </section>
-<section class="workspace"><div class="section-head"><div><span class="eyebrow">02 / ВАША СИСТЕМА</span><h2>Живое превью</h2></div><span class="badge" id="phase">Ожидает сборки</span></div>
-<div class="preview" id="preview"><div id="emptyPreview"><div class="monitor">▱</div><h2>От идеи — к рабочему столу</h2><p>После согласования конфигурации здесь появится ваша система.<br>С ней можно работать прямо в браузере.</p><div class="steps"><span>Обсудить</span><b>→</b><span>Превью</span><b>→</b><span>Установить</span></div></div><div id="screen" tabindex="0" aria-label="Экран виртуальной машины" hidden></div></div>
-<div class="preview-bar"><span id="previewStatus">Локальная VM · Apache Guacamole</span><div><button id="reconnect" class="quiet" hidden>Подключить экран</button><button id="fullscreen" class="quiet" hidden>На весь экран</button><button id="stop" class="quiet" hidden>Остановить VM</button><button id="resume" hidden>Запустить снова</button></div></div>
-<div class="status-line"><i></i><span id="status">Загрузка…</span></div>
-<section id="orphans" hidden><div class="review-head"><h3>Найдены превью прошлых сеансов</h3><button id="rescan" class="quiet">Искать снова</button></div><p class="hint">Превью хранится на носителе, поэтому переживает перезапуск Live. Готовое превью можно продолжить без пароля шифрования, незавершённую установку — повторить с той же конфигурацией, любое — убрать: остальные разделы и файлы не менялись. Продолженное превью используется как есть, а сводка берётся из его записи: перед установкой запустите его и проверьте систему; установка на диск откажет, если записанная внутри превью конфигурация не совпадает.</p><p class="notice" id="scanError" hidden></p><div id="orphanList"></div></section>
 
-<section id="hardware" hidden><div class="review-head"><h3>Железо этого компьютера</h3><span>определено на этом компьютере</span></div><ul id="hardwareLines" class="hardware"></ul><p class="hint" id="hardwareDrivers"></p><p class="notice" id="hardwareUnverified"></p></section>
+<div id="installModal" class="modal-veil" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Install">
+    <button type="button" class="btn ghost close" data-close aria-label="Close">✕</button>
+    <section id="installStep1" class="modal-step">
+      <span class="caps accent">Install · step 1 of 2</span>
+      <h2>First, turn off the <em>preview</em></h2>
+      <p class="lead">The system is copied from the preview to your disk, so the preview VM has to be turned off first. Nothing is written to the disk yet.</p>
+      <div class="modal-foot"><button type="button" class="btn quiet" data-close>Keep it running</button><button type="button" id="stopForFinal" class="btn primary">Turn off and continue <span class="arr">→</span></button></div>
+    </section>
+    <form id="finalInstallForm" class="modal-step" hidden>
+      <span class="caps accent">Install · step 2 of 2</span>
+      <h2>Install on <em>this computer</em></h2>
+      <p id="finalTarget" class="lead"></p>
+      <label class="check"><input type="radio" name="layout" value="alongside" checked><span><b>Keep what’s on the disk</b> — install next to your files and other systems, in free space</span></label>
+      <label class="check"><input type="radio" name="layout" value="erase"><span><b>Erase the disk</b> — delete everything on it and install on the whole disk</span></label>
+      <p id="layoutWarning" class="hint"></p>
+      <label class="field" id="finalPassphraseField" hidden><span>Encryption password</span><input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label>
+      <div id="secureBootFinal" hidden><label class="check"><input type="checkbox" id="enrollKeys"><span>Enroll this system’s Secure Boot keys in the computer’s firmware (together with Microsoft’s)</span></label><p id="secureBootHint" class="hint"></p></div>
+      <label class="check"><input type="checkbox" id="finalAccepted"><span>I tried the system in the preview and want to install it</span></label>
+      <label class="field"><span id="targetLabel">Type the disk path to confirm</span><input id="targetConfirm" autocomplete="off"></label>
+      <div id="finalNeeds" class="needs"></div>
+      <p id="finalHint" class="hint"></p>
+      <div class="modal-foot"><button type="button" class="btn quiet" data-close>Back to the preview</button><button type="submit" id="installFinal" class="btn primary">Install</button></div>
+      <p id="finalError" class="line error" hidden></p>
+    </form>
+  </div>
+</div>
 
-<section id="review" hidden><div class="review-head"><h3>Согласованная конфигурация</h3><span id="reviewDisk"></span></div><details><summary>Посмотреть все настройки</summary><pre id="summary"></pre></details>
-<div id="files" hidden><h3>Файлы настроек от агента</h3><p class="hint">Эти файлы будут записаны в новую систему. Установщик проверяет их синтаксис до установки, а внутри превью — самими программами (foot, sway, Hyprland и др.). Ошибка останавливает превью и возвращается агенту.</p><div id="fileList"></div></div>
-<div id="login" hidden><h3>Что будет запускаться при входе</h3><p class="notice">Эти команды выполнятся автоматически от вашего имени при входе в систему или на экране входа. Проверьте, что каждая вам нужна и понятна; если нет — попросите агента убрать её.</p><ul id="loginList" class="login"></ul></div>
-<div id="consentError" class="soft-error" hidden></div>
-<form id="planForm"><div class="fields"><label>Память VM<select id="memory"><option value="4096">4 ГиБ</option><option value="3072">3 ГиБ</option><option value="6144">6 ГиБ</option><option value="8192">8 ГиБ</option><option value="2048">2 ГиБ</option></select></label><label>Процессоры<select id="cpus"><option value="4">4 CPU</option><option value="2">2 CPU</option><option value="8">8 CPU</option></select></label></div><label class="check"><input type="checkbox" id="encrypt">Зашифровать корень системы (LUKS2). Пароль будет запрашиваться при каждой загрузке</label>
-<label class="check" id="secureBootField" hidden><input type="checkbox" id="secureBoot">Secure Boot: создать собственные ключи этой системы и подписать загрузчик и ядро (sbctl, подпись обновляется при каждом обновлении ядра)</label><button id="planButton" type="submit">Рассчитать размер и место для превью →</button><p class="hint">Считаем точный размер системы по данным пакетов и подбираем, где разместить превью, не меняя ваши данные.</p></form>
-<form id="buildForm" hidden><h3>Где сделать превью</h3><p id="estimate" class="hint"></p><div id="options"></div>
-<div id="optionConfirm" hidden><p class="destructive" id="optionWarning"></p><label>Для подтверждения введите путь<input id="optionPath" autocomplete="off" placeholder="/dev/…"></label></div>
-<label class="check" id="loginReviewedField" hidden><input type="checkbox" id="loginReviewed"><span>Я просмотрел(а) команды, которые будут запускаться при входе</span></label>
-<label class="check"><input type="checkbox" id="optionAccepted" required><span id="optionAcceptText">Я понимаю, что будет сделано, и как это вернуть</span></label>
-<div class="fields"><label class="password">Пароль пользователя в новой системе<input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="Не менее 8 символов" required></label></div>
-<div class="fields" id="passphraseField" hidden><label class="password">Пароль шифрования<input id="passphrase" type="password" autocomplete="new-password" minlength="8" maxlength="512" placeholder="Не менее 8 символов"></label></div>
-<button id="build" type="submit">Собрать превью →</button><p class="hint">Пароли передаются только установщику, агент их не получает.</p></form></section>
+<div id="backModal" class="modal-veil" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backTitle">
+    <button type="button" class="btn ghost close" data-close>Back ✕</button>
+    <span class="caps">Put it back</span>
+    <h2 id="backTitle">Not right? Put <em>everything back</em></h2>
+    <p id="revertHint" class="hint"></p>
+    <div class="row"><button id="revert" class="btn outline">Not right — put everything back</button><button id="keep" class="btn ghost" hidden>Keep it</button></div>
+  </div>
+</div>
 
-<section id="previewInfo" hidden><div class="review-head"><h3>Превью готово</h3><span id="previewStorage"></span></div><p class="hint" id="previewRevertHint"></p><div class="actions"><button id="revert" class="quiet">Не подходит — вернуть всё как было</button></div></section>
+<section id="logPanel" class="log-panel" hidden><div class="panel-head"><span class="caps">Log</span><button class="btn ghost" data-log>Close ✕</button></div><pre id="events"></pre></section>
 
-<section id="finalStage" hidden>
-<span class="eyebrow">03 / УСТАНОВКА НА КОМПЬЮТЕР</span><h2>Превью подходит? Установим систему.</h2>
-<p class="hint" id="finalHint">Проверенная система вместе с вашими файлами, настройками и паролем станет системой этого компьютера. Перед установкой завершите работу внутри превью через меню выключения.</p>
-<form id="finalInstallForm"><h3 id="finalTarget"></h3>
-<div id="layoutChoice"><label class="check"><input type="radio" name="layout" value="alongside" checked>Установить рядом с существующими данными и системами (в свободное место)</label><label class="check"><input type="radio" name="layout" value="erase">Стереть весь диск: система займёт его целиком, остальные разделы будут удалены</label></div>
-<p class="destructive" id="layoutWarning"></p>
-<div class="fields" id="finalPassphraseField" hidden><label class="password">Пароль шифрования (нужен для завершения)<input id="finalPassphrase" type="password" autocomplete="off" minlength="8" maxlength="512"></label></div>
-<div id="secureBootFinal" hidden><label class="check"><input type="checkbox" id="enrollKeys">Записать ключи Secure Boot этой системы в прошивку компьютера (вместе с ключами Microsoft)</label><p class="hint" id="secureBootHint"></p></div>
-<label class="check"><input type="checkbox" id="finalAccepted" required>Я проверил систему в превью и хочу установить её на этот диск</label>
-<label>Для подтверждения введите путь диска<input id="targetConfirm" autocomplete="off" required placeholder="Например, /dev/nvme0n1"></label>
-<button type="submit" id="installFinal">Установить на компьютер</button></form>
-<div id="finalError" role="alert" hidden></div>
-<div id="finalProgress" hidden><h3 id="finalPhase"></h3><pre id="finalEvents"></pre><div id="finalWarnings" class="notice" hidden></div></div>
-<div id="finalDone" hidden><h3 id="finalDoneTitle">Система установлена на диск компьютера</h3><p>Извлеките носитель AGIOS и перезагрузите компьютер: он загрузится с установленной системы. Проверка первого запуска откроется в ней.</p><div class="actions"><button id="rebootLive">Перезагрузить компьютер</button><button id="poweroffLive" class="quiet">Выключить</button></div><p class="hint" id="powerMessage"></p></div>
-</section>
-<details id="logs" hidden><summary>Ход установки</summary><pre id="events"></pre></details>
-</section></main>
-<footer id="about"><span id="version">AGIOS</span><button id="checkUpdates" class="quiet" title="Запрос уйдёт на api.github.com только по этой кнопке">Проверить обновления</button><div id="updateResult" hidden></div></footer>
-<dialog id="settings"><form id="providerForm"><h2>Подключение модели</h2><p>Войдите в аккаунт ChatGPT или подключите API-провайдера.</p><label>Провайдер<select id="provider"><option value="chatgpt">ChatGPT — вход в аккаунт</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="gemini">Gemini API</option><option value="ollama">Ollama</option><option value="compatible">Совместимый API</option></select></label><label>Модель<input id="providerModel" placeholder="Модель или автоматический выбор после входа"></label><label>Адрес API<input id="endpoint" placeholder="Необязательно для стандартного провайдера"></label><label>API-ключ<input id="key" type="password" autocomplete="off"></label><p id="providerError" role="alert"></p><div class="dialog-actions"><button type="button" id="closeSettings" class="quiet">Закрыть</button><button type="submit">Подключить</button></div></form></dialog>
-<script src="/guacamole.js"></script><script src="/static/app.js"></script></body></html>
+<dialog id="settings"><form id="providerForm">
+  <span class="caps">Model</span><h2>Connect your <em>model</em></h2>
+  <div id="providerKinds" class="segs" role="radiogroup" aria-label="Provider">
+    <button type="button" class="seg" data-kind="chatgpt">ChatGPT</button><button type="button" class="seg" data-kind="openai">OpenAI</button><button type="button" class="seg" data-kind="anthropic">Anthropic</button><button type="button" class="seg" data-kind="gemini">Gemini</button><button type="button" class="seg" data-kind="ollama">Ollama</button><button type="button" class="seg" data-kind="compatible">Other API</button>
+  </div>
+  <p id="providerNote" class="hint"></p>
+  <label class="field"><span>Model</span><input id="providerModel" autocomplete="off" placeholder="Leave empty to pick one after signing in"></label>
+  <label class="field" id="endpointField"><span>API base URL</span><input id="endpoint" autocomplete="off" placeholder="Optional for a standard provider"></label>
+  <label class="field" id="keyField"><span>API key</span><input id="key" type="password" autocomplete="off"></label>
+  <p id="providerError" class="line error" role="alert" hidden></p>
+  <div class="row end"><button type="button" id="closeSettings" class="btn ghost">Close</button><button type="submit" id="providerSubmit" class="btn primary">Connect</button></div>
+</form></dialog>
+
+<script src="/guacamole.js"></script><script src="/static/app.js?v=sunrise-6"></script>
+</body></html>

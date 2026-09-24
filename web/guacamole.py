@@ -55,7 +55,7 @@ async def handshake(reader, writer, vnc_port):
 async def tunnel(request):
     state = request.app['state']
     if not state.vm or not state.vm.running:
-        raise web.HTTPConflict(text='Виртуальная машина ещё не запущена')
+        raise web.HTTPConflict(text='The virtual machine is not running yet')
     reader, writer = await asyncio.open_connection('127.0.0.1', state.guacd_port)
     try:
         await asyncio.wait_for(handshake(reader, writer, state.vm.vnc_port), 15)

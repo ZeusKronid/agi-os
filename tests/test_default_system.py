@@ -60,7 +60,7 @@ class DefaultSystemTests(unittest.TestCase):
 
     def test_welcome_page_offers_it(self):
         page = (Path(__file__).resolve().parents[1] / "web/static/index.html").read_text()
-        self.assertIn("Выберите за меня", page)
+        self.assertIn("Choose for me", page)
 
 
 if __name__ == "__main__":

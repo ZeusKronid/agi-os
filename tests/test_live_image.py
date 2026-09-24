@@ -51,10 +51,13 @@ class LiveImageTests(unittest.TestCase):
         for path in (AIROOTFS / "usr/local/bin").iterdir():
             self.assertNotIn("codex", path.read_text().lower(), path)
 
-    def test_gtk_installer_is_gone(self):
-        self.assertFalse((APP / "app.py").exists())
+    def test_live_opens_the_website_not_the_native_installer(self):
+        # The native GTK installer stays in the image for the native mode (scripts/run-native-installer.sh);
+        # whether it remains at all is decided separately (CMP-147). The Live entry point is the website.
         self.assertFalse((AIROOTFS / "usr/local/share/agi-os/welcome.html").exists())
-        self.assertNotIn("python-gobject", packages())
+        launcher = (AIROOTFS / "usr/local/bin/agi-installer").read_text()
+        self.assertIn("http://localhost:8787", launcher)
+        self.assertNotIn("app.py", launcher)
 
     def test_chatgpt_backend_packages_remain(self):
         self.assertTrue({"openai-codex", "bubblewrap"} <= packages())
