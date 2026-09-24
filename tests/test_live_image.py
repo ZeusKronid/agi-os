@@ -1,6 +1,7 @@
 """Static checks of the Live image profile: no Codex/GTK-era entry points remain."""
 
 import configparser
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -81,6 +82,18 @@ class BootMediaTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn('ENV{ID_CDROM}=="1"', lines[0])
         self.assertTrue(lines[0].endswith('ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}=""'))
+
+
+class FirefoxPolicyTests(unittest.TestCase):
+    def test_live_browser_neither_saves_passwords_nor_opens_extra_tabs(self):
+        # The website asks for the new system's passwords: the Live Firefox must not offer to
+        # save or generate them, and no privacy-notice tab should open next to the website.
+        policies = json.loads((AIROOTFS / "usr/lib/firefox/distribution/policies.json").read_text())["policies"]
+        self.assertIs(policies["PasswordManagerEnabled"], False)
+        self.assertIs(policies["OfferToSaveLogins"], False)
+        self.assertIs(policies["DisableTelemetry"], True)
+        self.assertEqual(policies["OverrideFirstRunPage"], "")
+        self.assertIs(policies["Preferences"]["signon.generation.enabled"]["Value"], False)
 
 
 class ChatGPTIsolationTests(unittest.TestCase):
