@@ -531,6 +531,7 @@ def copy(runner, request, disk, source, plan, passphrase, mount, skip=(), reserv
     caller: a copied swap file would sit at other physical blocks than resume_offset says.
     reserve is the space the caller needs for them on the new root."""
     target = disk['path']
+    check_table(plan, disk, request['layout'])  # finalize() checked it already; a GPT write would convert an MBR.
     if plan.table == 'msdos' and request['layout'] == 'alongside' and disk.get('pttype') and mbr_slots(runner, target) < 2:
         raise ValidationError('The MBR of this disk has fewer than two free primary entries for /boot and the root '
                               '(an MBR holds four). Nothing was changed.')
