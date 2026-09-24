@@ -1,8 +1,8 @@
 # Download and verify AGIOS
 
-AGIOS is published as a Live ISO on the
-[GitHub releases page](https://github.com/ZeusKronid/agi-os/releases). Every
-release is built by CI from a tagged commit (`docs/ci.md`) and carries:
+Download a versioned, signed image from the
+[GitHub releases page](https://github.com/ZeusKronid/agi-os/releases). Each
+release is built by CI from a `v*` tag (`docs/ci.md`) and carries:
 
 | File | What it is |
 | --- | --- |
@@ -18,25 +18,28 @@ Versions are named after the release tag (`v2026.10.0` …) and the ISO after th
 commit date. Older releases stay on the page; `build-info.json` tells how to
 rebuild any of them byte for byte (`docs/ci.md`).
 
+For the latest development build from `main`, open a successful run in the
+[Live ISO workflow](https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml?query=branch%3Amain)
+and select **agi-os-iso** under **Artifacts**. Sign in to GitHub to download it.
+The ZIP contains the ISO, its `.sha256` file, and `build-info.json`; CI
+artifacts expire after seven days. After extracting the ZIP, check the image
+with `sha256sum --check agi-os-*.iso.sha256`. This checksum detects a damaged
+download but is not a signature.
+
 ## Release signing key
 
-> **Not created yet.** Until the project owner creates the key and publishes its
-> fingerprint here, releases are not signed and cannot be verified by signature;
-> the CI refuses to publish a release without a key unless
-> `AGIOS_ALLOW_UNSIGNED_RELEASE=1` is set on purpose.
+Fingerprint: **`BA1D BAF6 09C7 6719 47DD A5E4 D1DF F581 C1F8 77D3`**.
+The [public key](agios-release-key.asc) is committed to this repository. The
+primary key certifies a separate CI signing subkey. Compare the fingerprint
+shown by your verification tool with this value from a trusted copy of the
+repository; the key bundled with a download alone does not establish trust.
 
-Fingerprint: *to be published here, in the README and in every release note.*
-
-A fingerprint is only trustworthy when it comes from a place other than the
-download itself: check that the fingerprint in the release notes, this page in
-the Git repository and (when published) the key server agree.
-
-## Verify on Linux
+## Verify a signed release on Linux
 
 With the repository at hand:
 
 ```sh
-python3 scripts/release/verify-iso.py agi-os-2026.10.01-x86_64.iso --fingerprint <FINGERPRINT>
+python3 scripts/release/verify-iso.py agi-os-*.iso
 ```
 
 It imports `agios-release-key.asc` into a temporary keyring (yours is not
@@ -45,7 +48,7 @@ ISO's SHA-256 with `SHA256SUMS`. Without the repository, the same with gpg:
 
 ```sh
 gpg --import agios-release-key.asc
-gpg --fingerprint <FINGERPRINT>                 # must match the published fingerprint
+gpg --fingerprint BA1DBAF609C7671947DDA5E4D1DFF581C1F877D3
 gpg --verify SHA256SUMS.sig SHA256SUMS          # "Good signature from AGIOS release key"
 gpg --verify agi-os-*.iso.sig agi-os-*.iso
 sha256sum --check --ignore-missing SHA256SUMS    # agi-os-…iso: OK
@@ -56,7 +59,7 @@ the fingerprint gpg prints with the published one. The warning *This key is not
 certified with a trusted signature* only says that you have not signed the key
 yourself; the fingerprint check is what matters.
 
-## Verify on Windows
+## Verify a signed release on Windows
 
 1. Install [Gpg4win](https://www.gpg4win.org/) and open Kleopatra.
 2. *File → Import* `agios-release-key.asc`; in the key's details compare the
@@ -70,7 +73,7 @@ yourself; the fingerprint check is what matters.
    `Get-FileHash .\agi-os-…-x86_64.iso -Algorithm SHA256` and compare with the line
    in `SHA256SUMS`.
 
-## Verify on macOS
+## Verify a signed release on macOS
 
 Install GnuPG (`brew install gnupg` or GPG Suite), then run the gpg commands from
 the Linux section; for the checksum use `shasum -a 256 -c SHA256SUMS --ignore-missing`.
@@ -84,7 +87,7 @@ CI signs in the `release` job of `.github/workflows/iso.yml`:
 
 | Setting | Kind | Content |
 | --- | --- | --- |
-| `AGIOS_SIGNING_KEY` | secret | ASCII-armored secret key (preferably only the signing subkey, `gpg --export-secret-subkeys --armor FPR!`) |
+| `AGIOS_SIGNING_KEY` | secret | ASCII-armored signing subkey (`gpg --armor --export-secret-subkeys FPR`), without the primary secret key |
 | `AGIOS_SIGNING_PASSPHRASE` | secret | its passphrase, if it has one (passed to gpg over a pipe, loopback pinentry) |
 | `AGIOS_SIGNING_FINGERPRINT` | variable | full 40-hex fingerprint of the primary key |
 | `AGIOS_ALLOW_UNSIGNED_RELEASE` | variable | `1` only to publish without signatures on purpose |
@@ -92,41 +95,16 @@ CI signs in the `release` job of `.github/workflows/iso.yml`:
 Signing by hand (key in your own keyring, e.g. on a hardware token):
 
 ```sh
-python3 scripts/release/sign-iso.py out --key <FINGERPRINT> --export-key
+python3 scripts/release/sign-iso.py out --key BA1DBAF609C7671947DDA5E4D1DFF581C1F877D3 --export-key
 ```
 
 The script never creates or picks a key.
 
-### What the project owner must provide
+### Key custody and rotation
 
-Nothing is signed until these exist (the build scripts never create a key):
-
-1. A decision on how the key is kept (options below).
-2. The key: an OpenPGP key whose primary fingerprint is published; for CI, its
-   ASCII-armored **signing subkey** (`gpg --armor --export-secret-subkeys FPR`)
-   as the secret `AGIOS_SIGNING_KEY`, plus `AGIOS_SIGNING_PASSPHRASE` if it has one.
-3. The repository variable `AGIOS_SIGNING_FINGERPRINT` (40 hex, primary key).
-4. The fingerprint in this page (section *Release signing key*), in
-   `RELEASE_FINGERPRINT` of `scripts/release/verify-iso.py`, in the README and on
-   keys.openpgp.org.
-5. A revocation certificate stored offline.
-
-### Decisions left to the project owner
-
-The key is a trust anchor for everyone who installs AGIOS, so how it is kept is
-not decided by the build scripts. Options, from simplest to safest:
-
-1. **One key, stored as a CI secret.** Easy; anyone with admin access to the
-   repository (or a compromised workflow) can sign.
-2. **Offline primary key + signing subkey in CI (recommended).** The primary key
-   (certification only) stays offline or on a hardware token; CI holds only the
-   subkey with an expiry (for example one year). A leaked subkey is revoked and
-   replaced without changing the published fingerprint.
-3. **Signing only by a maintainer on a hardware token** (YubiKey / Nitrokey). CI
-   builds and uploads unsigned artifacts; the maintainer downloads, verifies the
-   checksum against `build-info.json`, signs locally and uploads the signatures.
-
-For any option: algorithm Ed25519 (or RSA 4096 for very old verifiers), an
-expiry date, a revocation certificate stored offline, and the fingerprint
-published in the README, on this page, in every release note and on
-keys.openpgp.org.
+The Ed25519 primary key is certification-only and kept out of CI. GitHub
+Actions holds only a one-year signing subkey; the primary key, signing subkey,
+passphrase, and revocation certificate are backed up in the project owner's
+secret manager. Renew the signing subkey before it expires and update the
+`AGIOS_SIGNING_KEY` secret. If the signing key is compromised, revoke it and
+publish the revocation and replacement fingerprint before another release.
