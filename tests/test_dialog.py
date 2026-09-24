@@ -149,6 +149,16 @@ class TurnTests(unittest.TestCase):
             controller.respond("hello", turn)
         self.assertEqual(controller.history, [])
 
+    def test_provider_error_keeps_the_configuration_without_the_kept_note(self):
+        controller = self.controller(proposal())
+        controller.respond("Sway, please")
+        agreed = controller.configuration
+        controller.provider = Scripted()  # no replies left: the provider fails
+        with self.assertRaises(IndexError):
+            controller.respond("Rename it")
+        self.assertEqual(controller.configuration, agreed)
+        self.assertFalse(controller.kept)
+
     def test_too_many_rounds_still_keeps_the_agreed_configuration(self):
         controller = self.controller(proposal(), *[answer(lookup=["x"])] * 4)
         controller.respond("Sway, please")
