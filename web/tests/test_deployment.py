@@ -130,7 +130,8 @@ class PromoteTests(unittest.TestCase):
             partitions = nested
         request = {'image': {'format': 'raw', 'path': '/dev/vda2'}, 'layout': 'alongside'}
         with patch.object(finalize_worker, 'emit'):
-            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(), 'uefi')
+            boot, root, _ = finalize_worker.promote(Runner(), request, {'path': '/dev/vda'}, Source(),
+                                                     finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'uefi'))
         self.assertEqual((boot, root), ('/dev/vda2', '/dev/vda3'))
         sgdisk = [c for c in calls if c[0] == 'sgdisk' and any(a.startswith('--new') for a in c)][0]
         self.assertIn(f'--new=0:{base + 2048}:{base + 2048 + GIB // 512 - 1}', sgdisk)

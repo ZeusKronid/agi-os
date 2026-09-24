@@ -57,7 +57,10 @@ def boot_chain_signed(secure_boot, system_root=Path("/")):
     """Signatures read directly when /boot is readable. Otherwise the proof is the firmware
     itself (Secure Boot on: it booted only a chain signed with enrolled keys) or the root
     `sbctl verify` done at the final installation."""
-    states = [pe_signed(system_root / f) for f in SIGNED_BOOT_FILES]
+    # Next to Windows the boot loader sits on the shared ESP at /efi (CMP-151); /boot is XBOOTLDR.
+    esp = "efi/" if (system_root / "efi/EFI/systemd").is_dir() else "boot/"
+    states = [pe_signed(system_root / (esp + f[len("boot/"):] if f.startswith("boot/EFI/") else f))
+              for f in SIGNED_BOOT_FILES]
     if False in states:
         return False
     if None not in states:
