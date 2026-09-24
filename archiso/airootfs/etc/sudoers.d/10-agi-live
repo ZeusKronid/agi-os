@@ -1,2 +1,11 @@
-# The live installer agent manages the target system through normal sudo commands.
-agi ALL=(ALL:ALL) NOPASSWD: ALL
+# AGIOS Live: only the website's system user may become root, and only for the
+# exact commands the website runs. The desktop user agi and everything it
+# starts (browser, terminal, the ChatGPT sign-in adapter) get no root at all.
+Defaults:agi-web env_reset, !requiretty
+Cmnd_Alias AGIOS_HELPERS = /usr/bin/python -B /usr/local/share/agi-os/web/storage_worker.py, \
+                           /usr/bin/python -B /usr/local/share/agi-os/web/finalize_worker.py
+Cmnd_Alias AGIOS_CATALOG = /usr/bin/pacman -Sy --noconfirm
+Cmnd_Alias AGIOS_POWER = /usr/bin/shutdown -h +1, /usr/bin/shutdown -r +1
+# Test stands only: the pinned package mirror is passed through a root-only fw_cfg file.
+Cmnd_Alias AGIOS_TEST = /usr/bin/cat /sys/firmware/qemu_fw_cfg/by_name/opt/org.agi-os.test-mirror/raw
+agi-web ALL=(root) NOPASSWD: AGIOS_HELPERS, AGIOS_CATALOG, AGIOS_POWER, AGIOS_TEST

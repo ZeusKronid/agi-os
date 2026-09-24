@@ -2,7 +2,8 @@
 
 import json
 
-from domain import Configuration, PLANNER_PROMPT, ValidationError
+from domain import GIB, Configuration, PLANNER_PROMPT, ValidationError, default_system_context, hibernation_swap_size
+from hardware import describe, driver_plan, profile
 from system import Catalog, selected_disk
 
 
@@ -19,6 +20,30 @@ class Controller:
         self.stage = stage
         self.notify("stage", stage)
 
+    def hardware_context(self):
+        """Real inventory plus the drivers the app adds for it: data, so the model
+        neither guesses the hardware nor picks driver packages itself. The session is
+        usually chosen in the very turn this prompt serves, so both variants are given."""
+        hardware = profile(self.snapshot["hardware"])
+        console, graphical = driver_plan(hardware), driver_plan(hardware, (), "session")
+        return {"firmware": self.snapshot["firmware"], "cpu_count": self.snapshot["cpu_count"],
+                "disks": [{k: d.get(k) for k in ("path", "size", "model", "tran", "rota", "eligible", "reason")}
+                          for d in self.snapshot["disks"]],
+                "computer": describe(hardware), "hardware": hardware,
+                "driver_packages_added_by_app": {"console": console["packages"], "graphical_session": graphical["packages"]},
+                "driver_notes": graphical["notes"], "preview_cannot_verify": graphical["unverified"],
+                "hibernation_swap_file_gib": hibernation_swap_size(hardware["memory"]) // GIB if hardware["memory"] else None}
+
+    def report_check_failure(self, text):
+        """The installed preview rejected files the model wrote; the model sees the
+        checker output together with the user's next message."""
+        note = ("Application note (data): the installer checked the generated configuration files "
+                "inside the installed preview and they failed. Fix them in the next configuration:\n" + text)
+        if self.history and self.history[-1]["role"] == "user":
+            self.history[-1] = {"role": "user", "content": self.history[-1]["content"] + "\n\n" + note}
+        else:
+            self.history.append({"role": "user", "content": note})
+
     def respond(self, text):
         if self.installing:
             raise ValidationError("Изменение конфигурации во время установки недоступно")
@@ -28,11 +53,15 @@ class Controller:
             raise ValidationError("Диалог слишком длинный. Сохраните согласованные требования и начните новое подключение.")
         self.configuration = None  # Any revision invalidates the previous review/consent.
         self.stage_changed(2)
-        self.history.append({"role": "user", "content": text})
-        hardware = {"firmware": self.snapshot["firmware"], "cpu_count": self.snapshot["cpu_count"],
-                    "disks": [{k: d.get(k) for k in ("path", "size", "model", "eligible", "reason")}
-                              for d in self.snapshot["disks"]]}
-        system = PLANNER_PROMPT + "\nDetected hardware (data): " + json.dumps(hardware, ensure_ascii=False)
+        if self.history and self.history[-1]["role"] == "user":
+            # A pending application note (or an unanswered message) stays in the same turn:
+            # providers expect alternating roles.
+            self.history[-1] = {"role": "user", "content": self.history[-1]["content"] + "\n\n" + text}
+        else:
+            self.history.append({"role": "user", "content": text})
+        system = (PLANNER_PROMPT + "\nAGIOS standard system (data, default_system): "
+                  + json.dumps(default_system_context(self.snapshot["firmware"]), ensure_ascii=False)
+                  + "\nDetected hardware (data): " + json.dumps(self.hardware_context(), ensure_ascii=False))
         for _ in range(4):
             reply = self.provider.reply(system, self.history)
             self.history.append({"role": "assistant", "content": json.dumps(reply, ensure_ascii=False)})
@@ -48,7 +77,9 @@ class Controller:
                     selected_disk(self.snapshot, config.disk)
                     if self.snapshot["firmware"] == "bios" and config.bootloader != "grub":
                         raise ValidationError("В BIOS нужен GRUB")
-                    self.catalog.validate(config.packages)
+                    if config.swap == "hibernate":
+                        hibernation_swap_size(profile(self.snapshot["hardware"])["memory"])
+                    self.catalog.validate([*config.packages, *config.effective_fonts()])
                 except ValidationError as exc:
                     self.history.append({"role": "user", "content": "Application validation rejected proposal: " + str(exc)})
                     self.notify("status", "Уточняю конфигурацию: " + str(exc))
@@ -82,6 +113,7 @@ class DemoProvider:
                     "timezone": "Europe/Moscow", "keyboard_layouts": ["us", "ru"],
                     "desktop": "Sway — демонстрационный пример", "session": "sway",
                     "packages": ["sway", "foot", "firefox", "greetd", "greetd-regreet", "cage"],
-                    "services": ["greetd.service"], "home_files": [], "system_files": [],
+                    "services": ["greetd.service"], "home_files": [], "system_files": [], "swap": "zram",
                     "requirements": ["Рабочая сессия Sway", "Браузер Firefox", "Русская и английская раскладки"],
+                    "console_keymap": "", "console_font": "", "fonts": [], "locale_overrides": [], "time_sync": True,
                 }}

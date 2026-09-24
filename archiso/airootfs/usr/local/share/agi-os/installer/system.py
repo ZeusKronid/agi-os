@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from domain import ValidationError
+import hardware as hardware_module
 
 
 def read_command(args, timeout=30):
@@ -30,7 +31,7 @@ def fingerprint(disk):
 
 def inventory():
     data = json.loads(read_command(["lsblk", "--json", "--bytes", "--output",
-        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,PTTYPE,RM,TRAN,START"]))
+        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,PTTYPE,RM,TRAN,START,ROTA"]))
 
     def in_use(node):
         holders = Path("/sys/class/block") / node["name"] / "holders"
@@ -51,7 +52,7 @@ def inventory():
             for child in disk.get("children", []) if child.get("type") == "part"]
         disks.append(disk)
     return {"live": live_environment(), "firmware": "uefi" if Path("/sys/firmware/efi").is_dir() else "bios",
-            "cpu_count": os.cpu_count(), "disks": disks}
+            "cpu_count": os.cpu_count(), "disks": disks, "hardware": hardware_module.detect()}
 
 
 def selected_disk(snapshot, path):
@@ -72,7 +73,7 @@ class Catalog:
             sync = Path("/var/lib/pacman/sync")
             if live_environment() and any(not (sync / (repo + ".db")).is_file()
                                           for repo in ("core", "extra")):
-                read_command(["sudo", "-n", "pacman", "-Sy", "--noconfirm"], timeout=180)
+                read_command(["sudo", "-n", "/usr/bin/pacman", "-Sy", "--noconfirm"], timeout=180)
             output = read_command(["pacman", "-Sl", "core", "extra"], timeout=60)
             if not output.strip():
                 raise ValidationError("Каталог пакетов пуст. Проверьте сеть и повторите запрос: "
@@ -123,8 +124,8 @@ class Catalog:
 
 
 def demo_inventory():
-    disk = {"name": "vda", "path": "/dev/vda", "size": 64 * 2**30, "type": "disk",
+    disk = {"name": "vda", "path": "/dev/vda", "size": 64 * 2**30, "type": "disk", "tran": "nvme", "rota": False,
             "model": "Демонстрационный диск", "serial": "DEMO-ONLY", "wwn": "", "maj:min": "0:0",
             "eligible": True, "reason": "", "children": []}
     disk["fingerprint"] = fingerprint(disk)
-    return {"live": False, "firmware": "uefi", "cpu_count": 4, "disks": [disk]}
+    return {"live": False, "firmware": "uefi", "cpu_count": 4, "disks": [disk], "hardware": hardware_module.demo()}

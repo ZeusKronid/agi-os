@@ -31,6 +31,16 @@ guacd из закреплённого образа `guacamole/guacd:1.6.0` (squa
 графики, поэтому второй образ не нужен. Кэш пакетов хоста и оптимизированные
 под конкретный CPU пакеты не используются.
 
+Воспроизводимая сборка в CI: `scripts/ci/build-iso.sh` — mkarchiso в
+закреплённом привилегированном контейнере Arch (только для CI или одноразовой
+сборочной VM, не для рабочей станции), пакеты из одного дня Arch Linux Archive
+(`scripts/ci/arch-snapshot`), `SOURCE_DATE_EPOCH` = время коммита; рядом с ISO
+кладутся `.sha256` и `build-info.json`. GitHub Actions запускает юнит-тесты на
+каждый PR, а сборку ISO со smoke-загрузкой в QEMU (UEFI и BIOS) — на `main`,
+теги `v*` (релиз) и PR, меняющие образ. Подробнее — [CI и сборка](docs/ci.md).
+Релиз подписывается OpenPGP (`SHA256SUMS`, `.sig`); как скачать и проверить образ —
+[Загрузка и проверка](docs/download.md).
+
 ## Работа с системой
 
 1. Загрузить Live ISO. Сайт открывается автоматически.
@@ -62,8 +72,9 @@ guacd из закреплённого образа `guacamole/guacd:1.6.0` (squa
    открывается проверка первого запуска (`agi-os-verify`).
 
 Хранилища: ext4/Btrfs/XFS/F2FS, GPT, GRUB (BIOS/UEFI) или systemd-boot (UEFI),
-LUKS2 для корня, swap — zram. Не поддерживаются: сохранение разделов на
-MBR-дисках (только стирание), гибернация.
+LUKS2 для корня, swap — zram; по выбору гибернация (swap-файл размером с RAM
+внутри корня, resume в initramfs, проверка `agi-os-verify --hibernate`; не на F2FS).
+Не поддерживаются: сохранение разделов на MBR-дисках (только стирание).
 
 ## Проверки и разработка
 
@@ -82,7 +93,9 @@ node --check web/static/app.js
 [Live, превью и финализация](docs/local-web.md) ·
 [Архитектура](docs/installer-architecture.md) ·
 [Проверка установленной системы](docs/installation-testing.md) ·
-[Мост модели для разработки](docs/development-bridge.md)
+[Мост модели для разработки](docs/development-bridge.md) ·
+[CI и сборка](docs/ci.md) ·
+[Загрузка и проверка](docs/download.md)
 
 ## Лицензии
 
