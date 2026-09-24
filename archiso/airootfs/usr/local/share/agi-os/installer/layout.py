@@ -141,17 +141,25 @@ def check_mbr_size(disk_size):
         raise ValidationError("An MBR (msdos) table covers only the first 2 TiB of this disk; choose GPT")
 
 
+def wipe_table(runner, disk):
+    """Forget the disk's partition table before erasing it: wipefs also clears a GPT whose
+    main header is damaged but whose backup survives, on which sgdisk --zap-all stops
+    ("invalid main GPT header, but valid backup"). Only for a disk that is being erased."""
+    runner.run(["wipefs", "--all", "--force", disk])
+    runner.run(["sgdisk", "--zap-all", disk])
+
+
 def apply_table(runner, plan, disk, disk_size=None):
     """Replace the disk's table with the plan's partitions."""
+    if plan.table == "msdos" and disk_size is not None:
+        check_mbr_size(disk_size)
+    wipe_table(runner, disk)
     if plan.table == "msdos":
-        if disk_size is not None:
-            check_mbr_size(disk_size)
-        runner.run(["sgdisk", "--zap-all", disk])
         entries = [(None, None if p.size is None else p.size // SECTOR, p.typecode, p.role == "boot")
                    for p in plan.partitions]
         runner.run(["sfdisk", "--wipe", "always", "--label", "dos", disk], input_text=mbr_script(entries))
         return
-    for command in table_commands(plan, disk):
+    for command in table_commands(plan, disk)[1:]:  # the table is already wiped
         runner.run(command)
 
 

@@ -422,15 +422,29 @@ class CopyTableTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0][1].startswith('--backup='))
 
+    def test_erase_wipes_even_a_damaged_table(self):
+        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual(calls, [['wipefs', '--all', '--force', '/dev/vda'], ['sgdisk', '--zap-all', '/dev/vda'],
+                                 ['sgdisk', '--clear', '/dev/vda']])
+
+    def test_alongside_refuses_a_table_sgdisk_cannot_read_and_writes_nothing(self):
+        calls = []
+        class Runner:
+            def run(self, args, **kw):
+                calls.append(args)
+                raise ValidationError('sgdisk: code 2\nCaution: invalid main GPT header, but valid backup')
+        with self.assertRaises(ValidationError) as caught:
+            finalize_worker.prepare_table(Runner(), 'alongside', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertIn('Nothing was changed', str(caught.exception))
+        self.assertEqual([c[0] for c in calls], ['sgdisk'])
+        self.assertTrue(calls[0][1].startswith('--backup='))
+
     def test_alongside_refuses_data_without_a_table(self):
         for disk, blank in (({'path': '/dev/vda', 'pttype': None, 'fstype': 'ntfs'}, True),
                             ({'path': '/dev/vda', 'pttype': None, 'fstype': None}, False)):
             with self.assertRaises(ValidationError):
                 self.calls('alongside', disk, blank)
 
-    def test_erase_always_starts_from_an_empty_table(self):
-        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
-        self.assertEqual([c[1] for c in calls], ['--zap-all', '--clear'])
 
 if __name__ == '__main__':
     unittest.main()

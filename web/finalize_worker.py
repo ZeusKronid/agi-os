@@ -294,14 +294,14 @@ def check_record(record, config, firmware, encrypted, lvm=False):
         raise ValidationError('The LVM layout of the preview does not match the installation record')
 
 
-def prepare_table(runner, layout, disk, table='gpt'):
+def prepare_table(runner, layout_name, disk, table='gpt'):
     """The target's partition table before the copy: a fresh GPT (or MBR for an msdos
     plan) for "erase"; for "alongside" the existing GPT (backed up first). A brand-new
     disk has no table at all: with nothing on it to keep, it gets an empty GPT instead
     of an error."""
     target = disk['path']
-    if layout == 'erase':
-        runner.run(['sgdisk', '--zap-all', target])
+    if layout_name == 'erase':
+        layout.wipe_table(runner, target)
         if table == 'msdos':
             runner.run(['sfdisk', '--wipe', 'always', target], input_text='label: dos\n')
         else:
@@ -319,7 +319,15 @@ def prepare_table(runner, layout, disk, table='gpt'):
         # The MBR and its entries, restorable with sfdisk DISK < file.
         (BACKUPS / f'agi-final-{Path(target).name}.sfdisk').write_text(runner.run(['sfdisk', '--dump', target]))
         return
-    runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    try:
+        runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
+    except ValidationError as exc:
+        # Another system's table that sgdisk cannot read cleanly (e.g. a damaged main GPT
+        # with an intact backup) is not repaired behind the user's back.
+        detail = next((l.strip() for l in str(exc).splitlines() if l.strip()), '')
+        raise ValidationError(f'The partition table of {target} could not be read cleanly ({detail[:200]}). '
+                              'Nothing was changed. Check it with “sudo sgdisk -v ' + target + '” or repair it in '
+                              'the other system first, or choose “Erase the disk”.') from exc
 
 
 TABLES = {'gpt': 'gpt', 'dos': 'msdos'}
