@@ -416,6 +416,23 @@ class PrepareTests(unittest.TestCase):
                 self.prepare({'id': f'part:/dev/sda:{start}'})
         self.assertEqual([call[0] for call in self.calls], ['sgdisk'])  # GPT backup only
 
+    def test_shrink_creates_an_installable_disk_when_estimate_is_smaller(self):
+        start = 2048 + 48 * GIB // S
+        end = 2048 + 60 * GIB // S - 1
+        for fstype in ('ntfs', 'ext4'):
+            snapshot = fixture()
+            snapshot['disks'][0]['partitions'][0]['fstype'] = fstype
+            with patch.object(storage_worker, 'shrink_room', return_value=30 * GIB), \
+                    patch.object(storage_worker, 'free_regions', return_value=[(start, end)]), \
+                    patch.object(storage_worker, 'resize_partition') as resize, \
+                    patch.object(storage_worker, 'new_partition', return_value='/dev/sda3') as create:
+                result = self.prepare({'id': 'shrink:/dev/sda1'}, snapshot)
+            resize.assert_any_call('/dev/sda', 1, 48 * GIB // S, dry_run=True)
+            resize.assert_any_call('/dev/sda', 1, 48 * GIB // S)
+            create.assert_called_once_with('/dev/sda', start, end)
+            self.assertGreaterEqual((end - start + 1) * S, storage_worker.MIN_PREVIEW_DISK)
+            self.assertEqual(result['image']['path'], '/dev/sda3')
+
     def test_shrink_refuses_failed_gpt_backup_before_writing(self):
         # Recovery needs the original table. If it cannot be backed up, leave
         # the filesystem at its original size as well.
