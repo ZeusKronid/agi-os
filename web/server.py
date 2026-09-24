@@ -285,6 +285,7 @@ class State:
             built = {'summary': built_config.summary(self.built['consent']['disk'], self.built.get('hardware')), 'target': self.built['consent']['target'],
                      'encrypted': self.built['encrypted'], 'digest': self.built['consent']['digest'],
                      'secure_boot': bool(self.built.get('secure_boot')),
+                     'bootloader': built_config.bootloader,
                      'storage': self.preview['option']['title'] if self.preview else None,
                      'on_target': bool(self.preview and self.preview['image']['format'] == 'raw'
                                        and self.preview['image']['path'].startswith(self.built['consent']['target'])),

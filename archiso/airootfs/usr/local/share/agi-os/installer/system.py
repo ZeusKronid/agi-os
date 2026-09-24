@@ -31,7 +31,7 @@ def fingerprint(disk):
 
 def inventory():
     data = json.loads(read_command(["lsblk", "--json", "--bytes", "--output",
-        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,PTTYPE,RM,TRAN,START,ROTA"]))
+        "NAME,PATH,SIZE,TYPE,MODEL,SERIAL,WWN,RO,MOUNTPOINTS,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,PARTTYPE,PTTYPE,RM,TRAN,START,ROTA"]))
 
     def in_use(node):
         holders = Path("/sys/class/block") / node["name"] / "holders"
@@ -47,7 +47,7 @@ def inventory():
         disk["reason"] = "" if disk["eligible"] else "Диск занят, доступен только для чтения или меньше 12 ГиБ"
         disk["fingerprint"] = fingerprint(disk)
         disk["partitions"] = [
-            {k: child.get(k) for k in ("path", "size", "fstype", "label", "partlabel", "start")}
+            {k: child.get(k) for k in ("path", "size", "fstype", "label", "partlabel", "parttype", "start")}
             | {"mounted": bool([m for m in child.get("mountpoints", []) if m])}
             for child in disk.get("children", []) if child.get("type") == "part"]
         disks.append(disk)
