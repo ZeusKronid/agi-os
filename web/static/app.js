@@ -275,6 +275,10 @@ function render(state) {
             : 'The system you tried is copied to the disk and checked file by file.';
         $('revertHint').textContent = 'You tried the system. Installing makes it this computer’s system. Putting it back removes the preview — '
             + (state.built.revert || 'nothing else changes') + '.';
+    } else {
+        // A build that stopped (an error, a failed file check) has no built system to describe.
+        $('revertHint').textContent = 'The preview was not finished. Putting it back removes what was prepared for it; '
+            + 'nothing else on the disk changes.';
     }
     // Installing needs the preview off: step 1 turns it off, step 2 installs.
     if (modal === 'install') {
