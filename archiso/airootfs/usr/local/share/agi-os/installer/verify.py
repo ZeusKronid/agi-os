@@ -59,7 +59,10 @@ def boot_chain_signed(secure_boot, system_root=Path("/")):
     """Signatures read directly when /boot is readable. Otherwise the proof is the firmware
     itself (Secure Boot on: it booted only a chain signed with enrolled keys) or the root
     `sbctl verify` done at the final installation."""
-    states = [pe_signed(system_root / f) for f in SIGNED_BOOT_FILES]
+    # Next to Windows the boot loader sits on the shared ESP at /efi (CMP-151); /boot is XBOOTLDR.
+    esp = "efi/" if (system_root / "efi/EFI/systemd").is_dir() else "boot/"
+    states = [pe_signed(system_root / (esp + f[len("boot/"):] if f.startswith("boot/EFI/") else f))
+              for f in SIGNED_BOOT_FILES]
     if False in states:
         return False
     if None not in states:
@@ -243,6 +246,9 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
     checks["Booted from the installed disk"] = command(["findmnt", "-n", "-o", "UUID", "/"])[1] == record["root_uuid"]
     checks["Not running from Live"] = not (system_root / "run/archiso/bootmnt").is_mount()
     checks["Filesystem"] = command(["findmnt", "-n", "-o", "FSTYPE", "/"])[1] == config["filesystem"]
+    if config.get("lvm"):
+        root_source = command(["findmnt", "-n", "-o", "SOURCE", "/"])[1].split("[")[0]  # btrfs: dev[/subvol]
+        checks["Root on an LVM logical volume"] = bool(root_source) and command(["lsblk", "-dno", "TYPE", root_source])[1] == "lvm"
     checks["Computer name"] = socket.gethostname() == config["hostname"]
     checks["Time zone"] = (system_root / "etc/localtime").resolve() == (system_root / "usr/share/zoneinfo" / config["timezone"]).resolve()
     locale_conf = (system_root / "etc/locale.conf").read_text().splitlines()

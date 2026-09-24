@@ -6,6 +6,8 @@ check   (root, daily timer) refreshes a private copy of the sync databases and
 apply   (root) one complete, checked update: power and free space first, a btrfs
         snapshot of the root, the keyring before everything else, then
         `pacman -Su`; bootloader refresh, `.pacnew` files and "reboot needed" after.
+rollback (root) puts the root subvolume back to a snapshot taken before an update
+        (btrfs subvolume layout, CMP-153); the kernel files of /boot come back with it.
 --gui   (user) the same as a window: the list, one button, the password only
         on sudo's stdin.
 
@@ -34,6 +36,14 @@ PACMAN_DB = Path("/var/lib/pacman")
 SNAPSHOTS = Path("/.snapshots")
 SNAPSHOT_PREFIX = "pre-update-"
 KEEP_SNAPSHOTS = 3
+# /boot is its own partition, outside the root snapshot: the kernel and initramfs images of
+# that moment are kept next to the snapshot, so a rollback never boots a kernel whose
+# modules are gone.
+BOOT_COPY_SUFFIX = ".boot"
+BOOT_IMAGES = ("vmlinuz-*", "initramfs-*.img", "*-ucode.img")
+ROOT_SUBVOLUME = "@"
+ROLLBACK_PREFIX = "@rollback-"
+TOP = Path("/run/agi-os-rollback")
 MIN_FREE = 2 * 1024 ** 3
 MIN_BATTERY = 30
 KERNELS = {"linux", "linux-lts", "linux-zen", "linux-hardened", "linux-rt", "linux-rt-lts"}
@@ -198,20 +208,91 @@ def root_filesystem():
     return subprocess.run(["findmnt", "-n", "-o", "FSTYPE", "/"], capture_output=True, text=True).stdout.strip()
 
 
-def snapshot(stamp, snapshots=None, keep=KEEP_SNAPSHOTS):
+def snapshot(stamp, snapshots=None, keep=KEEP_SNAPSHOTS, boot=None):
     """Read-only btrfs snapshot of the root; the oldest pre-update snapshots beyond `keep` go."""
     snapshots = snapshots or SNAPSHOTS
     if not snapshots.exists():
         run(["btrfs", "subvolume", "create", str(snapshots)])
     target = snapshots / (SNAPSHOT_PREFIX + stamp)
     run(["btrfs", "subvolume", "snapshot", "-r", "/", str(target)])
-    old = sorted(p for p in snapshots.iterdir() if p.name.startswith(SNAPSHOT_PREFIX))[:-keep]
+    if boot:
+        save_boot(target.with_name(target.name + BOOT_COPY_SUFFIX), boot)
+    old = sorted(p for p in snapshots.iterdir()
+                 if p.name.startswith(SNAPSHOT_PREFIX) and not p.name.endswith(BOOT_COPY_SUFFIX))[:-keep]
     for path in old:
         try:
             run(["btrfs", "subvolume", "delete", str(path)])
+            shutil.rmtree(path.with_name(path.name + BOOT_COPY_SUFFIX), ignore_errors=True)
         except UpdateError:
             log("Could not delete the old snapshot " + str(path))
     return str(target)
+
+
+def save_boot(copy, boot):
+    """The kernel, initramfs and microcode images of /boot at the moment of a snapshot."""
+    copy.mkdir(mode=0o700)
+    for pattern in BOOT_IMAGES:
+        for image in boot.glob(pattern):
+            if image.is_file():
+                shutil.copy2(image, copy / image.name)
+
+
+def snapshot_names(snapshots=None):
+    snapshots = snapshots or SNAPSHOTS
+    try:
+        return sorted(p.name for p in snapshots.iterdir()
+                      if p.name.startswith(SNAPSHOT_PREFIX) and not p.name.endswith(BOOT_COPY_SUFFIX) and p.is_dir())
+    except OSError:
+        return []  # No snapshots directory, or not readable without root.
+
+
+def mounted(field, path="/"):
+    return subprocess.run(["findmnt", "-n", "-v", "-o", field, path], capture_output=True, text=True).stdout.strip()
+
+
+def rollback(name=None, snapshots=None, boot=None, top=None, root=None):
+    """Make a pre-update snapshot the root again. The current root is kept as
+    @rollback-<time> (only the newest such copy stays); the next boot starts the snapshot.
+    /home, /var/log and the package cache are subvolumes of their own and do not change."""
+    snapshots, boot, top = snapshots or SNAPSHOTS, boot or Path("/boot"), top or TOP
+    root = root or {"fstype": mounted("FSTYPE"), "fsroot": mounted("FSROOT"), "source": mounted("SOURCE")}
+    if root["fstype"] != "btrfs" or root["fsroot"] != "/" + ROOT_SUBVOLUME:
+        raise UpdateError("Rollback needs the btrfs subvolume layout (root in @); this system has no snapshots to go back to.")
+    names = snapshot_names(snapshots)
+    if not names:
+        raise UpdateError("There are no snapshots yet: one is taken before every update (sudo agi-os-update apply).")
+    name = name or names[-1]
+    if name not in names:
+        raise UpdateError("Unknown snapshot " + name + ". Available: " + ", ".join(names))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    top.mkdir(parents=True, exist_ok=True)
+    run(["mount", "-o", "subvolid=5", root["source"], str(top)])
+    try:
+        for old in top.glob(ROLLBACK_PREFIX + "*"):
+            run(["btrfs", "subvolume", "delete", str(old)])
+        kept = top / (ROLLBACK_PREFIX + stamp)
+        # The running root stays mounted by its id; only its name at the top level changes.
+        os.rename(top / ROOT_SUBVOLUME, kept)
+        try:
+            run(["btrfs", "subvolume", "snapshot", str(top / "@snapshots" / name), str(top / ROOT_SUBVOLUME)])
+        except UpdateError:
+            os.rename(kept, top / ROOT_SUBVOLUME)
+            raise
+    finally:
+        run(["umount", str(top)])
+    images = snapshots / (name + BOOT_COPY_SUFFIX)
+    restored = []
+    if images.is_dir():
+        for image in sorted(images.iterdir()):
+            shutil.copy2(image, boot / image.name)
+            restored.append(image.name)
+    status = read_status()
+    status["rollback"] = {"at": stamp, "snapshot": name, "previous_root": kept.name, "boot": restored}
+    status["reboot_required"] = True
+    status["applied_boot_id"] = boot_id()
+    write_status(status)
+    log(f"Rollback to {name}; the previous root is {kept.name}")
+    return status["rollback"]
 
 
 def bootloader(record_path=None, boot=Path("/boot")):
@@ -287,7 +368,7 @@ def apply(force=False):
         if root_filesystem() == "btrfs":
             emit("Taking a system snapshot before the update…")
             try:
-                taken = snapshot(stamp)
+                taken = snapshot(stamp, boot=Path("/boot"))
                 emit("Snapshot: " + taken)
             except UpdateError as exc:
                 # For example an active swap file in the root subvolume; the update itself is still safe.
@@ -501,7 +582,8 @@ def target_files(session, kind):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="agi-os-update", description="AGI OS system updates")
-    parser.add_argument("action", nargs="?", choices=("status", "check", "apply"), default="status")
+    parser.add_argument("action", nargs="?", choices=("status", "check", "apply", "rollback"), default="status")
+    parser.add_argument("snapshot", nargs="?", help="with rollback: the snapshot to go back to (default: the newest)")
     parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     parser.add_argument("--force", action="store_true", help="update even on a low battery")
     parser.add_argument("--quiet", action="store_true")
@@ -527,7 +609,23 @@ def main(argv=None):
                     return 1
             apply(force=args.force)
             return 0
+        if args.action == "rollback":
+            require_root()
+            names = snapshot_names()
+            if not args.yes:
+                print("Snapshots taken before updates: " + (", ".join(names) or "none"))
+                chosen = args.snapshot or (names[-1] if names else "")
+                if input(f"Go back to {chosen}? Files in /home stay as they are. [y/N] ").strip().lower() not in ("y", "yes"):
+                    return 1
+            with locked():
+                done = rollback(args.snapshot)
+            print(f"The system is back at {done['snapshot']} after a restart. The previous state is kept as "
+                  f"{done['previous_root']} until the next rollback. Restart now: sudo systemctl reboot")
+            return 0
         print(describe(read_status()))
+        if snapshot_names():
+            print("Snapshots before updates: " + ", ".join(snapshot_names())
+                  + ". To undo the last update: sudo agi-os-update rollback")
         return 0
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)

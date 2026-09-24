@@ -25,6 +25,8 @@ from domain import (GIB, SWAPFILE, Configuration, ValidationError, console_font_
                     hibernation_swap_size, system_path_allowed)
 from hardware import driver_plan, initramfs_config, profile, virtual
 from journal import Logger
+import layout
+from layout import CRYPT_NAME, partition_path
 from system import Catalog, inventory, live_environment, selected_disk
 import update
 
@@ -32,7 +34,6 @@ import update
 TARGET = Path("/mnt/agi-os")
 HERE = Path(__file__).resolve().parent
 BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python", "zram-generator")
-CRYPT_NAME = "cryptroot"
 LOG = Logger("worker")
 
 
@@ -124,10 +125,6 @@ class Runner:
         return output
 
 
-def partition_path(disk, number):
-    return disk + ("p" if disk[-1].isdigit() else "") + str(number)
-
-
 SBCTL_EFI = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
 
 
@@ -145,6 +142,8 @@ def packages_for(config, hardware, secure_boot=False):
         packages += ["python-gobject", "gtk3"]
     if secure_boot:
         packages.append("sbctl")
+    if config.lvm:
+        packages.append("lvm2")  # its mkinitcpio hook activates the root volume group
     return list(dict.fromkeys(packages))
 
 
@@ -181,9 +180,12 @@ def resolved(relative):
 
 
 def sbctl_unsigned(output):
-    """Files `sbctl verify` reports as not signed (it marks them with ✗)."""
-    return [line.split("✗", 1)[1].split(" is not signed")[0].strip()
-            for line in output.splitlines() if "✗" in line]
+    """Files `sbctl verify` reports as not signed (it marks them with ✗). Windows Boot
+    Manager on a shared ESP (CMP-151) is signed by Microsoft, not by this system's keys;
+    enrolling with --microsoft keeps it bootable, so it is not ours to sign."""
+    files = [line.split("✗", 1)[1].split(" is not signed")[0].strip()
+             for line in output.splitlines() if "✗" in line]
+    return [f for f in files if "/efi/microsoft/" not in f.lower()]
 
 
 PAGE = 4096  # resume_offset counts pages; x86_64 pages are 4 KiB.
@@ -219,7 +221,10 @@ def create_swapfile(runner, root, filesystem, size):
     """
     path = Path(root) / SWAPFILE
     if filesystem == "btrfs":
-        runner.run(["btrfs", "subvolume", "create", str(path.parent)])
+        # With the subvolume layout (CMP-153) @swap is already mounted there; a flat root
+        # gets a nested subvolume, which root snapshots leave out just the same.
+        if not path.parent.is_dir():
+            runner.run(["btrfs", "subvolume", "create", str(path.parent)])
         runner.run(["chmod", "700", str(path.parent)])
         runner.run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size // GIB}g", str(path)])
         output = runner.run(["btrfs", "inspect-internal", "map-swapfile", "-r", str(path)]).strip()
@@ -242,10 +247,12 @@ def resume_parameter(filesystem_uuid, offset):
     return f"resume=UUID={filesystem_uuid} resume_offset={offset}"
 
 
-def boot_options(root_uuid, luks_uuid=None, resume=None):
-    """Kernel options of the systemd-boot entries."""
-    root = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}", f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid else [f"root=UUID={root_uuid}"]
-    return " ".join([*root, "rw", *([resume] if resume else [])])
+def boot_options(root_uuid, luks_uuid=None, resume=None, flags=(), lvm=False):
+    """Kernel options of the systemd-boot entries; flags such as rootflags=subvol=@. On LVM
+    the root is a logical volume inside the opened LUKS container, found by its file system UUID."""
+    unlock = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"] if luks_uuid else []
+    root = [*unlock, f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid and not lvm else [*unlock, f"root=UUID={root_uuid}"]
+    return " ".join([*root, *flags, "rw", *([resume] if resume else [])])
 
 
 def grub_defaults(text, luks_uuid=None, resume=None):
@@ -343,6 +350,7 @@ def preflight(request):
         raise ValidationError("The disk changed after you confirmed it; nothing was written")
     if snapshot["firmware"] == "bios" and config.bootloader != "grub":
         raise ValidationError("BIOS computers need the GRUB bootloader")
+    layout.plan_for(config, snapshot["firmware"])  # The partition table must suit the firmware.
     if type(request.setdefault("secure_boot", False)) is not bool:
         raise ValidationError("Invalid Secure Boot choice")
     if request["secure_boot"] and (snapshot["firmware"] != "uefi" or config.bootloader != "systemd-boot"):
@@ -361,7 +369,7 @@ def preflight(request):
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("A previous operation still holds the install directory; check its state first")
     tools = ("fallocate", "mkswap", "filefrag") if config.filesystem != "btrfs" else ("btrfs",)
-    for command in ("sgdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
+    for command in ("sgdisk", "sfdisk", "wipefs", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
                     "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount",
                     *(tools if config.swap == "hibernate" else ())):
         if not shutil.which(command):
@@ -369,7 +377,7 @@ def preflight(request):
     return config, snapshot, disk
 
 
-def release_target():
+def release_target(group=None):
     # pacstrap -K can leave gpg-agent holding the target keyring open. Only stop
     # daemons belonging to that keyring; never use a global pkill or lazy umount.
     keyring = TARGET / "etc/pacman.d/gnupg"
@@ -382,10 +390,17 @@ def release_target():
     result = subprocess.run(["umount", "--recursive", str(TARGET)], capture_output=True, timeout=60)
     if result.returncode:
         raise ValidationError("Could not unmount the install partitions. Keep the VM running until you check mount.")
+    close_group(group)
     if Path("/dev/mapper", CRYPT_NAME).exists():
         result = subprocess.run(["cryptsetup", "close", CRYPT_NAME], capture_output=True, timeout=30)
         if result.returncode:
             raise ValidationError("Could not close the encrypted partition after installing.")
+
+
+def close_group(group):
+    """The root volume group goes inactive before its LUKS container closes."""
+    if group and subprocess.run(["vgchange", "--activate", "n", group], capture_output=True, timeout=60).returncode:
+        raise ValidationError("Could not deactivate the LVM volume group " + group + " after installing.")
 
 
 def install(request, runner):
@@ -416,40 +431,26 @@ def install(request, runner):
         raise Cancelled("Stopped before the disk was changed")
 
     firmware = snapshot["firmware"]
-    boot_number, root_number = (1, 2) if firmware == "uefi" else (2, 3)
-    boot = partition_path(config.disk, boot_number)
-    root_partition = partition_path(config.disk, root_number)
     passphrase = request.pop("passphrase", "")
     encrypted = bool(passphrase)
-    root = "/dev/mapper/" + CRYPT_NAME if encrypted else root_partition
+    plan = layout.plan_for(config, firmware, encrypted)
+    boot = plan.path(config.disk, "boot")
+    root_partition = plan.path(config.disk, "root")
     TARGET.mkdir(parents=True, exist_ok=True)
     mounted = False
     try:
         emit("progress", stage=5, text="Creating the agreed partitions on " + config.disk)
-        runner.run(["sgdisk", "--zap-all", config.disk])
-        args = ["sgdisk"]
-        if firmware == "bios":
-            args += ["--new=1:0:+2M", "--typecode=1:ef02", "--change-name=1:BIOS"]
-        args += [f"--new={boot_number}:0:+1G", f"--typecode={boot_number}:" + ("ef00" if firmware == "uefi" else "8300"),
-                 f"--change-name={boot_number}:AGI-BOOT", f"--new={root_number}:0:0",
-                 f"--typecode={root_number}:8300", f"--change-name={root_number}:AGI-ROOT", config.disk]
-        runner.run(args)
+        layout.apply_table(runner, plan, config.disk, disk["size"])
         runner.run(["partprobe", config.disk])
         runner.run(["udevadm", "settle", "--timeout=30"])
-        runner.run(["mkfs.fat", "-F", "32", boot] if firmware == "uefi" else ["mkfs.ext4", "-F", boot])
+        layout.format_boot(runner, plan, boot)
         if encrypted:
             emit("progress", stage=5, text="Encrypting the root partition (LUKS2)…")
-            # The passphrase travels only over stdin; a trailing newline would become part of the key.
-            runner.run(["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-",
-                        root_partition], input_text=passphrase)
-            runner.run(["cryptsetup", "open", "--key-file", "-", root_partition, CRYPT_NAME], input_text=passphrase)
+        root = layout.create_root(runner, plan, root_partition, passphrase)
         passphrase = None
-        force = {"ext4": "-F", "btrfs": "-f", "xfs": "-f", "f2fs": "-f"}[config.filesystem]
-        runner.run(["mkfs." + config.filesystem, force, root])
-        runner.run(["mount", root, str(TARGET)])
+        layout.mount_root(runner, plan, root, TARGET)
         mounted = True
-        (TARGET / "boot").mkdir()
-        runner.run(["mount", boot, str(TARGET / "boot")])
+        layout.mount_boot(runner, plan, boot, TARGET)
         emit("progress", stage=5, text="Installing the base system…")
         # Install in batches and drop the download cache between them: the preview
         # image may live in memory, so its peak size must stay close to the installed size.
@@ -487,7 +488,7 @@ def install(request, runner):
 
         emit("progress", stage=6, text="Setting up boot, your user, the network and your desktop…")
         chroot = ["arch-chroot", str(TARGET)]
-        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]) + (swap_fstab_line() if hibernation else ""))
+        write_file("etc/fstab", layout.fstab(runner.run(["genfstab", "-U", str(TARGET)])) + (swap_fstab_line() if hibernation else ""))
         if hibernation and hibernation["mode"] == "shutdown":
             write_file(HIBERNATE_MODE_FILE, "[Sleep]\nHibernateMode=shutdown\n")
         write_file("etc/hostname", config.hostname + "\n")
@@ -524,7 +525,7 @@ def install(request, runner):
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
         check_generated_files(config, runner)
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
-        if initramfs := initramfs_config(drivers, encrypted, hibernate):
+        if initramfs := initramfs_config(drivers, encrypted, hibernate, plan.lvm):
             write_file("etc/mkinitcpio.conf.d/agi-os.conf", initramfs)
         luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip() if encrypted else None
         time_sync = ["systemd-timesyncd.service"] if config.time_sync else []
@@ -560,7 +561,7 @@ def install(request, runner):
                 if unsigned:
                     raise ValidationError("Not signed for Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
-            options = boot_options(root_uuid, luks_uuid, resume)
+            options = boot_options(root_uuid, luks_uuid, resume, layout.root_flags(plan), plan.lvm)
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
             write_file("boot/loader/entries/agi-os.conf", "title AGI OS\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux.img\noptions {options}\n")
@@ -598,13 +599,15 @@ def install(request, runner):
     finally:
         request.pop("password", None)
         passphrase = None
-        if mounted or encrypted:
+        if mounted or encrypted or plan.lvm:
             # Cleanup is scoped to our mount tree, including cancellation/failure.
             original = sys.exc_info()[1]
             try:
                 if mounted:
-                    release_target()
-                elif Path("/dev/mapper", CRYPT_NAME).exists():
+                    release_target(plan.group)
+                if not mounted and plan.lvm and Path("/dev", plan.group).exists():
+                    close_group(plan.group)
+                if not mounted and Path("/dev/mapper", CRYPT_NAME).exists():
                     subprocess.run(["cryptsetup", "close", CRYPT_NAME], capture_output=True, timeout=30)
             except ValidationError as cleanup_error:
                 if isinstance(original, (ValidationError, Cancelled)):
