@@ -82,6 +82,12 @@ args=(-name "AGIOS Live boot — test computer ($firmware)" -machine "$machine" 
       -drive "file=$repo/$target,format=qcow2,if=none,id=target,discard=unmap,detect-zeroes=unmap"
       -device virtio-blk-pci,drive=target,serial=AGIOS_TARGET,bootindex=3
       -qmp "unix:$repo/.local/live-test/qmp.sock,server=on,wait=off")
+if [[ $mode == disk ]]; then
+    # Q35's emulated ICH9 TCO watchdog may fire after a hibernation image is
+    # restored. Its default reset action destroys the resumed session; keep the
+    # watchdog event visible through QMP without resetting this test computer.
+    args+=(-action watchdog=none)
+fi
 if [[ $firmware == uefi || $firmware == uefi-sb ]]; then
     vars=.local/live-test/OVMF_VARS-$firmware.fd code=/usr/share/edk2/x64/OVMF_CODE.4m.fd
     [[ -f $vars ]] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"

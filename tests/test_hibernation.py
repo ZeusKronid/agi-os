@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -114,6 +116,40 @@ class SwapFileTests(unittest.TestCase):
         self.assertEqual(grub.count("GRUB_CMDLINE_LINUX="), 1)
         self.assertIn('GRUB_CMDLINE_LINUX="cryptdevice=UUID=luks:cryptroot resume=UUID=fs-uuid resume_offset=42"', grub)
         self.assertIn('GRUB_CMDLINE_LINUX_DEFAULT="quiet"', grub)
+
+
+class StandTests(unittest.TestCase):
+    @unittest.skipUnless(os.access("/dev/kvm", os.R_OK | os.W_OK), "KVM device unavailable")
+    def test_disk_vm_does_not_reset_on_emulated_watchdog(self):
+        """Exercise the disk launch path that previously reset after a valid UEFI resume."""
+        source = Path(__file__).resolve().parents[1] / "scripts/run-live-web-vm.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            script = root / "scripts/run-live-web-vm.sh"
+            shutil.copy2(source, script)
+            (root / ".local/live-test").mkdir(parents=True)
+            (root / ".local/live-test-target.qcow2").touch()
+            (root / ".local/live-test/OVMF_VARS-uefi.fd").touch()
+            binary = root / "bin"
+            binary.mkdir()
+            (binary / "qemu-system-x86_64").write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "open(os.environ['QEMU_CAPTURE'], 'w').write(json.dumps(sys.argv[1:]))\n")
+            (binary / "systemd-run").write_text(
+                "#!/bin/sh\n"
+                "while [ \"$1\" != qemu-system-x86_64 ]; do shift; done\n"
+                "exec \"$@\"\n")
+            for name in ("qemu-system-x86_64", "systemd-run"):
+                (binary / name).chmod(0o755)
+            capture = root / "qemu-args.json"
+            env = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                   "QEMU_CAPTURE": str(capture)}
+            subprocess.run([str(script), "--mode", "disk", "--firmware", "uefi"],
+                           cwd=root, env=env, check=True, capture_output=True, text=True, timeout=15)
+            args = json.loads(capture.read_text())
+            self.assertEqual(args[args.index("-action") + 1], "watchdog=none")
 
 
 class InstallRunner(SwapRunner):
