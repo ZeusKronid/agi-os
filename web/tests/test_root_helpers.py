@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -408,6 +409,34 @@ class PrepareTests(unittest.TestCase):
             self.assertIn('--wipe=never', args)
             self.assertIn('--wipe-partitions=never', args)
             self.assertEqual(call.kwargs['input_text'], 'size=123456\n')
+
+    def test_partition_resize_preserves_real_gpt_entry_on_sparse_disk(self):
+        if not shutil.which('sfdisk'):
+            self.skipTest('sfdisk is unavailable')
+        disk = self.tmp / 'disk.img'
+        with disk.open('wb') as image:
+            image.truncate(64 * 2**20)
+        metadata = ('type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, '
+                    'uuid=1202576F-BE26-49CB-9297-813DE0B8296D, name="User data"')
+        subprocess.run(['sfdisk', '--wipe=never', '--wipe-partitions=never', str(disk)],
+                       input=f'label: gpt\nunit: sectors\nstart=2048, size=120832, {metadata}\n',
+                       text=True, capture_output=True, check=True)
+
+        def table():
+            return json.loads(subprocess.check_output(['sfdisk', '--json', str(disk)]))['partitiontable']
+
+        original = table()
+        storage_worker.resize_partition(str(disk), 1, 65536, dry_run=True)
+        self.assertEqual(table(), original)
+        storage_worker.resize_partition(str(disk), 1, 65536)
+        shrunk = table()
+        self.assertEqual(shrunk['partitions'][0]['size'], 65536)
+        self.assertEqual({k: v for k, v in shrunk['partitions'][0].items() if k != 'size'},
+                         {k: v for k, v in original['partitions'][0].items() if k != 'size'})
+        self.assertEqual({k: v for k, v in shrunk.items() if k != 'partitions'},
+                         {k: v for k, v in original.items() if k != 'partitions'})
+        storage_worker.resize_partition(str(disk), 1, 120832)
+        self.assertEqual(table(), original)
 
     def test_shrink_preflights_partition_boundary_before_filesystem_writes(self):
         for fstype in ('ntfs', 'ext4'):
