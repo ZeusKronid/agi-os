@@ -307,6 +307,17 @@ class MbrFinalizeTests(unittest.TestCase):
             with self.subTest(pttype=pttype), self.assertRaises(ValidationError):
                 finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'alongside')
             finalize_worker.check_table(plan, {'pttype': pttype, 'size': 64 * GIB}, 'erase')
+        # copy() itself refuses a GPT plan next to an MBR disk before touching anything (sgdisk would convert it).
+        calls = []
+        class Runner:
+            def run(self, args, input_text=None, **kw):
+                calls.append(args)
+                return ''
+        gpt_plan = finalize_worker.layout.plan_for(SimpleNamespace(filesystem='ext4'), 'bios')
+        with self.assertRaises(ValidationError):
+            finalize_worker.copy(Runner(), {'layout': 'alongside'}, {'path': '/dev/sda', 'size': 64 * GIB, 'pttype': 'dos'},
+                                 None, gpt_plan, '', Path('/nonexistent-agios-test'))
+        self.assertEqual(calls, [])
         finalize_worker.check_table(mbr_plan(), {'pttype': 'dos', 'size': 64 * GIB}, 'alongside')
         finalize_worker.check_table(mbr_plan(), {'pttype': None, 'size': 64 * GIB}, 'alongside')
         with self.assertRaises(ValidationError):
