@@ -21,7 +21,10 @@ class BridgeProvider:
         self.lock = threading.Lock()
         self.closed = threading.Event()
 
-    def request(self, method, **params):
+    # The page can cancel a request: the bridge stops waiting; a late answer is ignored by its id.
+    cancellable = True
+
+    def request(self, method, cancel=None, **params):
         with self.lock:
             if self.closed.is_set():
                 raise ProviderError('The bridge is off')
@@ -33,6 +36,8 @@ class BridgeProvider:
             received = b''
             try:
                 while time.monotonic() < end and not self.closed.is_set():
+                    if cancel is not None and cancel.is_set():
+                        raise ProviderError('The request to the bridge was cancelled')
                     readable, writable, _ = select.select([self.fd], [self.fd] if outgoing else [], [], .2)
                     if writable:
                         outgoing = outgoing[os.write(self.fd, outgoing):]
@@ -61,8 +66,8 @@ class BridgeProvider:
             raise ProviderError('The bridge returned an invalid model list')
         return models
 
-    def reply(self, system, messages):
-        return validate_reply(self.request('reply', system=system, messages=messages))
+    def reply(self, system, messages, cancel=None):
+        return validate_reply(self.request('reply', cancel=cancel, system=system, messages=messages))
 
     def close(self):
         self.closed.set()
