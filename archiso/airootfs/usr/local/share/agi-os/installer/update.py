@@ -15,12 +15,14 @@ Nothing here reads provider credentials or talks to a model.
 """
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -306,12 +308,47 @@ def bootloader(record_path=None, boot=Path("/boot")):
         return "systemd-boot" if (boot / "loader/loader.conf").exists() else "grub"
 
 
-def refresh_bootloader(kind, changed, firmware=None):
+def shared_esp(record_path=None):
+    try:
+        record = json.loads((record_path or RECORD).read_text())
+        return record.get("dual_boot", {}).get("shared_esp") is True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+@contextmanager
+def preserve_efi_fallback(esp):
+    """Keep another system's existing fallback loader when bootctl writes its own.
+
+    The recovery copy stays on the ESP until the original is restored. If bootctl
+    or the copy back fails, it is not discarded by Live's temporary cleanup.
+    """
+    fallback = esp / "EFI/BOOT/BOOTX64.EFI"
+    if not fallback.is_file():
+        yield
+        return
+    with tempfile.NamedTemporaryFile(prefix=".agi-original-", dir=fallback.parent, delete=False) as copy:
+        backup = Path(copy.name)
+        with fallback.open("rb") as original:
+            shutil.copyfileobj(original, copy)
+        copy.flush()
+        os.fsync(copy.fileno())
+    try:
+        yield
+    finally:
+        os.replace(backup, fallback)
+
+
+def refresh_bootloader(kind, changed, firmware=None, esp=Path("/efi")):
     """Re-deploy the bootloader binary after its package changed; kernels need nothing:
     the entries point to fixed /boot paths and mkinitcpio's hook rebuilt the images."""
     done = []
     if kind == "systemd-boot" and "systemd" in changed:
-        run(["bootctl", "--graceful", "update"])
+        if shared_esp():
+            with preserve_efi_fallback(esp):
+                run(["bootctl", "--esp-path=/efi", "--boot-path=/boot", "--graceful", "update"])
+        else:
+            run(["bootctl", "--graceful", "update"])
         done.append("systemd-boot")
     elif kind == "grub" and "grub" in changed:
         firmware = firmware or ("uefi" if Path("/sys/firmware/efi").is_dir() else "bios")

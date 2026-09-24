@@ -63,10 +63,11 @@ until the user explicitly confirms a specific, described change.
    disk's existing ESP is shared, never formatted — systemd-boot goes to it
    (`/efi`, with at least 2 MiB free) and lists Windows Boot Manager itself,
    while the system's own `/boot` becomes an XBOOTLDR partition; GRUB keeps
-   its own ESP and gets a chainload entry for Windows. `bootctl install`
-   also replaces the ESP's fallback `EFI/BOOT/BOOTX64.EFI` (often a copy of
-   Windows Boot Manager): a firmware without boot entries then starts
-   systemd-boot, which still lists Windows. `sbctl verify` ignores
+   its own ESP and gets a chainload entry for Windows. If the shared ESP
+   already has a fallback `EFI/BOOT/BOOTX64.EFI`, finalization and later
+   AGIOS bootloader updates keep its bytes intact. AGIOS registers its
+   systemd-boot loader in firmware, and keeps the automatic systemd boot-time
+   updater disabled on this shared ESP. `sbctl verify` ignores
    Microsoft's own loaders there. A hibernated Windows
    (Fast Startup included, detected by `hiberfil.sys`) stops the installation
    before anything is written; it is also never shrunk or used for a preview
@@ -280,7 +281,9 @@ The installer adds `agi-os-update` to every installed system:
   `archlinux-keyring`, runs `pacman -Su`, refreshes the bootloader when its
   package changed (`bootctl update`; GRUB is reinstalled exactly as the
   finalization did) and reports `.pacnew` files and whether a reboot is needed.
-  `systemd-boot-update.service` is enabled for systemd-boot as well.
+  `systemd-boot-update.service` is enabled for systemd-boot on its own ESP.
+  On a shared ESP it is disabled during finalization; `agi-os-update` preserves
+  the other system's existing fallback loader when it refreshes systemd-boot.
 - Desktops get "AGI OS — Updates" in the menu and a reminder window at login,
   at most once a day while updates wait: the list and one button. The password
   goes only to `sudo -S` on stdin.
