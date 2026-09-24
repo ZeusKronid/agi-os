@@ -703,6 +703,8 @@ def prepare(request):
                            'backup': backup}}
     if kind == 'erase':
         disk = option['disk']
+        # wipefs also clears a GPT with a damaged main header, on which sgdisk --zap-all stops.
+        sh(['wipefs', '--all', '--force', disk])
         sh(['sgdisk', '--zap-all', disk])
         sh(['sgdisk', '--clear', disk])
         regions = free_regions(inventory_disk(disk))

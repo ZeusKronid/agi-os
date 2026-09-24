@@ -365,7 +365,7 @@ def preflight(request):
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("A previous operation still holds the install directory; check its state first")
     tools = ("fallocate", "mkswap", "filefrag") if config.filesystem != "btrfs" else ("btrfs",)
-    for command in ("sgdisk", "sfdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
+    for command in ("sgdisk", "sfdisk", "wipefs", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
                     "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount",
                     *(tools if config.swap == "hibernate" else ())):
         if not shutil.which(command):

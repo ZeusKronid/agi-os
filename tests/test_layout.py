@@ -94,6 +94,7 @@ class MbrTests(unittest.TestCase):
         runner = Recorder()
         layout.apply_table(runner, layout.plan_for(config(table="msdos"), "bios"), "/dev/sda", 500 * GIB)
         self.assertEqual(runner.calls, [
+            (["wipefs", "--all", "--force", "/dev/sda"], None),
             (["sgdisk", "--zap-all", "/dev/sda"], None),
             (["sfdisk", "--wipe", "always", "--label", "dos", "/dev/sda"], "size=2097152, type=83, bootable\ntype=83\n")])
 
@@ -106,7 +107,8 @@ class MbrTests(unittest.TestCase):
     def test_gpt_apply_table_runs_the_table_commands(self):
         runner, plan = Recorder(), layout.plan_for(config(), "bios")
         layout.apply_table(runner, plan, "/dev/vda", 20 * GIB)
-        self.assertEqual([c for c, _ in runner.calls], layout.table_commands(plan, "/dev/vda"))
+        self.assertEqual([c for c, _ in runner.calls],
+                         [["wipefs", "--all", "--force", "/dev/vda"], *layout.table_commands(plan, "/dev/vda")])
 
     def test_configuration_field(self):
         from controller import DemoProvider
