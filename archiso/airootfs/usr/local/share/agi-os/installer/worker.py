@@ -288,9 +288,10 @@ def check_generated_files(config, runner):
                     if not runtime.exists():
                         runtime.mkdir(mode=0o700, parents=True)
                         runner.run([*command, "chown", f"{config.username}:{config.username}", "/" + str(runtime.relative_to(TARGET))])
-                    # Compositors refuse to start as root and need a runtime directory.
+                    # Compositors refuse to start as root and need a runtime directory. A UTF-8
+                    # locale keeps "'C' is not a UTF-8 locale" warnings out of the text the user sees.
                     command += ["runuser", "-u", config.username, "--", "env", f"HOME={home}",
-                                "XDG_RUNTIME_DIR=/" + str(runtime.relative_to(TARGET))]
+                                "XDG_RUNTIME_DIR=/" + str(runtime.relative_to(TARGET)), "LC_ALL=C.UTF-8"]
                 try:
                     runner.run([*command, "/" + binary, *[a.replace("{file}", absolute) for a in args]], timeout=120)
                 except ValidationError as exc:

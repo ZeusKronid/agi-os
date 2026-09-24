@@ -167,6 +167,7 @@ class ToolCheckTests(unittest.TestCase):
         self.assertEqual(foot[:6], ["arch-chroot", foot[1], "runuser", "-u", "tester", "--"])
         self.assertIn("/home/tester/.config/foot/foot.ini", foot)
         self.assertIn("XDG_RUNTIME_DIR=/var/tmp/agi-os-config-check", foot)
+        self.assertIn("LC_ALL=C.UTF-8", foot)  # no "'C' is not a UTF-8 locale" noise in the error
         self.assertTrue(any("/usr/bin/Hyprland" in c and "--verify-config" in c for c in calls))
         self.assertTrue(error.startswith(worker.CONFIG_CHECK_FAILED))
         self.assertIn("~/.config/foot/foot.ini — foot", error)
