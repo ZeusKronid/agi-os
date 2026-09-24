@@ -146,9 +146,12 @@ def resolved(relative):
 
 
 def sbctl_unsigned(output):
-    """Files `sbctl verify` reports as not signed (it marks them with ✗)."""
-    return [line.split("✗", 1)[1].split(" is not signed")[0].strip()
-            for line in output.splitlines() if "✗" in line]
+    """Files `sbctl verify` reports as not signed (it marks them with ✗). Windows Boot
+    Manager on a shared ESP (CMP-151) is signed by Microsoft, not by this system's keys;
+    enrolling with --microsoft keeps it bootable, so it is not ours to sign."""
+    files = [line.split("✗", 1)[1].split(" is not signed")[0].strip()
+             for line in output.splitlines() if "✗" in line]
+    return [f for f in files if "/efi/microsoft/" not in f.lower()]
 
 
 PAGE = 4096  # resume_offset counts pages; x86_64 pages are 4 KiB.
