@@ -254,6 +254,8 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertFalse(state.disk_ready)
         self.assertFalse(state.public()['can_resume'])
         self.assertTrue(state.public()['can_revert'])
+        # The put-back dialog of an unfinished build describes the chosen storage's undo.
+        self.assertEqual(state.public()['preview_revert'], option['revert'])
 
     async def test_failed_file_check_goes_back_to_the_model(self):
         state = self.app['state']
