@@ -28,7 +28,7 @@ class ConfigurationTests(unittest.TestCase):
         for environment in ("Hyprland", "Sway", "i3", "Cinnamon", "LXQt", "MATE", "Enlightenment", "custom"):
             data = specification()
             data["desktop"] = environment
-            data["system_files"] = [{"path": "etc/greetd/config.toml", "content": "custom greeter config"}]
+            data["system_files"] = [{"path": "etc/greetd/config.toml", "content": "[terminal]\nvt = 1\n"}]
             config = Configuration.parse(data)
             self.assertEqual(config.desktop, environment)
             self.assertEqual(config, Configuration.parse(json.loads(json.dumps(config.as_dict()))))
@@ -111,10 +111,11 @@ class ProviderTests(unittest.TestCase):
 
 
 class FakeRunner:
-    def __init__(self, fail_on=None):
+    def __init__(self, fail_on=None, config=None):
         self.cancel = threading.Event()
         self.calls = []
         self.fail_on = fail_on
+        self.config = config or Configuration.parse(specification())
 
     def run(self, args, input_text=None, timeout=1800):
         self.calls.append(args)
@@ -125,7 +126,7 @@ class FakeRunner:
         if args[0] == "genfstab":
             return "UUID=installed-uuid / ext4 defaults 0 1\n"
         if "-Qq" in args:
-            return "\n".join(worker.packages_for(Configuration.parse(specification())))
+            return "\n".join(worker.packages_for(self.config, demo_inventory()["hardware"]))
         return ""
 
 
@@ -152,15 +153,22 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 worker.preflight({})
 
-    def fake_install(self, fail_on=None, cleanup_code=0):
-        config = Configuration.parse(specification())
+    def fake_install(self, fail_on=None, cleanup_code=0, passphrase=None, data=None, files=None):
+        config = Configuration.parse(data or specification())
         snapshot = demo_inventory()
         disk = snapshot["disks"][0]
         request = {"configuration": config.as_dict(), "fingerprint": disk["fingerprint"],
                    "consent_digest": config.digest(), "password": "private-password"}
-        runner, events = FakeRunner(fail_on), []
+        if passphrase:
+            request["passphrase"] = passphrase
+        runner, events = FakeRunner(fail_on, config), []
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
+            # kbd is part of the base system; the worker checks the console files exist there.
+            for name in (f"keymaps/i386/qwerty/{config.effective_keymap()}.map.gz",
+                         f"consolefonts/{config.effective_console_font()}.psfu.gz"):
+                (target / "usr/share/kbd" / name).parent.mkdir(parents=True, exist_ok=True)
+                (target / "usr/share/kbd" / name).touch()
             with patch.object(worker, "TARGET", target), patch.object(worker, "preflight", return_value=(config, snapshot, disk)), \
                  patch.object(worker, "inventory", return_value=snapshot), patch.object(worker.Catalog, "validate", side_effect=lambda p: p), \
                  patch.object(worker, "emit", side_effect=lambda kind, **data: events.append({"kind": kind, **data})), \
@@ -169,6 +177,8 @@ class WorkerTests(unittest.TestCase):
                     worker.install(request, runner)
                 except ValidationError:
                     pass
+                if files is not None:
+                    files.update({str(p.relative_to(target)): p.read_bytes() for p in target.rglob("*") if p.is_file()})
                 record_path = target / "var/lib/agi-os/installation.json"
                 if record_path.exists():
                     self.assertNotIn("private-password", record_path.read_text())
@@ -183,6 +193,33 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("private-password", json.dumps(calls))
         self.assertEqual(events[-1]["kind"], "installed")
         self.assertEqual(events[-1]["stage"], 7)
+
+    def test_no_secret_in_events_commands_or_installed_files(self):
+        for fail_on in (None, "pacstrap", "chpasswd"):
+            with self.subTest(fail_on=fail_on):
+                files = {}
+                calls, events = self.fake_install(fail_on=fail_on, passphrase="private-luks-passphrase", files=files)
+                self.assertIn("cryptsetup", [c[0] for c in calls])
+                self.assertTrue(files or fail_on == "pacstrap")
+                for secret in ("private-password", "private-luks-passphrase"):
+                    self.assertNotIn(secret, json.dumps(calls))
+                    self.assertNotIn(secret, json.dumps(events, ensure_ascii=False))
+                    for name, content in files.items():
+                        self.assertNotIn(secret.encode(), content, name)
+
+    def test_failed_command_never_echoes_its_secret_input(self):
+        runner = worker.Runner()
+        with self.assertRaises(ValidationError) as failure:
+            runner.run(["sh", "-c", "cat; echo; echo diagnostic; exit 3"], input_text="private-luks-passphrase")
+        self.assertNotIn("private-luks-passphrase", str(failure.exception))
+        with self.assertRaises(ValidationError) as failure:
+            runner.run(["sh", "-c", "echo diagnostic; exit 3"])
+        self.assertIn("diagnostic", str(failure.exception))  # ordinary failures keep their output
+    def test_installed_system_gets_the_update_tool(self):
+        calls, events = self.fake_install()
+        chrooted = [c[2:] for c in calls if c[0] == "arch-chroot"]
+        self.assertIn(["systemctl", "enable", "agi-os-update-check.timer"], chrooted)
+        self.assertEqual(events[-1]["record"]["updates"], {"timer": "agi-os-update-check.timer"})
 
     def test_failure_never_reports_installed(self):
         for fail_on, cleanup in (("pacman", 0), ("pacstrap", 0), (None, 1)):
@@ -228,6 +265,26 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertTrue(verify.evaluate(record, state, False, root)["complete"])
                 record["root_uuid"] = "wrong-root"
                 self.assertFalse(verify.evaluate(record, state, False, root)["complete"])
+
+    def test_update_timer_is_checked_when_the_record_has_one(self):
+        config = specification()
+        record = {"id": "x", "configuration": config, "root_uuid": "u", "packages": [],
+                  "updates": {"timer": "agi-os-update-check.timer"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "proc/sys/kernel/random").mkdir(parents=True)
+            (root / "proc/sys/kernel/random/boot_id").write_text("b")
+            (root / "etc").mkdir()
+            (root / "etc/locale.conf").write_text("")
+            for enabled in (0, 1):
+                def command(args):
+                    if "agi-os-update-check.timer" in args:
+                        return enabled, ""
+                    return 0, ""
+                with patch.object(verify, "command", side_effect=command), \
+                     patch.object(verify.socket, "getaddrinfo", return_value=[]):
+                    checks = verify.evaluate(record, root / "state", False, root)["checks"]
+                self.assertEqual(checks["Проверка обновлений по расписанию"], enabled == 0)
 
 
 if __name__ == "__main__":

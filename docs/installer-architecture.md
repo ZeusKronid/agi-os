@@ -30,7 +30,8 @@ flowchart TD
 `agi-web.service` запускает сайт от пользователя `agi` (группы `kvm`, `disk`,
 `optical`); привилегированные шаги выполняются короткими root-помощниками через
 `sudo -n` с JSON на stdin: `storage_worker.py` (probe / prepare / revert) и
-`finalize_worker.py`. `agi-guacd.service` запускает guacd из squashfs
+`finalize_worker.py`; сайт для них — недоверенный вызывающий, см.
+[модель угроз root-помощников](root-helpers-threat-model.md). `agi-guacd.service` запускает guacd из squashfs
 (`RootImage=`). Внутренняя VM получает ядро и initramfs с загрузочного
 носителя Live, сам носитель — только для чтения, и параметр `agios.guest`,
 по которому запускается `agi-guest.service`, а сайт, guacd и рабочий стол — нет.
@@ -40,7 +41,21 @@ flowchart TD
 1. **Диалог.** Модель предлагает конфигурацию и запросы каталога пакетов;
    `domain.py` и `controller.py` проверяют её. Модель видит реальные диски
    (путь, размер, модель, разделы, пригодность) и выбирает целевой диск. Модель
-   не выполняет команды.
+   не выполняет команды. `hardware.py` без привилегий собирает инвентаризацию
+   компьютера (`lspci -vmmk -nn`, sysfs DMI/USB/net/power_supply/tpm/efivars,
+   `/proc/cpuinfo`, `systemd-detect-virt`): процессор, память, корпус и батарея,
+   GPU, Ethernet/Wi-Fi, звук, Bluetooth, TPM, Secure Boot. Она попадает в
+   системный промпт как данные вместе со списком драйверов, которые добавит
+   установщик, и списком того, что превью проверить не может; модель драйверы
+   не подбирает. Те же данные показывает сайт («Железо этого компьютера») и
+   обзор конфигурации.
+   Файлы настроек, которые пишет модель (`home_files`, `system_files`),
+   проверяет `configcheck.py`: JSON, JSONC (waybar), TOML, XML (xfconf,
+   fontconfig), desktop-файлы, INI (foot, LightDM), формат systemd, секции
+   xorg.conf.d, парность скобок в конфигурациях Hyprland/sway/i3, Python.
+   Ошибка отклоняет предложение и возвращается модели в том же цикле
+   `Controller.respond`. Обзор показывает каждый файл отдельным блоком с
+   подсветкой и списком проверок.
 2. **План.** `Catalog.estimate` считает точный размер: `pacman -Sp` с пустой
    локальной базой (все зависимости) и `pacman -Si` (Installed Size); запас
    +20 % и +2 ГиБ. `storage_worker.py probe` перечисляет варианты: память
@@ -59,9 +74,42 @@ flowchart TD
    внутренней VM; контроллер отправляет конфигурацию с `disk=/dev/vda`,
    отпечаток, пароль и пароль шифрования; `worker.py` ставит систему партиями
    (`pacman -Scc` + `fstrim` между ними), настраивает LUKS2 (`encrypt` hook,
-   `cryptdevice=`), zram-generator, загрузчик с fallback-записью и запись
-   `installation.json`. Для памяти сайт следит за `mm_stat` zram и аккуратно
-   останавливает установку при нехватке.
+   `cryptdevice=`), zram-generator, при `swap: hibernate` — swap-файл размером
+   с RAM реального компьютера (`resume=`/`resume_offset=`, хук `resume`),
+   загрузчик с fallback-записью и запись
+   `installation.json`. После записи файлов настроек `worker.py` запускает в
+   chroot проверки самих программ, если они установлены: `foot -C`,
+   `sway -C`, `i3 -C`, `Hyprland --verify-config` (от пользователя, со своим
+   `XDG_RUNTIME_DIR`), `luac -p`, `bash -n`, `systemd-analyze verify` для
+   системных юнитов, а также наличие XKB-раскладок. Ошибка останавливает
+   превью до готовности; её текст видит пользователь, и он же уходит модели
+   вместе со следующим сообщением.
+   Региональные настройки — поля конфигурации, а не
+   свободный текст: `locale` (LANG) и `locale_overrides` (LC_TIME, LC_NUMERIC…;
+   первый день недели задаёт локаль LC_TIME), `console_keymap`/`console_font`
+   для `vconsole.conf` (пусто — выбор установщика: раскладка с переключением
+   на кириллицу, для русской — Alt+Shift; `cyr-sun16` для кириллических
+   языков, иначе `eurlatgr`; попадают и в initramfs, т.е. в запрос пароля
+   LUKS), `fonts` (пусто при графической сессии — DejaVu + Liberation, Noto
+   CJK для CJK), `time_sync` (systemd-timesyncd). Итоговые значения пишутся в
+   `installation.json` (`settings`) и проверяются `agi-os-verify`.
+   Для памяти сайт следит за `mm_stat` zram и аккуратно
+   останавливает установку при нехватке. Запрос установки несёт инвентаризацию
+   реального компьютера (`hardware`): `hardware.driver_plan` детерминированно
+   выводит из неё микрокод, mesa/vulkan/VA-API по вендору GPU (`nvidia-open`
+   для Turing и новее, иначе nouveau), `wireless-regdb` для Wi-Fi,
+   `sof-firmware`/`alsa-ucm-conf` и стек PipeWire, `bluez` + `bluetooth.service`,
+   `power-profiles-daemon` для ноутбука (если пользователь не выбрал tlp,
+   tuned или auto-cpufreq) — по железу компьютера, а не по virtio-устройствам
+   VM; графический userspace добавляется только при графической сессии, а
+   выбранный пользователем модуль NVIDIA или PulseAudio заменяет свой аналог.
+   Для `linux-lts` добавляется `nvidia-open-lts`, для других ядер —
+   `nvidia-open-dkms` с заголовками. Модули `nvidia*` попадают в drop-in
+   `etc/mkinitcpio.conf.d/agi-os.conf` вместо hook `kms`. В привязку согласия
+   входит отпечаток плана драйверов (не всего списка USB-устройств). Строки
+   устройств очищаются от управляющих и bidi-символов до попадания в промпт и
+   обзор. План и инвентаризация
+   пишутся в `installation.json`; `agi-os-verify` проверяет пакеты и службы плана.
 5. **Решение.** `revert` убирает хранилище по его виду (см. `storage_worker.py`).
    `finalize_worker.py` проверяет образ (запись установки, дайджест
    конфигурации, тип загрузки, шифрование), затем:
@@ -71,7 +119,14 @@ flowchart TD
      шифровании — новый LUKS с тем же паролем, `rsync -aHAX` + проверочный
      проход с контрольными суммами, `genfstab`, обновление `options` записей
      загрузчика и `GRUB_CMDLINE_LINUX`.
-   Затем `mkinitcpio -P` в chroot (autodetect видит реальное железо),
+   Затем `fit_drivers`: инвентаризация Live заново, недостающие пакеты плана
+   доустанавливаются в chroot (`pacman -Syu --needed`, чтобы не получить
+   частичное обновление), службы включаются; диск уже записан, поэтому любой
+   сбой этого шага — не ошибка, а `final-warning` на странице и `warnings` в
+   записи установки, которые `agi-os-verify` показывает как замечания; план
+   драйверов реального компьютера записывается до установки, поэтому проверка
+   «Драйверы под железо компьютера» не пройдёт, пока их не доустановят.
+   Далее `mkinitcpio -P` в chroot (autodetect видит реальное железо),
    `bootctl install` / `grub-install` с записью в NVRAM, новый идентификатор
    приёмки. Успех переноса `copy` завершается откатом временного хранилища.
 

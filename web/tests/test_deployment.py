@@ -45,17 +45,6 @@ class ConsentTests(unittest.TestCase):
                     function({})
 
 
-class OrphanTests(unittest.TestCase):
-    def test_only_labelled_unmounted_partitions_except_the_active_preview(self):
-        snapshot = demo_inventory()
-        snapshot['disks'][0]['partitions'] = [
-            {'path': '/dev/vda1', 'size': 1, 'partlabel': 'AGIOS-PREVIEW', 'mounted': False},
-            {'path': '/dev/vda2', 'size': 1, 'partlabel': 'AGIOS-PREVIEW', 'mounted': False},
-            {'path': '/dev/vda3', 'size': 1, 'partlabel': 'DATA', 'mounted': False}]
-        found = deployment.orphan_previews(snapshot, current='/dev/vda2')
-        self.assertEqual([o['device'] for o in found], ['/dev/vda1'])
-
-
 class FreeSpaceTests(unittest.TestCase):
     def test_gaps_between_partitions_are_aligned_and_reported(self):
         size = 64 * GIB
@@ -72,7 +61,8 @@ class FreeSpaceTests(unittest.TestCase):
 
     def test_blank_disk_is_free_but_bare_filesystem_is_user_data(self):
         blank = {'path': '/dev/sdb', 'size': 8 * GIB, 'pttype': None, 'fstype': None}
-        self.assertEqual(storage_worker.free_regions(blank), [(2048, 8 * GIB // 512 - 34)])
+        with patch.object(storage_worker, 'looks_blank', return_value=True):
+            self.assertEqual(storage_worker.free_regions(blank), [(2048, 8 * GIB // 512 - 34)])
         bare = {'path': '/dev/sdb', 'size': 8 * GIB, 'pttype': None, 'fstype': 'exfat'}
         self.assertEqual(storage_worker.free_regions(bare), [])
 
@@ -89,7 +79,8 @@ class ProbeTests(unittest.TestCase):
         target.update(pttype=None, fstype=None, partitions=[], tran='sata')
         with patch.object(storage_worker, 'inventory', return_value=snapshot), \
                 patch.object(storage_worker, 'mem_available', return_value=4 * GIB), \
-                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'):
+                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'), \
+                patch.object(storage_worker, 'looks_blank', return_value=True):
             result = storage_worker.probe({'needed': 6 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
         kinds = {o['kind']: o for o in result['options']}
         self.assertFalse(kinds['ram']['fits'])
@@ -104,14 +95,16 @@ class ProbeTests(unittest.TestCase):
         snapshot['disks'][0].update(pttype=None, fstype=None, partitions=[])
         with patch.object(storage_worker, 'inventory', return_value=snapshot), \
                 patch.object(storage_worker, 'mem_available', return_value=20 * GIB), \
-                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'):
+                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'), \
+                patch.object(storage_worker, 'looks_blank', return_value=True):
             result = storage_worker.probe({'needed': 6 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
         ram = next(o for o in result['options'] if o['kind'] == 'ram')
         self.assertTrue(ram['fits'])
         self.assertTrue(ram.get('recommended'))
 
     def test_erase_is_never_reverted_silently(self):
-        result = storage_worker.revert({'state': {'kind': 'erase', 'disk': '/dev/vda', 'device': '/dev/vda1'}})
+        with patch.object(storage_worker, 'inventory', return_value=demo_inventory()):
+            result = storage_worker.revert({'state': {'kind': 'erase', 'disk': '/dev/vda', 'device': '/dev/vda1'}})
         self.assertFalse(result['reverted'])
 
 
@@ -144,7 +137,117 @@ class PromoteTests(unittest.TestCase):
         self.assertNotIn('--delete=1', sgdisk)  # alongside keeps the user's partition
         zeroing = [c for c in calls if c[0] == 'dd']
         self.assertEqual(len(zeroing), 2)
+        # The nested table and the preview record before the first nested partition are erased.
+        self.assertIn(f'seek={base}', zeroing[0])
+        self.assertIn('count=2048', zeroing[0])
 
+
+class HibernationTests(unittest.TestCase):
+    def test_reserved_swap_file_costs_no_memory_but_needs_disk(self):
+        snapshot = demo_inventory()
+        snapshot['disks'][0].update(pttype=None, fstype=None, partitions=[], size=20 * GIB)
+        with patch.object(storage_worker, 'inventory', return_value=snapshot), \
+                patch.object(storage_worker, 'mem_available', return_value=14 * GIB), \
+                patch.object(storage_worker, 'read_command', return_value='/dev/sr0\n'):
+            result = storage_worker.probe({'needed': 22 * GIB, 'sparse': 16 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
+            with self.assertRaises(ValidationError):
+                storage_worker.probe({'needed': 6 * GIB, 'sparse': 7 * GIB, 'target': '/dev/vda', 'vm_memory': 4 * GIB})
+        kinds = {o['kind']: o for o in result['options']}
+        self.assertTrue(kinds['ram']['fits'])  # 6 GiB of real data, the swap file is only reserved
+        # 20 GiB of disk cannot hold 22 GiB (a disk without GPT is offered only for erase since CMP-135).
+        self.assertFalse(any(o['fits'] for o in result['options'] if o['kind'] != 'ram'))
+        self.assertIn('erase', kinds)
+
+    def test_copy_skips_swap_and_reserves_room_for_it(self):
+        calls = []
+        table = gpt([], 64 * GIB)
+        refreshed = gpt([{'node': '/dev/vda1', 'start': 2048, 'size': GIB // 512},
+                         {'node': '/dev/vda2', 'start': 2048 + GIB // 512, 'size': 40 * GIB // 512}], 64 * GIB)
+
+        class Runner:
+            def run(self, args, **kw):
+                calls.append(args)
+                if args[0] == 'du':
+                    return f'{4 * GIB}\t/x\n'
+                if args[0] == 'sfdisk':
+                    return table if len([c for c in calls if c[0] == 'sfdisk']) == 1 else refreshed
+                if args[0] == 'blkid':
+                    return 'ext4\n'
+                return ''
+
+        class Source:
+            mount = None
+            def open_root(self, number, passphrase):
+                return '/dev/nbd0p2', False
+            def partition(self, number):
+                return f'/dev/nbd0p{number}'
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, patch.object(finalize_worker, 'emit'):
+            finalize_worker.copy(Runner(), {'layout': 'erase'}, {'path': '/dev/vda', 'size': 64 * GIB}, Source(), 'uefi', '',
+                                 Path(tmp), ['swap'], 16 * GIB)
+            du = [c for c in calls if c[0] == 'du'][0]
+            self.assertIn(f'--exclude={Path(tmp) / "source/swap"}', du)
+        rsyncs = [c for c in calls if c[0] == 'rsync' and '-rt' not in c and '-rcn' not in c]
+        self.assertEqual(len(rsyncs), 2)
+        for command in rsyncs:
+            self.assertIn('--exclude=/swap', command)
+
+    def test_recreated_swap_file_follows_the_new_filesystem(self):
+        record = {'hibernation': {'file': '/swap/swapfile', 'size': 8 * GIB, 'resume_uuid': 'old', 'resume_offset': 1}}
+        created = []
+
+        class Runner:
+            def run(self, args, **kw):
+                return 'btrfs\n' if args[0] == 'findmnt' else ''
+
+        with patch.object(finalize_worker, 'inventory', return_value={'hardware': {'memory': int(15.5 * GIB)}}):
+            size = finalize_worker.swapfile_size(record)
+        self.assertEqual(size, 16 * GIB)
+        with patch.object(finalize_worker, 'inventory', return_value={'hardware': {'memory': 0}}):
+            self.assertEqual(finalize_worker.swapfile_size(record), 8 * GIB)
+        with patch.object(finalize_worker, 'emit'), patch.object(finalize_worker, 'create_swapfile',
+                                                                side_effect=lambda r, d, fs, s: created.append((fs, s)) or 777):
+            resume = finalize_worker.recreate_swapfile(Runner(), Path('/mnt/x'), 'new-uuid', record, size)
+        self.assertEqual(resume, 'resume=UUID=new-uuid resume_offset=777')
+        self.assertEqual(created, [('btrfs', 16 * GIB)])
+        self.assertEqual(record['hibernation']['resume_uuid'], 'new-uuid')
+        self.assertEqual(record['hibernation']['size'], 16 * GIB)
+
+
+
+class CopyTableTests(unittest.TestCase):
+    """The partition table the copy finalization starts from."""
+
+    def calls(self, layout, disk, blank=True):
+        calls = []
+        class Runner:
+            def run(self, args, **kw):
+                calls.append(args)
+                return ''
+        with patch.object(finalize_worker.storage_worker, 'looks_blank', return_value=blank):
+            finalize_worker.prepare_table(Runner(), layout, disk)
+        return calls
+
+    def test_alongside_on_a_new_empty_disk_creates_a_table(self):
+        calls = self.calls('alongside', {'path': '/dev/vda', 'pttype': None, 'fstype': None})
+        self.assertEqual(calls[0], ['sgdisk', '--clear', '/dev/vda'])
+        self.assertTrue(calls[1][1].startswith('--backup='))
+
+    def test_alongside_keeps_an_existing_table(self):
+        calls = self.calls('alongside', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1].startswith('--backup='))
+
+    def test_alongside_refuses_data_without_a_table(self):
+        for disk, blank in (({'path': '/dev/vda', 'pttype': None, 'fstype': 'ntfs'}, True),
+                            ({'path': '/dev/vda', 'pttype': None, 'fstype': None}, False)):
+            with self.assertRaises(ValidationError):
+                self.calls('alongside', disk, blank)
+
+    def test_erase_always_starts_from_an_empty_table(self):
+        calls = self.calls('erase', {'path': '/dev/vda', 'pttype': 'gpt', 'fstype': None})
+        self.assertEqual([c[1] for c in calls], ['--zap-all', '--clear'])
 
 if __name__ == '__main__':
     unittest.main()

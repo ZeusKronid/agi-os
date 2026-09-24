@@ -6,14 +6,13 @@ Requires=agi-guacd.service
 ConditionKernelCommandLine=!agios.guest
 [Service]
 Type=simple
-User=agi
-Group=agi
-SupplementaryGroups=kvm render video disk optical
+# A system user of its own: the Live desktop user agi has no disk access and no root.
+User=agi-web
+Group=agi-web
+SupplementaryGroups=kvm render video disk optical systemd-journal
 StateDirectory=agi-os
+StateDirectoryMode=0700
 Environment=AGIOS_DATA_DIR=/var/lib/agi-os
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/agi/.Xauthority
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 ExecStart=/usr/bin/python -B /usr/local/share/agi-os/web/server.py
 Restart=on-failure
 RestartSec=3

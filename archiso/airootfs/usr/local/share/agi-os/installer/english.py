@@ -38,6 +38,7 @@ EXACT = {
     "Не удалось закрыть зашифрованный раздел после установки.": "Could not close the encrypted partition after installing.",
     "Идентификатор диска изменился до записи": "The disk ID changed before writing",
     "Для графической сессии не включён дисплейный менеджер": "No display manager is enabled for the graphical session",
+    "Создаю собственные ключи Secure Boot этой системы…": "Creating this system’s own Secure Boot keys…",
     "Проверка установленных пакетов не пройдена": "The installed packages did not pass the check",
     "Установочный движок запускается только в live-системе AGI OS": "The install engine runs only in the AGI OS live system",
     "Запрос слишком большой": "The request is too large",
@@ -128,6 +129,7 @@ HTTP = {
 PATTERNS = [
     (r"Создаю согласованные разделы на (.+)", lambda m: f"Creating the agreed partitions on {m[1]}"),
     (r"Устанавливаю выбранные пакеты \((\d+) из (\d+)\)…", lambda m: f"Installing your packages ({m[1]} of {m[2]})…"),
+    (r"Создаю swap-файл для гибернации \((\d+) ГиБ, по объёму RAM\)…", lambda m: f"Creating the hibernation swap file ({m[1]} GiB, the size of RAM)…"),
     (r"Повторяю загрузку пакетов \(попытка (\d+) из (\d+)\)…", lambda m: f"Retrying the package download (attempt {m[1]} of {m[2]})…"),
     (r"Истекло время операции (.+)", lambda m: f"Timed out: {m[1]}"),
     (r"Ошибка (\S+) \(код (-?\d+)\)(.*)", lambda m: f"{m[1]} failed (code {m[2]}){m[3]}"),

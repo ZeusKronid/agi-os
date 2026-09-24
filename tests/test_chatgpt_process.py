@@ -1,9 +1,13 @@
 """Local app-server lifecycle regression; no account or model inference needed."""
 
+import os
 import queue
 import shutil
+import signal
+import subprocess
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +18,42 @@ from chatgpt import ChatGPTProvider
 from providers import ProviderError
 
 
-@unittest.skipUnless(shutil.which("bwrap") and shutil.which("codex"), "needs bubblewrap and Codex")
+class CloseTests(unittest.TestCase):
+    """close() without a real backend: a child that outlives the sandbox keeps the pipe open."""
+
+    def test_close_returns_while_a_descendant_still_holds_stdout(self):
+        # sh is the "sandbox"; the background sleep plays a backend that escaped the kill.
+        proc = subprocess.Popen(["sh", "-c", "sleep 30 & echo '{\"ready\": true}'; sleep 30"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1, start_new_session=True)
+        def reap():
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)  # the escaped descendant too
+            except ProcessLookupError:
+                pass
+        self.addCleanup(reap)
+        provider = ChatGPTProvider.__new__(ChatGPTProvider)
+        provider.proc, provider.closed, provider.close_lock = proc, threading.Event(), threading.Lock()
+        provider.events = queue.Queue()
+        provider.owner = threading.Thread(target=proc.wait, daemon=True)
+        provider.reader = threading.Thread(target=provider._reader, daemon=True)
+        provider.owner.start()
+        provider.reader.start()
+        provider.JOIN_TIMEOUT = 0.3
+        self.assertEqual(provider.events.get(timeout=10), {"ready": True})  # the descendant is running
+        done = threading.Event()
+        threading.Thread(target=lambda: (provider.close(), done.set()), daemon=True).start()
+        self.assertTrue(done.wait(10), "close() deadlocked on the reader's pipe")
+        self.assertIsNotNone(proc.poll())
+        self.assertTrue(proc.stdin.closed)
+        with self.assertRaises(ProviderError):
+            provider.send({"method": "x"})
+        provider.close()  # repeatable
+
+
+# Spawns bubblewrap (user namespaces) and the Codex backend: opt-in, never by default on
+# a developer workstation (see the host-safety rules of the test stand).
+@unittest.skipUnless(os.environ.get("AGIOS_TEST_BWRAP") == "1" and shutil.which("bwrap") and shutil.which("codex"),
+                     "set AGIOS_TEST_BWRAP=1 (needs bubblewrap and Codex)")
 class ChatGPTProcessTests(unittest.TestCase):
     def test_backend_survives_connection_worker_and_subsequent_worker_exit(self):
         results = queue.Queue()

@@ -20,6 +20,7 @@ class EnglishTest(unittest.TestCase):
             'f"Повторяю загрузку пакетов (попытка {attempt + 1} из {attempts})…"': "Повторяю загрузку пакетов (попытка 2 из 3)…",
             '"Создаю согласованные разделы на " + config.disk': "Создаю согласованные разделы на /dev/vda",
             'f"Устанавливаю выбранные пакеты ({min(index + BATCH, len(extra))} из {len(extra)})…"': "Устанавливаю выбранные пакеты (24 из 120)…",
+            'f"Создаю swap-файл для гибернации ({swap_size // GIB} ГиБ, по объёму RAM)…"': "Создаю swap-файл для гибернации (16 ГиБ, по объёму RAM)…",
         }
         for literal in texts:
             text = samples.get(literal, literal.strip('"'))

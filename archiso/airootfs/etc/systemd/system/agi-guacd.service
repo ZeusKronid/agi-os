@@ -4,8 +4,8 @@ After=network.target
 ConditionKernelCommandLine=!agios.guest
 [Service]
 Type=simple
-User=agi
-Group=agi
+User=agi-web
+Group=agi-web
 RootImage=/usr/local/share/agi-os/guacd.sqfs
 MountAPIVFS=yes
 TemporaryFileSystem=/tmp

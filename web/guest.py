@@ -11,7 +11,10 @@ import time
 
 ENGINE = Path('/usr/local/share/agi-os/installer')
 sys.path.insert(0, str(ENGINE))
+from journal import Logger
 from system import inventory
+
+LOG = Logger('guest')
 
 
 def main():
@@ -35,8 +38,10 @@ def main():
         def send(value):
             channel.write(json.dumps(value, ensure_ascii=False).encode() + b'\n')
         send({'kind': 'ready', 'inventory': inventory()})
+        LOG.info('guest.ready', 'Установочная VM готова, жду запрос')
         raw = channel.readline(1_000_001)
         request = json.loads(raw)
+        LOG.info('guest.request', 'Запрос установки получен')
         if request['configuration']['disk'] != '/dev/vda':
             raise ValueError('Only the VM disk is supported')
         proc = subprocess.Popen([sys.executable, '-u', str(ENGINE / 'worker.py')],
@@ -58,6 +63,8 @@ def main():
         finally:
             proc.wait()
             proc.stdin.close()
+            LOG.log('info' if installed and proc.returncode == 0 else 'error', 'guest.worker-exit',
+                    f'Установщик завершился с кодом {proc.returncode}', installed=installed)
         if installed and proc.returncode == 0:
             send({'kind': 'shutdown', 'text': 'Booting the installed system'})
             subprocess.run(['systemctl', 'poweroff'], check=True)

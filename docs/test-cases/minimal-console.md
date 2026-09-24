@@ -65,7 +65,7 @@ tester, запускать Python и сохранять мои файлы пос
 
    Expected: `tester`, `agi-min`, an installed root partition with `ext4`,
    `multi-user.target`, active NetworkManager, `Europe/Moscow`, `en_US.UTF-8`,
-   `KEYMAP=us`, successful DNS lookup and password-protected sudo, `AGI OS OK`.
+   `KEYMAP=us` and `FONT=eurlatgr`, successful DNS lookup and password-protected sudo, `AGI OS OK`.
 
 8. After verifying the agreed requirements, run `agi-os-verify --confirm`.
    On this first installed boot its persistence check should still be incomplete

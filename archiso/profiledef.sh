@@ -18,7 +18,6 @@ file_permissions=(
   ["/home/agi"]="1000:1000:755"
   ["/etc/sudoers.d/10-agi-live"]="0:0:440"
   ["/etc/shadow"]="0:0:400"
-  ["/root"]="0:0:750"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/usr/local/bin/agi-installer"]="0:0:755"
 )

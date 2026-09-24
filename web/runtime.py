@@ -18,7 +18,9 @@ from system import live_environment, read_command
 
 OVMF = Path('/usr/share/edk2/x64')
 BOOTMNT = Path('/run/archiso/bootmnt')
-GUEST_OPTIONS = 'agios.guest systemd.unit=multi-user.target'
+# The guest's journal lives in its RAM; forwarding it to the serial console keeps
+# the installer's own log in guest-console.log on the Live side.
+GUEST_OPTIONS = 'agios.guest systemd.unit=multi-user.target systemd.journald.forward_to_console=1'
 
 
 def available_port():
@@ -59,12 +61,24 @@ def guest_kernel():
     return boot / 'vmlinuz-linux', boot / 'initramfs-linux.img'
 
 
+def prune_vm_directories(keep=1):
+    """Live keeps /var/lib in RAM: before a new preview VM, drop the directories of all
+    but the newest `keep` earlier ones (their previews were discarded; the newest stays
+    for diagnostics). The guest console log itself is truncated by QEMU on every start."""
+    earlier = sorted((d for d in (DATA_ROOT / 'vm').glob('web-*') if d.is_dir() and not d.is_symlink()),
+                     key=lambda d: d.stat().st_mtime)
+    for directory in earlier[:max(0, len(earlier) - keep)]:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 class VirtualMachine:
     def __init__(self, image, memory=4096, cpus=4, firmware=None, directory=None):
         if image.get('format') not in ('qcow2', 'raw') or not isinstance(image.get('path'), str):
             raise ValueError('Invalid preview image description')
         self.image = image
         self.firmware = firmware or live_firmware()
+        if directory is None:
+            prune_vm_directories()
         self.directory = directory or DATA_ROOT / 'vm' / ('web-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
         self.directory.mkdir(parents=True, mode=0o700, exist_ok=directory is not None)
         self.memory, self.cpus = memory, cpus
@@ -131,7 +145,7 @@ class VirtualMachine:
             if marker_present() and mirror.exists():
                 # Test-only: a pinned mirror for the guest's choose-mirror service (fw_cfg is root-readable).
                 import subprocess
-                value = subprocess.run(['sudo', '-n', 'cat', str(mirror)], capture_output=True, text=True, timeout=10).stdout.strip()
+                value = subprocess.run(['sudo', '-n', '/usr/bin/cat', str(mirror)], capture_output=True, text=True, timeout=10).stdout.strip()
                 if value:
                     cmdline += ' mirror=' + value
             cmdline += ' console=ttyS0'
@@ -162,7 +176,7 @@ class VirtualMachine:
         if not self.running:
             raise RuntimeError('QEMU did not start: ' + (self.directory / 'qemu.log').read_text()[-1500:])
 
-    async def install(self, config, password, passphrase, notify):
+    async def install(self, config, password, passphrase, notify, hardware=None, secure_boot=False):
         await asyncio.wait_for(self.connection, 180)
         ready = json.loads(await asyncio.wait_for(self.reader.readline(), 240))
         if ready.get('kind') != 'ready':
@@ -174,8 +188,11 @@ class VirtualMachine:
             raise RuntimeError('The installer VM boot type does not match this computer')
         # Inside the VM the preview storage is /dev/vda; consent is re-bound to that view.
         translated = type(config).parse({**config.as_dict(), 'disk': '/dev/vda'})
+        # The guest sees virtual devices; drivers must follow the real computer's inventory.
         request = {'configuration': translated.as_dict(), 'consent_digest': translated.digest(),
-                   'fingerprint': inner['fingerprint'], 'password': password, 'passphrase': passphrase}
+                   'fingerprint': inner['fingerprint'], 'password': password, 'passphrase': passphrase,
+                   'hardware': hardware if hardware is not None else ready['inventory']['hardware'],
+                   'secure_boot': secure_boot is True}
         self.writer.write(json.dumps(request).encode() + b'\n')
         await self.writer.drain()
         del request, password, passphrase

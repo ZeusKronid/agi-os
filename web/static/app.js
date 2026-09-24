@@ -5,7 +5,7 @@ const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 // Like the site, the workspace always plays its motion: the system reduced-motion setting is not honored.
 let current, busy = false, client, keyboard, mouse, connected = false, consoleId = null, lastConnect = 0;
 let lastMessages = '', lastPlan = '', lastFacts = '', sheet = '', modal = '', installStep = 1, stopping = false, chatView = false, changeAsked = false, revertAsk = false, orphanAsk = '', replanning = false;
-let providerKind = 'chatgpt', shown = 0, placeStep = 1;
+let providerKind = 'chatgpt', shown = 0, placeStep = 1, foundAsk = '', lastFound = '', lastFiles = '', lastHardware = '', lastLogin = '';
 
 async function api(path, data) {
     const response = await fetch('/api/' + path, data === undefined ? {} : {
@@ -231,11 +231,12 @@ function render(state) {
     // Place sheet.
     if (state.plan) {
         $('estimate').textContent = `The system takes ${gib(state.plan.estimate.installed)} (${state.plan.estimate.packages} packages, ${gib(state.plan.estimate.download)} to download). `
-            + `The preview needs ${gib(state.plan.needed)} with headroom. Target disk: ${config ? config.disk : ''}.` + (state.plan.encrypt ? ' The root will be encrypted.' : '');
+            + `The preview needs ${gib(state.plan.needed)} with headroom. Target disk: ${config ? config.disk : ''}.` + (state.plan.encrypt ? ' The root will be encrypted.' : '')
+            + (state.plan.secure_boot ? ' The bootloader and kernel will be signed for Secure Boot.' : '');
         $('passphraseField').hidden = !state.plan.encrypt;
         if (lastPlan !== state.plan.digest) {
             lastPlan = state.plan.digest; renderOptions(state.plan);
-            $('memory').value = String(state.plan.memory); $('encrypt').checked = state.plan.encrypt;
+            $('memory').value = String(state.plan.memory); $('encrypt').checked = state.plan.encrypt; $('secureBoot').checked = !!state.plan.secure_boot;
         }
     }
     if (config && JSON.stringify(config) !== lastFacts) { lastFacts = JSON.stringify(config); renderFacts(config); }
@@ -283,7 +284,12 @@ function render(state) {
     if (state.running && (!client || consoleId !== state.console_id || (!connected && Date.now() - lastConnect > 6000))) { consoleId = state.console_id; connect(); }
     if (!state.running && client) disconnect();
 
-    renderOrphans(place === 'talk' ? state.orphans || [] : []);
+    renderFound(state, place);
+    renderHardware(state.hardware, state);
+    renderFiles(state.files || []);
+    renderLogin(state.login || []);
+    renderSecureBoot(state);
+    renderFinalNotes(state);
     aimSun(state, place);
 }
 const horizon = () => Math.min(230, Math.max(170, innerHeight * .24));
@@ -366,6 +372,7 @@ function validateBuild() {
     const option = selectedOption(), encrypt = current && current.plan && current.plan.encrypt;
     const needs = [[!!option, 'Pick a place'], [$('optionAccepted').checked, option && option.destructive ? 'Accept the consequences' : 'Accept the plan']];
     if (option && option.destructive) needs.push([$('optionPath').value.trim() === option.confirm, 'Type ' + option.confirm]);
+    if (current && (current.login || []).length) needs.push([$('loginReviewed').checked, 'Read what starts at login']);
     needs.push([$('password').value.length >= 8, 'Password of 8+ characters']);
     if (encrypt) needs.push([$('passphrase').value.length >= 8, 'Encryption password']);
     const consent = current && current.consent && current.consent.error;
@@ -384,21 +391,109 @@ function updateLayoutWarning() {
         : 'Your files and other systems on ' + current.built.target + ' stay as they are.';
     $('layoutWarning').className = erase ? 'line error' : 'hint';
 }
-function renderOrphans(orphans) {
-    $('orphans').hidden = !orphans.length;
-    const key = JSON.stringify([orphans, orphanAsk]);
-    if ($('orphanList').dataset.key === key) return;
-    $('orphanList').dataset.key = key; $('orphanList').replaceChildren();
-    for (const orphan of orphans) {
-        const text = document.createElement('span'); text.textContent = `${orphan.device} · ${gib(orphan.size)} on ${orphan.disk}`;
-        const button = document.createElement('button'); const asking = orphanAsk === orphan.device;
-        button.className = 'btn ' + (asking ? 'danger' : 'outline'); button.textContent = asking ? 'Confirm: remove ' + orphan.device : 'Remove this preview partition';
-        button.onclick = async () => {
-            if (orphanAsk !== orphan.device) { orphanAsk = orphan.device; render(current); return; }
-            orphanAsk = ''; try { render(await api('orphans/remove', {device: orphan.device})); } catch (error) { showError(error); }
+const FOUND_STATUS = {ready: 'Installed in the preview', finalizing: 'Installing on the disk was interrupted — success is not confirmed',
+                      installing: 'Installing into the preview was interrupted — not finished', failed: 'Installing into the preview did not finish'};
+function renderFound(state, place) {
+    const found = place === 'talk' ? state.found || [] : [];
+    $('orphans').hidden = !found.length && !state.scan_error;
+    $('scanError').hidden = !state.scan_error; $('scanError').textContent = state.scan_error || '';
+    const key = JSON.stringify([found, foundAsk]);
+    if (key === lastFound) return; lastFound = key;
+    $('orphanList').replaceChildren(...found.map(item => {
+        const row = document.createElement('div'); row.className = 'found';
+        const title = document.createElement('b'); title.textContent = item.title || (item.kind === 'file' ? 'Preview file' : 'Preview partition');
+        const where = document.createElement('small');
+        where.textContent = (item.kind === 'file' ? 'AGIOS-PREVIEW/preview.qcow2 on ' : 'Partition ') + item.device + ' · ' + gib(item.size) + ' · ' + (item.medium || item.disk)
+            + (item.created ? ' · created ' + item.created.replace('T', ' ').slice(0, 16) : '');
+        const status = document.createElement('small');
+        status.textContent = item.status ? FOUND_STATUS[item.status] + (item.target ? ' · target disk ' + item.target : '') + (item.encrypted ? ' · root encrypted' : '') + (item.error ? ' · ' + item.error : '') : (item.problem || '');
+        row.append(title, where, status);
+        if (item.journal && item.journal.length) { const log = document.createElement('pre'); log.textContent = item.journal.join('\n'); row.append(log); }
+        const actions = document.createElement('div'); actions.className = 'row';
+        const action = (label, path, confirmText, style) => {
+            const button = document.createElement('button'), asking = confirmText && foundAsk === path + item.id;
+            button.className = 'btn ' + (asking ? 'danger' : style || 'outline'); button.textContent = asking ? confirmText : label;
+            button.onclick = async () => {
+                if (confirmText && !asking) { foundAsk = path + item.id; render(current); return; }
+                foundAsk = ''; try { render(await api(path, {id: item.id})); } catch (error) { showError(error); }
+            };
+            return button;
         };
-        $('orphanList').append(text, button);
+        if (item.can_continue) actions.append(action('Continue the preview', 'previews/continue'));
+        if (item.can_retry) actions.append(action('Retry the installation', 'previews/retry', 'Confirm: remove ' + item.device + ' and measure again'));
+        if (item.can_remove) actions.append(action('Remove', 'previews/remove', 'Confirm: remove ' + item.device, 'ghost'));
+        row.append(actions); return row;
+    }));
+}
+function renderHardware(hardware, state) {
+    $('hardware').hidden = !hardware;
+    if (!hardware) { $('hardwareUnverified').hidden = true; return; }
+    const done = state.final.phase === 'complete', key = JSON.stringify(hardware) + done;
+    if (key === lastHardware) return; lastHardware = key;
+    $('hardwareLines').replaceChildren(...hardware.lines.map(line => { const li = document.createElement('li'); li.textContent = line; return li; }));
+    $('hardwareDrivers').textContent = (hardware.configured ? 'The installer adds drivers and firmware for this hardware: ' : 'Chosen from the hardware so far (the desktop adds more): ')
+        + (hardware.packages.join(', ') || 'none needed') + (hardware.services.length ? '; services: ' + hardware.services.join(', ') : '') + '.'
+        + (hardware.notes.length ? ' ' + hardware.notes.join('. ') + '.' : '');
+    $('hardwareUnverified').hidden = false;
+    $('hardwareUnverified').className = hardware.unverified.length ? 'line warn' : 'hint';
+    $('hardwareUnverified').textContent = !hardware.unverified.length
+        ? (hardware.virtual ? 'The hardware is virtual: the preview checks all of it.' : 'Nothing here needs a check the preview can’t do.')
+        : 'The preview runs on virtual devices and does not check: ' + hardware.unverified.join(', ') + '. You can only check these after installing on the computer.';
+    $('doneCheck').hidden = !hardware.unverified.length;
+    $('doneCheck').textContent = 'Now check on the computer itself: ' + hardware.unverified.join(', ') + ' — the preview could not check these.';
+}
+function highlight(content) {
+    // Text nodes only: a file is data from the model and must never become markup.
+    const pre = document.createElement('pre'); pre.className = 'code';
+    for (const line of content.split('\n')) {
+        const row = document.createElement('span'); let match;
+        if (/^\s*(#|;|\/\/|--)/.test(line)) { row.className = 'c'; row.textContent = line; }
+        else if (/^\s*\[[^\]]*\]\s*$/.test(line) || /^\s*(Section|EndSection|SubSection|EndSubSection)\b/i.test(line)) { row.className = 's'; row.textContent = line; }
+        else if ((match = line.match(/^(\s*"?[\w.$@:\/\[\]-]+"?)(\s*[=:]\s*|\s+)(.*)$/))) {
+            const key = document.createElement('span'); key.className = 'k'; key.textContent = match[1];
+            row.append(key, document.createTextNode(match[2] + match[3]));
+        } else row.textContent = line;
+        pre.append(row, document.createTextNode('\n'));
     }
+    return pre;
+}
+function renderFiles(files) {
+    $('files').hidden = !files.length;
+    const key = JSON.stringify(files); if (key === lastFiles) return; lastFiles = key;
+    $('fileList').replaceChildren(...files.map(file => {
+        const box = document.createElement('details'); box.className = 'file';
+        const head = document.createElement('summary'), path = document.createElement('b'), checks = document.createElement('small');
+        path.textContent = file.display;
+        checks.textContent = file.checks.length ? 'Checked with ' + file.checks.join(', ') : 'No automatic check for this format — read it yourself';
+        checks.className = file.checks.length ? '' : 'unchecked';
+        head.append(path, checks); box.append(head, highlight(file.content)); return box;
+    }));
+}
+function renderLogin(login) {
+    $('login').hidden = !login.length;
+    const key = JSON.stringify(login); if (key === lastLogin) return; lastLogin = key;
+    $('loginReviewed').checked = false;
+    $('loginList').replaceChildren(...login.map(entry => {
+        const li = document.createElement('li'), head = document.createElement('b'), why = document.createElement('span'), code = document.createElement('pre');
+        head.textContent = entry.path; why.textContent = ' — ' + entry.why; code.textContent = entry.commands.join('\n');
+        li.append(head, why, code); return li;
+    }));
+}
+function renderSecureBoot(state) {
+    const offered = state.firmware === 'uefi' && state.configuration && state.configuration.bootloader === 'systemd-boot';
+    $('secureBootField').hidden = !offered; if (!offered) $('secureBoot').checked = false;
+    if (!state.built) return;
+    const setupMode = !!(state.hardware && state.hardware.setup_mode);
+    $('secureBootFinal').hidden = !state.built.secure_boot;
+    $('enrollKeys').disabled = !setupMode; if (!setupMode) $('enrollKeys').checked = false;
+    $('secureBootHint').textContent = setupMode
+        ? 'The firmware is in Setup Mode. After the keys are enrolled the computer boots only signed systems: this one, Windows and other systems signed by Microsoft. The AGIOS Live stick is not signed — turn Secure Boot off to boot it. BitLocker may ask for its recovery key once.'
+        : 'The firmware is not in Setup Mode, so the keys can’t be enrolled now. The system is already signed: to turn Secure Boot on later, clear the keys in the UEFI settings (Setup Mode), run “sudo sbctl enroll-keys --microsoft” in the installed system and turn Secure Boot on.';
+}
+function renderFinalNotes(state) {
+    const warnings = state.final.warnings || [];
+    $('finalWarnings').hidden = !warnings.length;
+    $('finalWarnings').replaceChildren(...warnings.map(text => { const p = document.createElement('p'); p.className = 'line warn'; p.textContent = text; return p; }));
 }
 
 /* ── sheets and modals ────────────────────────────────── */
@@ -449,7 +544,7 @@ $('changeForm').onsubmit = event => { event.preventDefault(); if ($('changePromp
 document.querySelectorAll('[data-prompt]').forEach(chip => chip.onclick = () => { $('prompt').value = chip.dataset.prompt; $('prompt').focus(); });
 
 async function plan() {
-    try { render(await api('plan', {memory: +$('memory').value, encrypt: $('encrypt').checked})); return true; }
+    try { render(await api('plan', {memory: +$('memory').value, encrypt: $('encrypt').checked, secure_boot: $('secureBoot').checked})); return true; }
     catch (error) { showError(error); return false; }
 }
 $('placeButton').onclick = async () => {
@@ -458,15 +553,15 @@ $('placeButton').onclick = async () => {
     if (await plan()) openSheet('place');
 };
 // Memory and encryption change the room the preview needs, so the options are measured again.
-for (const id of ['memory', 'encrypt']) $(id).onchange = async () => { replanning = true; validateBuild(); render(current); await plan(); replanning = false; render(current); };
-for (const id of ['optionAccepted', 'optionPath', 'password', 'passphrase']) $(id).oninput = validateBuild;
+for (const id of ['memory', 'encrypt', 'secureBoot']) $(id).onchange = async () => { replanning = true; validateBuild(); render(current); await plan(); replanning = false; render(current); };
+for (const id of ['optionAccepted', 'optionPath', 'password', 'passphrase', 'loginReviewed']) $(id).oninput = validateBuild;
 $('buildForm').onsubmit = async event => {
     event.preventDefault(); const option = selectedOption(); if (!option || $('build').disabled) return; $('build').disabled = true;
     const password = $('password').value, passphrase = $('passphrase').value; $('password').value = ''; $('passphrase').value = '';
     try {
-        await api('build', {digest: current.plan.digest, option: option.id, accepted: $('optionAccepted').checked, confirmation: $('optionPath').value.trim(),
+        await api('build', {digest: current.plan.digest, option: option.id, accepted: $('optionAccepted').checked, login_reviewed: $('loginReviewed').checked, confirmation: $('optionPath').value.trim(),
                             password, passphrase, memory: +$('memory').value, cpus: +$('cpus').value});
-        $('optionAccepted').checked = false; $('optionPath').value = ''; shown = 0; sun.share = 0; openSheet(''); await refresh();
+        $('optionAccepted').checked = false; $('loginReviewed').checked = false; $('optionPath').value = ''; shown = 0; sun.share = 0; openSheet(''); await refresh();
     } catch (error) { showError(error); validateBuild(); }
 };
 const post = path => async () => { try { render(await api(path, {})); } catch (error) { showError(error); } };
@@ -499,7 +594,7 @@ $('finalInstallForm').onsubmit = async event => {
     const passphrase = $('finalPassphrase').value; $('finalPassphrase').value = '';
     try {
         await api('final/finalize', {layout: document.querySelector('input[name=layout]:checked').value, confirmation: $('targetConfirm').value.trim(),
-                                     accepted: $('finalAccepted').checked, passphrase});
+                                     accepted: $('finalAccepted').checked, enroll_keys: $('enrollKeys').checked, passphrase});
         shown = 0; sun.share = 0; Object.assign(sun.now, {arc: 0, grow: 0, lift: .35}); openModal(''); await refresh();
     } catch (error) { $('finalError').textContent = error.message; $('finalError').hidden = false; validateFinal(); }
 };
@@ -508,6 +603,18 @@ async function powerAction(action) {
     catch (error) { showError(error); }
 }
 $('rebootLive').onclick = () => powerAction('reboot');
+$('rescan').onclick = post('previews/scan');
+$('diagnosticsButton').onclick = async () => {
+    const button = $('diagnosticsButton'); button.disabled = true; button.textContent = 'Collecting…';
+    try {
+        const response = await fetch('/api/diagnostics', {method: 'POST', headers: {'X-AGIOS': 'local'}});
+        if (!response.ok) throw new Error('Could not collect diagnostics: ' + (await response.text()).slice(0, 300));
+        const name = (response.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/);
+        const link = document.createElement('a'); link.href = URL.createObjectURL(await response.blob());
+        link.download = name ? name[1] : 'agios-diagnostics.tar.gz'; document.body.append(link); link.click();
+        setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+    } catch (error) { showError(error); } finally { button.disabled = false; button.textContent = 'Diagnostics'; }
+};
 $('poweroffLive').onclick = () => powerAction('poweroff');
 
 /* ── model settings ───────────────────────────────────── */
@@ -530,11 +637,23 @@ $('providerForm').onsubmit = async event => {
     $('providerSubmit').disabled = true;
     $('providerError').hidden = false; $('providerError').className = 'hint';
     $('providerError').textContent = providerKind === 'chatgpt' ? 'Connecting. If a sign-in tab opened, finish signing in there.' : 'Connecting…';
+    // The site runs as a system user without the desktop, so this tab opens the ChatGPT sign-in page itself.
+    // It is opened right in the click so the browser does not block it as a pop-up.
+    const chatgpt = providerKind === 'chatgpt';
+    let tab = chatgpt ? window.open('about:blank', '_blank') : null, opened = false;
+    const watch = chatgpt ? setInterval(async () => {
+        let url; try { url = (await api('state')).login_url; } catch { return; }
+        if (!url || opened || !url.startsWith('https://')) return;
+        opened = true;
+        if (tab && !tab.closed) { tab.opener = null; tab.location.href = url; }
+        const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Open the ChatGPT sign-in page';
+        $('providerError').replaceChildren('Finish signing in on the ChatGPT page. If no tab opened: ', link);
+    }, 700) : null;
     try {
         render(await api('provider', {kind: providerKind, model: $('providerModel').value, endpoint: $('endpoint').value, key: $('key').value}));
         $('key').value = ''; $('providerError').hidden = true; $('settings').close();
     } catch (error) { $('providerError').className = 'line error'; $('providerError').textContent = error.message; }
-    finally { $('providerSubmit').disabled = false; }
+    finally { clearInterval(watch); if (tab && !opened && !tab.closed) tab.close(); $('providerSubmit').disabled = false; }
 };
 
 /* ── the preview's screen through Guacamole ───────────── */
@@ -582,3 +701,29 @@ window.addEventListener('beforeunload', () => { if (keyboard) keyboard.reset(); 
 window.addEventListener('blur', () => { if (keyboard) keyboard.reset(); });
 setInterval(refresh, 1500);
 refresh();
+
+/* ── version of this Live image and an update check only on request (CMP-137) ── */
+function describeVersion(info) {
+    const built = info.built ? ' · built ' + info.built.slice(0, 10) : '', revision = info.revision ? ' · ' + info.revision.slice(0, 7) : '';
+    return 'AGIOS ' + (info.release ? info.version : 'development build') + built + revision;
+}
+api('version').then(info => { $('version').textContent = describeVersion(info); }).catch(() => {});
+$('checkUpdates').onclick = async () => {
+    const box = $('updateResult'); $('checkUpdates').disabled = true; box.hidden = false; box.replaceChildren('Checking…');
+    try {
+        const result = await api('version/check', {});
+        box.replaceChildren();
+        if (result.error) { box.textContent = result.error; return; }
+        const latest = result.latest, line = document.createElement('p');
+        line.textContent = {update: 'Version ' + latest.version + ' is available.', latest: 'You have the latest version (' + latest.version + ').',
+                            development: 'This is a development build. The latest release is ' + latest.version + '.'}[result.verdict];
+        box.append(line);
+        if (result.verdict !== 'latest') {
+            const link = document.createElement('a'); link.href = latest.url || result.download_page; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Release ' + latest.version;
+            const how = document.createElement('a'); how.href = result.download_page; how.target = '_blank'; how.rel = 'noopener'; how.textContent = 'how to verify the signature and write the stick';
+            const hint = document.createElement('p'); hint.append(link, ' · ', how, latest.signed ? '' : ' · this release is not signed'); box.append(hint);
+            if (latest.notes) { const notes = document.createElement('pre'); notes.textContent = latest.notes; box.append(notes); }
+        }
+    } catch (error) { box.textContent = error.message || error; }
+    finally { $('checkUpdates').disabled = false; }
+};

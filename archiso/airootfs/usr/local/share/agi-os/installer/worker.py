@@ -9,6 +9,7 @@ credentials are accepted by this process.
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -18,18 +19,20 @@ import time
 import uuid
 from pathlib import Path
 
-from domain import Configuration, ValidationError
+from configcheck import HINTS, tool_checks
+from domain import (GIB, SWAPFILE, Configuration, ValidationError, console_font_exists, console_keymap_exists,
+                    hibernation_swap_size, system_path_allowed)
+from hardware import driver_plan, initramfs_config, profile, virtual
+from journal import Logger
 from system import Catalog, inventory, live_environment, selected_disk
+import update
 
 
 TARGET = Path("/mnt/agi-os")
 HERE = Path(__file__).resolve().parent
-BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python",
-                 "intel-ucode", "amd-ucode", "zram-generator")
+BASE_PACKAGES = ("base", "linux", "linux-firmware", "networkmanager", "sudo", "python", "zram-generator")
 CRYPT_NAME = "cryptroot"
-# The udev-based default HOOKS of mkinitcpio.conf plus `encrypt` before filesystems.
-ENCRYPT_HOOKS = ("HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont "
-                 "block encrypt filesystems fsck)\n")
+LOG = Logger("worker")
 
 
 def emit(kind, **data):
@@ -41,12 +44,25 @@ class Cancelled(RuntimeError):
 
 
 class Runner:
-    def __init__(self):
+    def __init__(self, log=None):
         self.cancel = threading.Event()
+        self.log = log or LOG
 
     def run(self, args, input_text=None, timeout=1800):
         if self.cancel.is_set():
             raise Cancelled("Установка остановлена. Диск мог быть частично изменён.")
+        started = time.monotonic()
+        try:
+            output = self._run(args, input_text, timeout)
+        except Exception as exc:
+            # Output of a command that received a secret on stdin is never logged.
+            self.log.warning("command.failed", f"{args[0]}: {exc}" if input_text is None else f"{args[0]}: ошибка",
+                             args=list(args), seconds=round(time.monotonic() - started, 2))
+            raise
+        self.log.info("command.done", args[0], args=list(args), seconds=round(time.monotonic() - started, 2))
+        return output
+
+    def _run(self, args, input_text, timeout):
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, start_new_session=True,
             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
@@ -80,14 +96,23 @@ def partition_path(disk, number):
     return disk + ("p" if disk[-1].isdigit() else "") + str(number)
 
 
-def packages_for(config):
+SBCTL_EFI = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+
+
+def packages_for(config, hardware, secure_boot=False):
+    """Everything the target receives: base, filesystem tools, the user's choices and
+    the drivers derived from the real computer's hardware (never from the preview VM).
+    Secure Boot adds sbctl: own keys, signing and re-signing on every kernel update."""
     packages = [*BASE_PACKAGES, config.filesystem + "-progs" if config.filesystem == "btrfs"
                 else {"ext4": "e2fsprogs", "xfs": "xfsprogs", "f2fs": "f2fs-tools"}[config.filesystem],
-                *config.packages]
+                *config.packages, *config.effective_fonts(),
+                *driver_plan(hardware, config.packages, config.session)["packages"]]
     if config.bootloader == "grub":
         packages += ["grub", "efibootmgr"]
     if config.session:
         packages += ["python-gobject", "gtk3"]
+    if secure_boot:
+        packages.append("sbctl")
     return list(dict.fromkeys(packages))
 
 
@@ -115,6 +140,89 @@ def trim_cache(runner):
         pass  # Media without discard support simply keep their blocks allocated.
 
 
+def resolved(relative):
+    """Where `relative` really lands inside the target after symlinks, as a relative path."""
+    real = (TARGET / relative).resolve()
+    if not real.is_relative_to(TARGET.resolve()):
+        raise ValidationError("Файл настроек выходит за пределы установленной системы")
+    return real.relative_to(TARGET.resolve()).as_posix()
+
+
+def sbctl_unsigned(output):
+    """Files `sbctl verify` reports as not signed (it marks them with ✗)."""
+    return [line.split("✗", 1)[1].split(" is not signed")[0].strip()
+            for line in output.splitlines() if "✗" in line]
+
+
+PAGE = 4096  # resume_offset counts pages; x86_64 pages are 4 KiB.
+
+
+def first_extent_offset(filefrag):
+    """resume_offset from `filefrag -v`: the first extent's physical start, in pages."""
+    block = re.search(r"blocks? of (\d+) bytes", filefrag)
+    first = re.search(r"^\s*0:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.", filefrag, re.MULTILINE)
+    if not block or not first:
+        raise ValidationError("Не удалось определить положение swap-файла на диске (resume_offset)")
+    return int(first.group(1)) * int(block.group(1)) // PAGE
+
+
+HIBERNATE_MODE_FILE = "etc/systemd/sleep.conf.d/agi-os-hibernate.conf"
+
+
+def hibernate_mode(hardware):
+    """How the computer powers off after writing the hibernation image. QEMU/KVM treat
+    ACPI S4 as an asynchronous power-off request: the guest kernel sees the sleep call
+    return, takes it for a wake-up, rolls the hibernation back and erases the image
+    signature before the VM stops ("PM: Image not found" at the next boot). A virtual
+    machine therefore hibernates in shutdown mode; real firmware keeps platform mode."""
+    return "shutdown" if virtual(hardware) else "platform"
+
+
+def create_swapfile(runner, root, filesystem, size):
+    """Swap file for hibernation inside a mounted root; returns its resume_offset.
+
+    Space is reserved without writing data (fallocate; mkswapfile on btrfs), so an
+    in-memory preview does not grow by the size of RAM. On btrfs the file lives in
+    its own subvolume (kept out of root snapshots) and is created NOCOW by mkswapfile.
+    """
+    path = Path(root) / SWAPFILE
+    if filesystem == "btrfs":
+        runner.run(["btrfs", "subvolume", "create", str(path.parent)])
+        runner.run(["chmod", "700", str(path.parent)])
+        runner.run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size // GIB}g", str(path)])
+        output = runner.run(["btrfs", "inspect-internal", "map-swapfile", "-r", str(path)]).strip()
+        if not output.isdigit():
+            raise ValidationError("Не удалось определить положение swap-файла на btrfs (resume_offset)")
+        return int(output)
+    runner.run(["mkdir", "-m", "700", "-p", str(path.parent)])
+    runner.run(["fallocate", "-l", str(size), str(path)])
+    runner.run(["chmod", "600", str(path)])
+    runner.run(["mkswap", str(path)])
+    return first_extent_offset(runner.run(["filefrag", "-v", str(path)]))
+
+
+def swap_fstab_line():
+    # Lower priority than zram (100): the file is used when zram is full and for hibernation.
+    return f"/{SWAPFILE} none swap defaults,pri=10 0 0\n"
+
+
+def resume_parameter(filesystem_uuid, offset):
+    return f"resume=UUID={filesystem_uuid} resume_offset={offset}"
+
+
+def boot_options(root_uuid, luks_uuid=None, resume=None):
+    """Kernel options of the systemd-boot entries."""
+    root = [f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}", f"root=/dev/mapper/{CRYPT_NAME}"] if luks_uuid else [f"root=UUID={root_uuid}"]
+    return " ".join([*root, "rw", *([resume] if resume else [])])
+
+
+def grub_defaults(text, luks_uuid=None, resume=None):
+    """/etc/default/grub with the engine's GRUB_CMDLINE_LINUX (encryption and resume)."""
+    params = [*([f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"] if luks_uuid else []), *([resume] if resume else [])]
+    lines = [line for line in text.splitlines() if not line.startswith("GRUB_CMDLINE_LINUX=")]
+    return "\n".join(lines) + f'\nGRUB_CMDLINE_LINUX="{" ".join(params)}"\n'
+
+
 def write_file(relative, text, mode=0o644):
     path = TARGET / relative
     if not path.resolve().is_relative_to(TARGET.resolve()):
@@ -124,12 +232,73 @@ def write_file(relative, text, mode=0o644):
     path.chmod(mode)
 
 
+CONFIG_CHECK_FAILED = "Проверка файлов настроек, предложенных агентом, не пройдена"
+
+
+def check_generated_files(config, runner):
+    """Run each program's own checker on the files the model wrote (foot -C, sway -C,
+    Hyprland --verify-config…), inside the installed system where the programs exist.
+    A failure stops the preview before it is reported ready; the text goes to the user
+    and back to the model to fix the file."""
+    home = f"/home/{config.username}"
+    problems = []
+    runtime = TARGET / "var/tmp/agi-os-config-check"
+    try:
+        files = [("home", path, f"{home}/{path}") for path, _ in config.home_files]
+        files += [("system", path, "/" + path) for path, _ in config.system_files]
+        for scope, path, absolute in files:
+            for label, binaries, args, as_user in tool_checks(scope, path):
+                binary = next((b for b in binaries if (TARGET / b).is_file()), None)
+                if binary is None:
+                    continue  # The program is not installed: nothing reads this file.
+                command = ["arch-chroot", str(TARGET)]
+                if as_user:
+                    if not runtime.exists():
+                        runtime.mkdir(mode=0o700, parents=True)
+                        runner.run([*command, "chown", f"{config.username}:{config.username}", "/" + str(runtime.relative_to(TARGET))])
+                    # Compositors refuse to start as root and need a runtime directory.
+                    command += ["runuser", "-u", config.username, "--", "env", f"HOME={home}",
+                                "XDG_RUNTIME_DIR=/" + str(runtime.relative_to(TARGET))]
+                try:
+                    runner.run([*command, "/" + binary, *[a.replace("{file}", absolute) for a in args]], timeout=120)
+                except ValidationError as exc:
+                    detail = str(exc).split("\n", 1)[1].strip() if "\n" in str(exc) else str(exc)
+                    where = ("~/" if scope == "home" else "/") + path
+                    problems.append(f"{where} — {label}:\n{detail[-1200:]}" + (f"\n{HINTS[label]}" if label in HINTS else ""))
+        # Keyboard layouts go into the X11/Wayland configuration; an unknown one breaks input.
+        symbols = TARGET / "usr/share/X11/xkb/symbols"
+        if config.session and symbols.is_dir():
+            for layout in config.keyboard_layouts:
+                if not (symbols / layout).is_file():
+                    problems.append(f"Раскладка клавиатуры «{layout}» не найдена в xkeyboard-config")
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+    if problems:
+        raise ValidationError(CONFIG_CHECK_FAILED + ":\n" + "\n\n".join(problems))
+
+
+def check_console(config):
+    """The keymap and font must exist in the installed system, not only in Live."""
+    kbd = TARGET / "usr/share/kbd"
+    if not console_keymap_exists(config.effective_keymap(), kbd):
+        raise ValidationError("В установленной системе нет раскладки консоли " + config.effective_keymap())
+    if not console_font_exists(config.effective_console_font(), kbd):
+        raise ValidationError("В установленной системе нет шрифта консоли " + config.effective_console_font())
+
+
 def preflight(request):
     if os.geteuid() != 0 or not live_environment():
         raise ValidationError("Запись дисков разрешена только в загруженной live-системе AGI OS")
-    if set(request) - {"passphrase"} != {"configuration", "fingerprint", "consent_digest", "password"}:
+    if set(request) - {"passphrase", "hardware", "secure_boot"} != {"configuration", "fingerprint", "consent_digest", "password"}:
         raise ValidationError("Неизвестный запрос установки")
     config = Configuration.parse(request["configuration"])
+    # Inside the preview VM the site passes the real computer's inventory; a native
+    # run installs for the machine it runs on.
+    if request.get("hardware") is not None:
+        try:
+            request["hardware"] = profile(request["hardware"])
+        except ValueError as exc:
+            raise ValidationError(str(exc))
     if request["consent_digest"] != config.digest():
         raise ValidationError("Конфигурация изменилась после подтверждения")
     snapshot = inventory()
@@ -138,6 +307,10 @@ def preflight(request):
         raise ValidationError("Диск изменился после подтверждения; запись отменена")
     if snapshot["firmware"] == "bios" and config.bootloader != "grub":
         raise ValidationError("Для BIOS требуется загрузчик GRUB")
+    if type(request.setdefault("secure_boot", False)) is not bool:
+        raise ValidationError("Некорректный выбор Secure Boot")
+    if request["secure_boot"] and (snapshot["firmware"] != "uefi" or config.bootloader != "systemd-boot"):
+        raise ValidationError("Подпись для Secure Boot поддерживается для UEFI с загрузчиком systemd-boot")
     password = request["password"]
     if not isinstance(password, str) or not 8 <= len(password) <= 256 or any(c in password for c in "\n\r\x00"):
         raise ValidationError("Введите пароль длиной от 8 до 256 символов без переносов строк")
@@ -146,12 +319,15 @@ def preflight(request):
             c in passphrase for c in "\n\r\x00"):
         raise ValidationError("Пароль шифрования: от 8 до 512 символов без переносов строк")
     supported = Path("/usr/share/i18n/SUPPORTED").read_text().splitlines()
-    if config.locale + " UTF-8" not in supported:
-        raise ValidationError("Выбранная локаль недоступна")
+    for locale in config.generated_locales():
+        if locale + " UTF-8" not in supported:
+            raise ValidationError("Выбранная локаль недоступна: " + locale)
     if TARGET.exists() and (TARGET.is_mount() or any(TARGET.iterdir())):
         raise ValidationError("Каталог установки занят предыдущей операцией; нужна проверка её состояния")
+    tools = ("fallocate", "mkswap", "filefrag") if config.filesystem != "btrfs" else ("btrfs",)
     for command in ("sgdisk", "partprobe", "udevadm", "mkfs." + config.filesystem, "cryptsetup",
-                    "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount"):
+                    "mkfs.fat", "pacstrap", "arch-chroot", "genfstab", "mount", "umount",
+                    *(tools if config.swap == "hibernate" else ())):
         if not shutil.which(command):
             raise ValidationError("В live-системе отсутствует инструмент: " + command)
     return config, snapshot, disk
@@ -178,10 +354,21 @@ def release_target():
 
 def install(request, runner):
     config, snapshot, disk = preflight(request)
-    packages = packages_for(config)
+    hardware = request.get("hardware") or snapshot["hardware"]
+    drivers = driver_plan(hardware, config.packages, config.session)
+    secure_boot = request.get("secure_boot") is True
+    packages = packages_for(config, hardware, secure_boot)
+    hibernate = config.swap == "hibernate"
+    # Sized for the computer the system is for (inside the preview: the real one, not the VM).
+    swap_size = hibernation_swap_size(hardware.get("memory")) if hibernate else 0
     emit("progress", stage=4, text="Проверяю репозитории и пакеты до изменения диска…")
     runner.run(["pacman", "-Sy", "--noconfirm"], timeout=180)
-    qualified = Catalog().validate(packages)
+    catalog = Catalog()
+    try:
+        catalog.validate(drivers["packages"])
+    except ValidationError as exc:
+        raise ValidationError("Ошибка установщика, не вашего выбора — драйверы по железу отсутствуют в репозиториях: " + str(exc))
+    qualified = catalog.validate(packages)
     # Resolve packages before erasing. Downloads belong in the target cache,
     # rather than filling the live session's RAM-backed filesystem.
     runner.run(["pacman", "-Sp", "--noconfirm", "--", *qualified])
@@ -231,8 +418,16 @@ def install(request, runner):
         # Install in batches and drop the download cache between them: the preview
         # image may live in memory, so its peak size must stay close to the installed size.
         chosen = set(config.packages)
-        core = [q for q in qualified if q.rsplit("/", 1)[-1] not in chosen]
+        # sbctl signs every kernel it sees from its pacman and mkinitcpio hooks; it
+        # comes after the base system, once its keys exist.
+        late = {"sbctl"} if secure_boot else set()
+        core = [q for q in qualified if q.rsplit("/", 1)[-1] not in chosen | late]
         retrying(runner, ["pacstrap", "-K", str(TARGET), *core])
+        if secure_boot:
+            emit("progress", stage=5, text="Создаю собственные ключи Secure Boot этой системы…")
+            retrying(runner, ["arch-chroot", str(TARGET), "pacman", "-S", "--noconfirm", "--needed", "--",
+                              *[q for q in qualified if q.rsplit("/", 1)[-1] in late]])
+            runner.run(["arch-chroot", str(TARGET), "sbctl", "create-keys"])
         extra = [q for q in qualified if q.rsplit("/", 1)[-1] in chosen]
         for index in range(0, len(extra), BATCH):
             batch = extra[index:index + BATCH]
@@ -241,15 +436,32 @@ def install(request, runner):
             trim_cache(runner)
         trim_cache(runner)
 
+        hibernation = None
+        if hibernate:
+            emit("progress", stage=6, text=f"Создаю swap-файл для гибернации ({swap_size // GIB} ГиБ, по объёму RAM)…")
+            try:
+                offset = create_swapfile(runner, TARGET, config.filesystem, swap_size)
+            except ValidationError as exc:
+                raise ValidationError("Не удалось создать swap-файл для гибернации (нужно "
+                                      f"{swap_size // GIB} ГиБ свободного места в корне): {exc}") from exc
+            filesystem_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
+            hibernation = {"file": "/" + SWAPFILE, "size": swap_size, "resume_uuid": filesystem_uuid,
+                           "resume_offset": offset, "mode": hibernate_mode(hardware)}
+        resume = resume_parameter(hibernation["resume_uuid"], hibernation["resume_offset"]) if hibernation else None
+
         emit("progress", stage=6, text="Настраиваю загрузку, пользователя, сеть и выбранное окружение…")
         chroot = ["arch-chroot", str(TARGET)]
-        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]))
+        write_file("etc/fstab", runner.run(["genfstab", "-U", str(TARGET)]) + (swap_fstab_line() if hibernation else ""))
+        if hibernation and hibernation["mode"] == "shutdown":
+            write_file(HIBERNATE_MODE_FILE, "[Sleep]\nHibernateMode=shutdown\n")
         write_file("etc/hostname", config.hostname + "\n")
         write_file("etc/hosts", f"127.0.0.1 localhost\n::1 localhost\n127.0.1.1 {config.hostname}.localdomain {config.hostname}\n")
-        locales = list(dict.fromkeys(["en_US.UTF-8", config.locale]))
-        write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in locales))
-        write_file("etc/locale.conf", "LANG=" + config.locale + "\n")
-        write_file("etc/vconsole.conf", "KEYMAP=us\n")
+        write_file("etc/locale.gen", "".join(l + " UTF-8\n" for l in config.generated_locales()))
+        write_file("etc/locale.conf", config.locale_conf())
+        # The console font and keymap also go into the initramfs (keymap/consolefont or
+        # sd-vconsole hooks), so an encryption passphrase is typed with the same keymap.
+        check_console(config)
+        write_file("etc/vconsole.conf", config.vconsole_conf())
         runner.run([*chroot, "ln", "-sf", "/usr/share/zoneinfo/" + config.timezone, "/etc/localtime"])
         runner.run([*chroot, "locale-gen"])
         runner.run([*chroot, "useradd", "--user-group", "--create-home", "--groups", "wheel", "--shell", "/bin/bash", config.username])
@@ -264,18 +476,26 @@ def install(request, runner):
             ' Identifier "AGI keyboard"\n MatchIsKeyboard "on"\n'
             f' Option "XkbLayout" "{layouts}"\n Option "XkbOptions" "grp:alt_shift_toggle"\nEndSection\n')
         for path, content in config.home_files:
+            if not resolved(f"home/{config.username}/{path}").startswith(f"home/{config.username}/.config/"):
+                raise ValidationError("Файл настроек ведёт за пределы ~/.config: " + path)
             write_file(f"home/{config.username}/{path}", content)
         for path, content in config.system_files:
+            # A symlink already in the installed tree must not redirect a model file
+            # into a protected place (the validator only saw the literal path).
+            if not system_path_allowed(resolved(path)):
+                raise ValidationError("Системный файл ведёт в защищённое место: /" + path)
             write_file(path, content)
         runner.run([*chroot, "chown", "-R", config.username + ":" + config.username, "/home/" + config.username])
+        check_generated_files(config, runner)
         write_file("etc/systemd/zram-generator.conf", "[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n")
-        kernel_options = "rw"
-        if encrypted:
-            write_file("etc/mkinitcpio.conf.d/agi-encrypt.conf", ENCRYPT_HOOKS)
-            luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip()
-            kernel_options = f"cryptdevice=UUID={luks_uuid}:{CRYPT_NAME} root={root} rw"
-        for service in dict.fromkeys(["NetworkManager.service", "systemd-timesyncd.service", *config.services]):
+        if initramfs := initramfs_config(drivers, encrypted, hibernate):
+            write_file("etc/mkinitcpio.conf.d/agi-os.conf", initramfs)
+        luks_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root_partition]).strip() if encrypted else None
+        time_sync = ["systemd-timesyncd.service"] if config.time_sync else []
+        for service in dict.fromkeys(["NetworkManager.service", *time_sync, *drivers["services"], *config.services]):
             runner.run([*chroot, "systemctl", "enable", service])
+        if not config.time_sync and "systemd-timesyncd.service" not in config.services:
+            runner.run([*chroot, "systemctl", "disable", "systemd-timesyncd.service"])
         runner.run([*chroot, "systemctl", "set-default", "graphical.target" if config.session else "multi-user.target"])
         if config.session:
             sessions = [TARGET / "usr/share" / directory / (config.session + ".desktop")
@@ -286,18 +506,25 @@ def install(request, runner):
                 raise ValidationError("Для графической сессии не включён дисплейный менеджер")
         runner.run([*chroot, "mkinitcpio", "-P"])
         if config.bootloader == "grub":
-            if encrypted:
-                defaults = (TARGET / "etc/default/grub").read_text()
-                write_file("etc/default/grub", defaults + f'\nGRUB_CMDLINE_LINUX="cryptdevice=UUID={luks_uuid}:{CRYPT_NAME}"\n')
+            if encrypted or resume:
+                write_file("etc/default/grub", grub_defaults((TARGET / "etc/default/grub").read_text(), luks_uuid, resume))
             args = [*chroot, "grub-install"]
             args += (["--target=x86_64-efi", "--efi-directory=/boot", "--bootloader-id=AGIOS",
                       "--removable", "--no-nvram"] if firmware == "uefi" else ["--target=i386-pc", config.disk])
             runner.run(args)
             runner.run([*chroot, "grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
         else:
+            if secure_boot:
+                # bootctl installs the .signed copy when it exists; sbctl re-signs it on updates.
+                runner.run([*chroot, "sbctl", "sign", "--save", "--output", SBCTL_EFI + ".signed", SBCTL_EFI])
             runner.run([*chroot, "bootctl", "--esp-path=/boot", "--no-variables", "install"])
+            if secure_boot:
+                runner.run([*chroot, "sbctl", "sign", "--save", "/boot/vmlinuz-linux"])
+                unsigned = sbctl_unsigned(runner.run([*chroot, "sbctl", "verify"]))
+                if unsigned:
+                    raise ValidationError("Не подписаны для Secure Boot: " + ", ".join(unsigned))
             root_uuid = runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip()
-            options = kernel_options if encrypted else f"root=UUID={root_uuid} rw"
+            options = boot_options(root_uuid, luks_uuid, resume)
             write_file("boot/loader/loader.conf", "default agi-os.conf\ntimeout 3\n")
             write_file("boot/loader/entries/agi-os.conf", "title AGI OS\nlinux /vmlinuz-linux\n"
                        f"initrd /initramfs-linux.img\noptions {options}\n")
@@ -312,7 +539,10 @@ def install(request, runner):
         runner.run([*chroot, "findmnt", "--verify", "--tab-file", "/etc/fstab"])
         record = {"id": uuid.uuid4().hex, "configuration": config.as_dict(), "packages": packages,
                   "root_uuid": runner.run(["blkid", "-s", "UUID", "-o", "value", root]).strip(),
-                  "firmware": firmware, "encrypted": encrypted, "swap": "zram",
+                  "firmware": firmware, "encrypted": encrypted, "swap": config.swap, "hibernation": hibernation,
+                  "secure_boot": {"signed": True, "enrolled": False} if secure_boot else None,
+                  "hardware": hardware, "drivers": drivers, "settings": config.settings_record(),
+                  "updates": {"timer": update.TIMER},
                   "status": "first_boot_pending"}
         write_file("var/lib/agi-os/installation.json", json.dumps(record, ensure_ascii=False, indent=2))
         write_file("usr/local/share/agi-os/verify.py", (HERE / "verify.py").read_text())
@@ -322,6 +552,12 @@ def install(request, runner):
                        "Name=AGI OS — First boot\nExec=agi-os-verify --gui\nTerminal=false\n")
             write_file("usr/share/applications/agi-os-verify.desktop", "[Desktop Entry]\nType=Application\n"
                        "Name=AGI OS — Verify installation\nExec=agi-os-verify --gui\nTerminal=false\nCategories=System;\n")
+        # Updates: agi-os-update, a daily check and, with a desktop, a reminder window.
+        files, units = update.target_files(bool(config.session), config.bootloader)
+        for path, content, mode in files:
+            write_file(path, content, mode)
+        for unit in units:
+            runner.run([*chroot, "systemctl", "enable", unit])
         runner.run(["sync"])
     finally:
         request.pop("password", None)
@@ -364,9 +600,13 @@ def main():
             runner.cancel.set()
 
         threading.Thread(target=watch_cancel, daemon=True).start()
+        LOG.info("install.start", "Установка начата")
         install(request, runner)
+        LOG.info("install.done", "Установка завершена")
     except (Exception, KeyboardInterrupt) as exc:
-        emit("error", text=str(exc) if isinstance(exc, (ValidationError, Cancelled))
+        known = isinstance(exc, (ValidationError, Cancelled))
+        LOG.error("install.failed", str(exc) if known else "Внутренняя ошибка установки", exc=None if known else exc)
+        emit("error", text=str(exc) if known
              else "Установка прервана внутренней ошибкой. Результат не считается готовым.")
         return 1
     return 0
