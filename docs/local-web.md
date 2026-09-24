@@ -59,6 +59,17 @@ until the user explicitly confirms a specific, described change.
      become real GPT entries at the same sectors (no data moves);
    - anything else → *copy*: fresh partitions, `rsync -aHAX`, then a checksum
      comparison pass; UUIDs in fstab/boot entries are regenerated.
+   *Alongside* another system (dual boot) on UEFI: with systemd-boot the
+   disk's existing ESP is shared, never formatted — systemd-boot goes to it
+   (`/efi`, with at least 2 MiB free) and lists Windows Boot Manager itself,
+   while the system's own `/boot` becomes an XBOOTLDR partition; GRUB keeps
+   its own ESP and gets a chainload entry for Windows. A hibernated Windows
+   (Fast Startup included, detected by `hiberfil.sys`) stops the installation
+   before anything is written; it is also never shrunk or used for a preview
+   file. BitLocker volumes are not shrunk; next to one, the page warns about
+   the recovery key and Secure Boot keys are not enrolled. After the
+   installation the entries of the other system's partitions (start, size,
+   type, UUID) are compared with the ones before.
    Finally missing hardware drivers are completed for the real computer (a
    failure is reported, never hidden), the initramfs is rebuilt, the boot loader is
    registered in firmware (BIOS GRUB or UEFI systemd-boot/GRUB) and a new

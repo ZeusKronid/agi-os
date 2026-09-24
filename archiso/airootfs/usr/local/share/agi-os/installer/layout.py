@@ -21,8 +21,9 @@ MIB = 2**20
 CRYPT_NAME = "cryptroot"
 BOOT_SIZE = GIB
 BIOS_BOOT_SIZE = 2 * MIB
-# sgdisk type codes.
-BIOS_BOOT, ESP, LINUX = "ef02", "ef00", "8300"
+# sgdisk type codes. XBOOTLDR: /boot next to an ESP shared with other systems.
+BIOS_BOOT, ESP, LINUX, XBOOTLDR = "ef02", "ef00", "8300", "ea00"
+ESP_GUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 MKFS_FORCE = {"ext4": "-F", "btrfs": "-f", "xfs": "-f", "f2fs": "-f"}
 
 
@@ -47,6 +48,9 @@ class Plan:
     partitions: tuple
     encrypted: bool
     filesystem: str
+    # Dual boot (CMP-151): the disk's existing ESP holds the boot loader, next to Windows
+    # Boot Manager; this system's /boot becomes an XBOOTLDR partition.
+    shared_esp: bool = False
 
     def part(self, role):
         return next(p for p in self.partitions if p.role == role)
@@ -55,18 +59,22 @@ class Plan:
         return partition_path(disk, self.part(role).number)
 
 
-def plan_for(config, firmware, encrypted=False):
-    """The layout of a whole-disk installation for this configuration and firmware."""
+def plan_for(config, firmware, encrypted=False, shared_esp=False):
+    """The layout of this configuration for the firmware: a whole disk, or with shared_esp
+    the system's partitions next to other systems that keep their ESP."""
     if firmware not in ("uefi", "bios"):
         raise ValidationError("Unknown firmware type")
+    if shared_esp and (firmware != "uefi" or config.bootloader != "systemd-boot"):
+        raise ValidationError("Only systemd-boot on UEFI shares the existing EFI system partition")
     parts = []
     if firmware == "bios":
         parts.append(Partition(1, "bios", BIOS_BOOT_SIZE, BIOS_BOOT, "BIOS", None))
     number = len(parts) + 1
-    parts.append(Partition(number, "boot", BOOT_SIZE, ESP if firmware == "uefi" else LINUX, "AGI-BOOT",
+    boot_type = XBOOTLDR if shared_esp else ESP if firmware == "uefi" else LINUX
+    parts.append(Partition(number, "boot", BOOT_SIZE, boot_type, "AGI-BOOT",
                            "vfat" if firmware == "uefi" else "ext4"))
     parts.append(Partition(number + 1, "root", None, LINUX, "AGI-ROOT", None))
-    return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem)
+    return Plan(firmware, "gpt", tuple(parts), bool(encrypted), config.filesystem, bool(shared_esp))
 
 
 def table_commands(plan, disk):

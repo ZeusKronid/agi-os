@@ -48,6 +48,12 @@ TYPES = {'bios': layout.BIOS_BOOT, 'boot': layout.ESP, 'linux': layout.LINUX}
 # setuid bits, device nodes or executables on the Live host.
 SOURCE_MOUNT = 'ro,nosuid,nodev,noexec'
 LOG = Logger('finalize')
+MIB = 2**20
+# systemd-boot on a shared ESP: two copies of its ~150 KiB loader and loader.conf.
+ESP_ROOM = 2 * MIB
+WINDOWS_LOADER = 'EFI/Microsoft/Boot/bootmgfw.efi'
+BITLOCKER_NOTE = ('Windows on this disk uses BitLocker. Keep its recovery key at hand: Windows may ask for it once '
+                  'because the computer now starts through another boot manager.')
 
 
 def run_json(runner, args):
@@ -213,9 +219,74 @@ def free_regions(runner, disk_path, size):
     return [((s + ALIGN - 1) // ALIGN * ALIGN, (e + 1) // ALIGN * ALIGN - 1) for s, e in regions]
 
 
-def promote(runner, request, disk, source, firmware):
+def windows_guard(disk, layout_name, enroll):
+    """Windows next to the new system must be in a state that survives it (CMP-151). A
+    hibernated Windows (Fast Startup included) resumes with a stale view of the disk, so
+    installing alongside it is refused before anything is written. BitLocker measures the
+    Secure Boot keys: enrolling new ones would make Windows ask for its recovery key."""
+    warnings = []
+    if layout_name != 'alongside':
+        return warnings
+    for part in disk['partitions']:
+        if part.get('fstype') == 'ntfs' and not part['mounted']:
+            state = storage_worker.hibernated(part)
+            if state is None:
+                raise ValidationError(f'Windows on {part["path"]} could not be checked, so nothing was installed. '
+                                      'Start Windows, run “chkdsk /f”, shut it down fully and try again.')
+            if state:
+                raise ValidationError(f'Windows on {part["path"]} is hibernated or was shut down with Fast Startup; '
+                                      'installing next to it now could corrupt it. Start Windows, turn off Fast Startup, '
+                                      'hold Shift while you click Shut down, and try again. Nothing was changed.')
+        if part.get('fstype') == 'BitLocker':
+            if enroll:
+                raise ValidationError('Windows on this disk uses BitLocker: enrolling Secure Boot keys would make it ask '
+                                      'for the recovery key at every start. Install without enrolling the keys; after '
+                                      'suspending BitLocker in Windows you can enroll them with sudo sbctl enroll-keys --microsoft.')
+            if BITLOCKER_NOTE not in warnings:
+                warnings.append(BITLOCKER_NOTE)
+    return warnings
+
+
+def existing_esp(runner, disk):
+    """The EFI system partition already on the target (Windows' or another system's), or None."""
+    if disk.get('pttype') != 'gpt':
+        return None
+    table = run_json(runner, ['sfdisk', '--json', disk['path']])['partitiontable']
+    return next((p['node'] for p in table.get('partitions', [])
+                 if str(p.get('type', '')).upper() == layout.ESP_GUID), None)
+
+
+def inspect_esp(runner, node, point):
+    """Free bytes on an existing ESP and whether Windows Boot Manager lives there; read-only."""
+    point.mkdir(exist_ok=True)
+    runner.run(['mount', '-o', SOURCE_MOUNT, node, str(point)])
+    try:
+        stat = os.statvfs(point)
+        return stat.f_bavail * stat.f_frsize, (point / WINDOWS_LOADER).is_file()
+    finally:
+        runner.run(['umount', str(point)])
+
+
+def kept_partitions(runner, target, skip=()):
+    """Identity of every partition of other systems on the target: it must not change."""
+    table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
+    return {(int(p['start']), int(p['size']), str(p.get('type', '')).upper(), str(p.get('uuid', '')).upper())
+            for p in table.get('partitions', []) if p['node'] not in skip}
+
+
+def windows_entry(esp_uuid):
+    """A GRUB menu entry that chainloads Windows Boot Manager from its own ESP."""
+    return ('#!/bin/sh\nexec tail -n +3 "$0"\n'
+            "menuentry 'Windows Boot Manager' --class windows --class os {\n"
+            '    insmod part_gpt\n    insmod fat\n'
+            f'    search --no-floppy --fs-uuid --set=root {esp_uuid}\n'
+            f'    chainloader /{WINDOWS_LOADER}\n}}\n')
+
+
+def promote(runner, request, disk, source, plan):
     """Turn the nested partitions of the preview partition into real disk partitions."""
     target = disk['path']
+    firmware = plan.firmware
     preview = request['image']['path']
     table = run_json(runner, ['sfdisk', '--json', target])['partitiontable']
     entry = next((p for p in table['partitions'] if p['node'] == preview), None)
@@ -239,7 +310,7 @@ def promote(runner, request, disk, source, firmware):
         start, end = base + int(part['start']), base + int(part['start']) + int(part['size']) - 1
         name = part.get('name', '')
         kind = 'bios' if name == 'BIOS' else 'boot' if name == 'AGI-BOOT' else 'linux'
-        typecode = TYPES[kind] if not (kind == 'boot' and firmware == 'bios') else TYPES['linux']
+        typecode = plan.part('boot').typecode if kind == 'boot' else TYPES[kind]
         args += [f'--new=0:{start}:{end}', f'--typecode=0:{typecode}', f'--change-name=0:{name or "AGI-ROOT"}']
         kinds[kind] = (start, end)
     runner.run(args + [target])
@@ -437,17 +508,24 @@ def enroll_or_warn(runner, chroot, record):
         emit('final-warning', text=warning)
 
 
+def live_firmware():
+    return 'uefi' if Path('/sys/firmware/efi').is_dir() else 'bios'
+
+
 def finalize(request, runner):
     config, disk = checked_request(request)
     target = config.disk
-    firmware = 'uefi' if Path('/sys/firmware/efi').is_dir() else 'bios'
+    firmware = live_firmware()
     plan = layout.plan_for(config, firmware)
     passphrase = request.pop('passphrase')
     mount = Path(tempfile.mkdtemp(prefix='agi-final-', dir='/mnt'))
     source = Source(runner, request['image'])
     opened_target = False
     dst = None
+    efi_mounted = False
     try:
+        # Before the preview is even opened: nothing is written while Windows is not safe.
+        notes = windows_guard(disk, request['layout'], request['enroll_keys'])
         emit('final-progress', text='Opening the preview for checking')
         source.attach()
         src_root, encrypted = source.open_root(plan.part('root').number, passphrase)
@@ -455,9 +533,21 @@ def finalize(request, runner):
         check_record(record, config, firmware, encrypted)
         if source.opened:
             runner.run(['cryptsetup', 'close', SOURCE_MAP]); source.opened = False
+        esp, windows = None, False
+        if request['layout'] == 'alongside' and firmware == 'uefi':
+            esp = existing_esp(runner, disk)
+        if esp:
+            free, windows = inspect_esp(runner, esp, mount / 'esp')
+            if config.bootloader == 'systemd-boot':
+                if free < ESP_ROOM:
+                    raise ValidationError(f'The EFI system partition {esp} has only {free // MIB} MiB free; systemd-boot '
+                                          f'needs {ESP_ROOM // MIB} MiB there. Nothing was changed.')
+                plan = layout.plan_for(config, firmware, shared_esp=True)
+        preview = request['image']['path'] if request['image']['on_target'] else None
+        kept = kept_partitions(runner, target, {preview}) if request['layout'] == 'alongside' and disk.get('pttype') else None
         if request['image']['on_target']:
             source.detach()
-            boot, root_partition, _ = promote(runner, request, disk, source, firmware)
+            boot, root_partition, _ = promote(runner, request, disk, source, plan)
             root = root_partition
             if encrypted:
                 runner.run(['cryptsetup', 'open', '--key-file', '-', root_partition, TARGET_MAP], input_text=passphrase)
@@ -478,6 +568,16 @@ def finalize(request, runner):
             moved = True
         passphrase = None
         chroot = ['arch-chroot', str(dst)]
+        if plan.shared_esp:
+            emit('final-progress', text=f'Sharing the EFI system partition {esp} with the other system (not formatted)')
+            (dst / 'efi').mkdir(exist_ok=True)
+            runner.run(['mount', '-o', 'umask=0077', esp, str(dst / 'efi')])
+            efi_mounted = True
+            if not moved:
+                # genfstab runs only after a copy; a promoted system keeps its fstab and gains /efi.
+                esp_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', esp]).strip()
+                with open(dst / 'etc/fstab', 'a') as fstab:
+                    fstab.write(f'UUID={esp_uuid} /efi vfat umask=0077 0 2\n')
         if moved:
             emit('final-progress', text='Updating partition IDs in the new system')
             root_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', root]).strip()
@@ -498,9 +598,24 @@ def finalize(request, runner):
         emit('final-progress', text='Rebuilding initramfs for this computer’s hardware')
         runner.run([*chroot, 'mkinitcpio', '-P'])
         emit('final-progress', text='Registering the boot of the installed system')
-        if config.bootloader == 'systemd-boot':
+        if config.bootloader == 'systemd-boot' and plan.shared_esp:
+            # systemd-boot reads loader.conf only from the ESP; kernels and entries stay on
+            # the XBOOTLDR /boot, and Windows Boot Manager on the ESP gets its menu entry.
+            conf = dst / 'efi/loader/loader.conf'
+            if not conf.exists():
+                conf.parent.mkdir(parents=True, exist_ok=True)
+                own = dst / 'boot/loader/loader.conf'
+                conf.write_text(own.read_text() if own.is_file() else 'default agi-os.conf\ntimeout 3\n')
+            runner.run([*chroot, 'bootctl', '--esp-path=/efi', '--boot-path=/boot', 'install'])
+        elif config.bootloader == 'systemd-boot':
             runner.run([*chroot, 'bootctl', '--esp-path=/boot', 'install'])
         elif firmware == 'uefi':
+            if windows:
+                esp_uuid = runner.run(['blkid', '-s', 'UUID', '-o', 'value', esp]).strip()
+                entry = dst / 'etc/grub.d/35_agios_windows'
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_text(windows_entry(esp_uuid))
+                entry.chmod(0o755)
             runner.run([*chroot, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--bootloader-id=AGIOS', '--removable'])
             runner.run([*chroot, 'grub-install', '--target=x86_64-efi', '--efi-directory=/boot', '--bootloader-id=AGIOS'])
             runner.run([*chroot, 'grub-mkconfig', '-o', '/boot/grub/grub.cfg'])
@@ -521,6 +636,14 @@ def finalize(request, runner):
                 warning = 'Подписи Secure Boot не подтверждены: ' + ', '.join(unsigned)[:300] + '. Выполните sudo sbctl verify'
                 record['warnings'] = record.get('warnings', []) + [warning]
                 emit('final-warning', text=warning)
+        if kept is not None and kept - kept_partitions(runner, target):
+            raise ValidationError('A partition of another system on the disk changed during the installation. '
+                                  'Do not start that system before checking it; the GPT backup is in /run.')
+        if esp:
+            record['dual_boot'] = {'esp': esp, 'shared_esp': plan.shared_esp, 'windows': windows}
+        for note in notes:
+            emit('final-warning', text=note)
+        record['warnings'] = record.get('warnings', []) + notes
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
         record['finalization'] = {'preview_id': record['id'], 'target': target, 'mode': 'copy' if moved else 'promote',
                                   'layout': request['layout'], 'target_fingerprint': disk['fingerprint'], 'live_firmware': firmware}
@@ -529,6 +652,8 @@ def finalize(request, runner):
         record['status'] = 'final_first_boot_pending'
         (dst / 'var/lib/agi-os/installation.json').write_text(json.dumps(record, ensure_ascii=False, indent=2))
         runner.run(['sync'])
+        if efi_mounted:
+            runner.run(['umount', str(dst / 'efi')])
         runner.run(['umount', str(dst / 'boot')])
         runner.run(['umount', str(dst)])
         dst = None
@@ -544,7 +669,7 @@ def finalize(request, runner):
         if opened_target:
             subprocess.run(['cryptsetup', 'close', TARGET_MAP], capture_output=True)
         source.detach()
-        for child in ('source', 'target'):
+        for child in ('source', 'target', 'esp'):
             try: (mount / child).rmdir()
             except OSError: pass
         try: mount.rmdir()
