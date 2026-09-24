@@ -10,7 +10,8 @@
     "Preferences": {
       "browser.translations.automaticallyPopup": {"Value": false, "Status": "default"},
       "datareporting.policy.dataSubmissionPolicyBypassNotification": {"Value": true, "Status": "locked"},
-      "signon.generation.enabled": {"Value": false, "Status": "locked"}
+      "signon.generation.enabled": {"Value": false, "Status": "locked"},
+      "browser.tabs.inTitlebar": {"Value": 0, "Status": "default"}
     }
   }
 }

@@ -20,4 +20,5 @@ file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/usr/local/bin/agi-installer"]="0:0:755"
+  ["/usr/local/bin/agi-desktop"]="0:0:755"
 )

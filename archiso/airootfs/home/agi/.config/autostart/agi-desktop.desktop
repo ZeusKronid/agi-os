@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=AGIOS — Helios wallpaper
+Exec=agi-desktop backdrop
+Terminal=false
+NoDisplay=true

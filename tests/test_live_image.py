@@ -2,10 +2,12 @@
 
 import configparser
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "archiso"
@@ -109,6 +111,59 @@ class WebsiteLayoutTests(unittest.TestCase):
         rules = [line for line in css.splitlines() if line.startswith(".notice {")]
         self.assertIn("flex-wrap: nowrap", rules[-1])
         self.assertIn("#orphanList { display: block; }", css)
+
+
+class HeliosDesktopTests(unittest.TestCase):
+    XFCONF = AIROOTFS / "home/agi/.config/xfce4/xfconf/xfce-perchannel-xml"
+
+    def channel(self, name):
+        return ElementTree.parse(self.XFCONF / f"{name}.xml").getroot()
+
+    def test_panel_launchers_and_icons_exist(self):
+        panel = self.channel("xfce4-panel")
+        plugins = panel.find("property[@name='plugins']")
+        launchers = [p for p in plugins if p.get("value") == "launcher"]
+        self.assertEqual(len(launchers), 3)
+        for plugin in launchers:
+            number = plugin.get("name").removeprefix("plugin-")
+            for item in plugin.find("property[@name='items']"):
+                path = AIROOTFS / f"home/agi/.config/xfce4/panel/launcher-{number}" / item.get("value")
+                self.assertTrue(path.is_file(), path)
+        for prop in panel.iter("property"):
+            if prop.get("name") == "button-icon":
+                self.assertTrue((AIROOTFS / prop.get("value").lstrip("/")).is_file())
+
+    def test_window_theme_has_every_image_for_its_buttons(self):
+        general = self.channel("xfwm4").find("property[@name='general']")
+        settings = {p.get("name"): p.get("value") for p in general}
+        theme = AIROOTFS / "usr/share/themes" / settings["theme"] / "xfwm4"
+        self.assertTrue((theme / "themerc").is_file())
+        buttons = {"H": "hide", "M": "maximize", "C": "close"}
+        names = [buttons[key] for key in settings["button_layout"] if key in buttons]
+        names += ["maximize-toggled", "top-left", "top-right", "left", "right", "bottom"]
+        names += [f"title-{n}" for n in range(1, 6)]
+        for name in names:
+            states = ("active", "inactive") if not name.startswith(tuple(buttons.values())) \
+                else ("active", "inactive", "prelight", "pressed")
+            for state in states:
+                self.assertTrue((theme / f"{name}-{state}.png").is_file(), f"{name}-{state}")
+
+    def test_installer_window_and_wallpaper_share_the_horizon(self):
+        # agi-desktop stands the installer window on the wallpaper's horizon: both need the same numbers.
+        render = (ROOT / "scripts/live-desktop/render.py").read_text()
+        helper = (AIROOTFS / "usr/local/bin/agi-desktop").read_text()
+        width, height = re.search(r"^WIDTH, HEIGHT = (\d+), (\d+)", render, re.M).groups()
+        horizon = re.search(r"^HORIZON = ([\d.]+)", render, re.M).group(1)
+        self.assertIn(f"image_width={width} image_height={height} horizon={horizon}", helper)
+        wallpaper = re.search(r"^wallpaper=(\S+)", helper, re.M).group(1)
+        self.assertTrue((AIROOTFS / wallpaper.lstrip("/")).is_file())
+        self.assertIn('["/usr/local/bin/agi-desktop"]="0:0:755"', (PROFILE / "profiledef.sh").read_text())
+        self.assertIn("agi-desktop place", (AIROOTFS / "usr/local/bin/agi-installer").read_text())
+        self.assertTrue({"wmctrl", "xfce4-notifyd"} <= packages())
+
+    def test_every_channel_is_valid_xml(self):
+        for path in self.XFCONF.glob("*.xml"):
+            self.assertEqual(ElementTree.parse(path).getroot().get("name"), path.stem, path)
 
 
 class ChatGPTIsolationTests(unittest.TestCase):
