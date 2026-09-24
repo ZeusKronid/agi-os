@@ -568,6 +568,7 @@ class DualBootFinalizeTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
         self.tmp, self.calls, self.promoted = tmp, [], False
+        self.foreign_fallback = False
         self.esp_guid = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
         self.basic = 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7'
 
@@ -597,6 +598,12 @@ class DualBootFinalizeTests(unittest.TestCase):
             (root / 'boot/loader').mkdir(parents=True)
             (root / 'boot/loader/loader.conf').write_text('default agi-os.conf\ntimeout 3\n')
             (root / 'var/lib/agi-os').mkdir(parents=True)
+            if self.foreign_fallback:
+                fallback = root / 'efi/EFI/BOOT/BOOTX64.EFI'
+                fallback.parent.mkdir(parents=True)
+                fallback.write_bytes(b'foreign fallback loader')
+        if 'bootctl' in args and self.foreign_fallback:
+            (self.tmp / 'target/efi/EFI/BOOT/BOOTX64.EFI').write_bytes(b'systemd-boot fallback loader')
         return ''
 
     def finalize(self, bootloader='systemd-boot', enroll=False, hibernated=False, fstype='ntfs'):
@@ -633,6 +640,7 @@ class DualBootFinalizeTests(unittest.TestCase):
         return record, emit
 
     def test_systemd_boot_shares_the_windows_esp(self):
+        self.foreign_fallback = True
         record, _ = self.finalize()
         new = next(c for c in self.calls if c[0] == 'sgdisk' and any(a.startswith('--new') for a in c))
         self.assertIn('--typecode=0:ea00', new)  # /boot becomes XBOOTLDR, not a second ESP
@@ -644,6 +652,8 @@ class DualBootFinalizeTests(unittest.TestCase):
         bootctl = next(c for c in self.calls if 'bootctl' in c)
         self.assertEqual(bootctl[-3:], ['--esp-path=/efi', '--boot-path=/boot', 'install'])
         self.assertEqual((target / 'efi/loader/loader.conf').read_text(), 'default agi-os.conf\ntimeout 3\n')
+        self.assertEqual((target / 'efi/EFI/BOOT/BOOTX64.EFI').read_bytes(), b'foreign fallback loader')
+        self.assertIn(['arch-chroot', str(target), 'systemctl', 'disable', 'systemd-boot-update.service'], self.calls)
         self.assertIn('UUID=ESP-UUID /efi vfat umask=0077 0 2', (target / 'etc/fstab').read_text())
         self.assertEqual(record['dual_boot'], {'esp': self.ESP, 'shared_esp': True, 'windows': True})
         umounts = [c[1] for c in self.calls if c[0] == 'umount']
