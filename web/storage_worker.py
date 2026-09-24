@@ -682,6 +682,11 @@ def prepare(request):
         part = next(p for p in inventory_disk(disk)['partitions'] if p['path'] == device)
         if part['mounted']:
             raise ValidationError('The partition is mounted')
+        # Probe only described the filesystem at the place step. Data may have
+        # been added since then, so reject before e2fsck -y or any resize write.
+        room = shrink_room(part)
+        if room is None or room < needed:
+            raise ValidationError('The partition no longer has enough safely shrinkable space; refresh the options')
         new_size = (part['size'] - needed) // MIB * MIB
         if new_size < GIB:
             raise ValidationError('The partition is too small to free the space needed')
