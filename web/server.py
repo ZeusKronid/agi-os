@@ -297,7 +297,8 @@ class State:
                                        and self.preview['image']['path'].startswith(self.built['consent']['target'])),
                      'revert': self.preview['option']['revert'] if self.preview else None}
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
-                'error': self.error, 'model': self.provider.model, 'login_url': self.login_url,
+                'error': self.error, 'model': self.provider.model, 'provider': getattr(self.provider, 'label', ''),
+                'login_url': self.login_url,
                 'firmware': snapshot['firmware'], 'found': self.found_public(),
                 'scanning': bool(self.scan_task and not self.scan_task.done()), 'scan_error': self.scan_error,
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
@@ -565,6 +566,21 @@ async def configure(request):
         state.provider = state.controller.provider = provider
         log.info('provider.connected', f'Model connected: {kind}', kind=kind, model=provider.model)
     return web.json_response(state.public())
+
+
+async def provider_models(request):
+    """The models an API provider offers to this key, so the user picks one instead of typing
+    its id. The key is used for this one request and not kept."""
+    data = await request.json()
+    kind = data.get('kind')
+    if kind not in PROVIDERS or kind == 'chatgpt':
+        raise ValidationError('Pick an API provider')
+    provider = APIProvider(kind, data.get('endpoint') or PROVIDERS[kind][1], data.get('key', ''))
+    try:
+        models = await asyncio.to_thread(provider.models)
+    finally:
+        provider.close()
+    return web.json_response({'models': sorted(set(models))[:500]})
 
 
 def vm_size(data):
@@ -977,6 +993,7 @@ def application(port=8787, guacd_port=14822):
     app.router.add_post('/api/chat', chat)
     app.router.add_post('/api/chat/cancel', chat_cancel)
     app.router.add_post('/api/provider', configure)
+    app.router.add_post('/api/provider/models', provider_models)
     app.router.add_post('/api/plan', plan)
     app.router.add_post('/api/build', build)
     app.router.add_post('/api/stop', stop)
