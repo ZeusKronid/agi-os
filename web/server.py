@@ -15,7 +15,7 @@ from aiohttp import web
 
 from settings import SOURCE_ROOT as ROOT, ENGINE, DATA_ROOT, FONTS, GUACAMOLE_JS
 sys.path.insert(0, str(ENGINE))
-from controller import Controller
+from controller import Cancelled, Controller, Turn
 from english import english
 from domain import Configuration, ValidationError, hibernation_swap_size
 from providers import APIProvider, ProviderError, PROVIDERS
@@ -82,6 +82,8 @@ class State:
         self.final_task = None
         self.plan = None
         self.lock = asyncio.Lock()
+        self.turn = None         # the running request to the model, cancellable from the page
+        self.turn_stop = asyncio.Event()
         self.login_url = None
         self.provider = LiveProvider()
         self.controller = Controller(target_inventory(), self.provider, notify=self.notify)
@@ -273,6 +275,12 @@ class State:
         except ValidationError as exc:
             return {'error': str(exc), 'target': config.disk}
 
+    def rebuild_needed(self, config):
+        """The agent changed the configuration after the preview was built: the preview
+        (and Install) still hold the previous one until the user rebuilds explicitly."""
+        return bool(config and self.built and self.final['phase'] != 'complete'
+                    and Configuration.parse(self.built['configuration']).digest() != config.digest())
+
     def public(self):
         config = self.controller.configuration
         consent = self.current_consent()
@@ -295,6 +303,9 @@ class State:
                 'scanning': bool(self.scan_task and not self.scan_task.done()), 'scan_error': self.scan_error,
                 'disks': [{k: d.get(k) for k in ('path', 'size', 'model', 'serial', 'eligible', 'reason', 'partitions')} for d in snapshot['disks']],
                 'configuration': config.as_dict() if config else None,
+                'configuration_kept': bool(config and self.controller.kept),
+                'turn': self.turn.public() if self.turn else None,
+                'rebuild_needed': self.rebuild_needed(config),
                 'files': config_files(config),
                 'summary': config.summary(consent['disk'], snapshot['hardware']) if config and consent and 'disk' in consent else None,
                 'login': config.login_entries() if config else [],
@@ -477,19 +488,58 @@ async def chat(request):
         if state.controller.installing:
             raise web.HTTPConflict(text='Wait for the installation to finish')
         state.error = None
-        state.messages.append({'role': 'user', 'content': text})
+        message = {'role': 'user', 'content': text}
+        state.messages.append(message)
         state.status = 'The agent is thinking about the configuration…'
+        turn = state.turn = Turn(lambda value: state.notify('status', value))
+        state.turn_stop.clear()
+        stopper = asyncio.ensure_future(state.turn_stop.wait())
         try:
             await asyncio.to_thread(state.refresh_inventory)
-            reply = await asyncio.to_thread(state.controller.respond, text)
+            work = asyncio.ensure_future(asyncio.to_thread(state.controller.respond, text, turn))
+            await asyncio.wait({work, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if not work.done():
+                # Cancelled from the page. The controller refuses to commit this turn, so a
+                # late answer (an API request cannot be interrupted) changes nothing.
+                work.add_done_callback(lambda task: task.exception())
+                raise Cancelled('cancelled')
+            reply = work.result()
             state.messages.append({'role': 'assistant', 'content': reply['message'], 'suggestions': reply['suggestions']})
-            state.status = 'Configuration ready: next, find room for the preview' if state.controller.configuration else 'Let’s keep talking'
-            state.plan = None
+            kept = state.controller.kept
+            state.status = ('Configuration unchanged: the agent’s reply did not change it' if kept
+                            else 'Configuration ready: next, find room for the preview' if state.controller.configuration
+                            else 'Let’s keep talking')
+            if not kept:
+                state.plan = None
+        except Cancelled:
+            # The message goes back to the input box; the conversation is as before it.
+            state.turn = None
+            state.messages = [m for m in state.messages if m is not message]
+            state.status = 'Request cancelled. Nothing changed'
+            log.info('chat.cancelled', 'Запрос к модели отменён', seconds=round(time.time() - turn.started, 1),
+                     model=state.provider.model)
+            state.persist()
+            return web.json_response({**state.public(), 'cancelled': text})
         except Exception as exc:
             state.error = english(str(exc))
             state.status = 'The agent did not reply'
             log.warning('chat.failed', 'Ответ агента не получен: ' + str(exc), exc=exc, model=state.provider.model)
+        finally:
+            stopper.cancel()
+            state.turn = None
         state.persist()
+    return web.json_response(state.public())
+
+
+async def chat_cancel(request):
+    """Stop waiting for the model. A reply that already arrived stands."""
+    state = request.app['state']
+    turn = state.turn
+    if turn is None:
+        raise ValidationError('No request to cancel')
+    if state.controller.cancel(turn):
+        state.turn_stop.set()
+        state.status = 'Cancelling the request…'
     return web.json_response(state.public())
 
 
@@ -796,10 +846,15 @@ async def finalize_task(state, payload):
         complete, mode = False, None
         async for line in process.stdout:
             event = json.loads(line)
-            state.final['events'].append(event)
+            events = state.final['events']
+            if event.get('step') and events and events[-1].get('step') == event['step']:
+                events[-1] = event  # A step's next percentage replaces its previous one.
+            else:
+                events.append(event)
             state.status = event.get('text', state.status)
-            log.log('error' if event.get('kind') == 'final-error' else 'warning' if event.get('kind') == 'final-warning' else 'info',
-                    'finalize.event.' + str(event.get('kind')), str(event.get('text', '')))
+            if event.get('percent') is None or event['percent'] % 25 == 0:
+                log.log('error' if event.get('kind') == 'final-error' else 'warning' if event.get('kind') == 'final-warning' else 'info',
+                        'finalize.event.' + str(event.get('kind')), str(event.get('text', '')))
             if event['kind'] == 'final-warning':
                 state.final.setdefault('warnings', []).append(event['text'])
             if event['kind'] == 'finalized':
@@ -924,6 +979,7 @@ def application(port=8787, guacd_port=14822):
     app['hosts'] = {f'localhost:{port}', f'127.0.0.1:{port}'}
     app.router.add_get('/api/state', state_get)
     app.router.add_post('/api/chat', chat)
+    app.router.add_post('/api/chat/cancel', chat_cancel)
     app.router.add_post('/api/provider', configure)
     app.router.add_post('/api/plan', plan)
     app.router.add_post('/api/build', build)

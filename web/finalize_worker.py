@@ -20,6 +20,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -308,9 +309,11 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     runner.run(['mount', root, str(dst)])
     (dst / 'boot').mkdir()
     runner.run(['mount', boot, str(dst / 'boot')])
-    emit('final-progress', text='Copying the checked system file by file')
+    emit('final-progress', text='Copying the checked system file by file', step='copy', percent=0)
     excludes = ['--exclude=/boot/*', *[f'--exclude=/{path}' for path in skip]]
-    runner.run(['rsync', '-aHAX', '--numeric-ids', *excludes, f'{src_mount}/', f'{dst}/'], timeout=14400)
+    # --no-inc-recursive: rsync counts all files first, so its overall percentage is steady.
+    runner.run(['rsync', '-aHAX', '--numeric-ids', '--info=progress2', '--no-inc-recursive', *excludes, f'{src_mount}/', f'{dst}/'],
+               timeout=14400, progress=copy_progress('Copying the checked system file by file'))
     # The boot partition is FAT on UEFI: copy contents without POSIX ownership or modes.
     runner.run(['rsync', '-rt', '--no-perms', '--no-owner', '--no-group', '--modify-window=2', f'{src_mount}/boot/', f'{dst}/boot/'], timeout=3600)
     emit('final-progress', text='Verifying the copy by checksums')
@@ -322,6 +325,20 @@ def copy(runner, request, disk, source, firmware, passphrase, mount, skip=(), re
     runner.run(['umount', str(src_mount)])
     source.mount = None
     return boot, root_partition, root, encrypted, dst
+
+
+def copy_progress(text):
+    """The overall percentage rsync --info=progress2 prints, as a final-progress event for
+    each new whole percent (the site shows the longest step of the copy moving)."""
+    last = [0]
+
+    def output(chunk):
+        found = re.findall(r'(\d{1,3})%', chunk)
+        percent = min(100, int(found[-1])) if found else last[0]
+        if percent > last[0]:
+            last[0] = percent
+            emit('final-progress', text=f'{text}: {percent}%', step='copy', percent=percent)
+    return output
 
 
 def swapfile_size(record):
