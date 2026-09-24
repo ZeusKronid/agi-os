@@ -16,7 +16,7 @@ def read_command(args, timeout=30):
     result = subprocess.run(args, text=True, capture_output=True, timeout=timeout,
                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     if result.returncode:
-        raise ValidationError(f"Не выполнена проверка: {args[0]}")
+        raise ValidationError(f"Check failed: {args[0]}")
     return result.stdout
 
 
@@ -44,7 +44,7 @@ def inventory():
         if disk["type"] != "disk":
             continue
         disk["eligible"] = not (disk["ro"] or in_use(disk) or disk["size"] < 12 * 2**30)
-        disk["reason"] = "" if disk["eligible"] else "Диск занят, доступен только для чтения или меньше 12 ГиБ"
+        disk["reason"] = "" if disk["eligible"] else "The disk is in use, read-only or smaller than 12 GiB"
         disk["fingerprint"] = fingerprint(disk)
         disk["partitions"] = [
             {k: child.get(k) for k in ("path", "size", "fstype", "label", "partlabel", "start")}
@@ -58,7 +58,7 @@ def inventory():
 def selected_disk(snapshot, path):
     disk = next((d for d in snapshot["disks"] if d["path"] == path), None)
     if not disk or not disk["eligible"]:
-        raise ValidationError("Выбранный диск недоступен для установки. Обновите список дисков.")
+        raise ValidationError("The selected disk can’t be used. Refresh the disk list.")
     return disk
 
 
@@ -76,8 +76,8 @@ class Catalog:
                 read_command(["sudo", "-n", "/usr/bin/pacman", "-Sy", "--noconfirm"], timeout=180)
             output = read_command(["pacman", "-Sl", "core", "extra"], timeout=60)
             if not output.strip():
-                raise ValidationError("Каталог пакетов пуст. Проверьте сеть и повторите запрос: "
-                                      "доступность пакетов пока не подтверждена.")
+                raise ValidationError("The package catalog is empty. Check the network and try again: "
+                                      "packages are not confirmed yet.")
             self.entries = {}
             for line in output.splitlines():
                 fields = line.split()
@@ -94,7 +94,7 @@ class Catalog:
         entries = self.load()
         missing = [p for p in packages if p not in entries]
         if missing:
-            raise ValidationError("Пакеты не найдены в core/extra: " + ", ".join(missing))
+            raise ValidationError("Packages not found in core/extra: " + ", ".join(missing))
         return [entries[p]["repository"] + "/" + p for p in packages]
 
     def estimate(self, packages):
@@ -125,7 +125,7 @@ class Catalog:
 
 def demo_inventory():
     disk = {"name": "vda", "path": "/dev/vda", "size": 64 * 2**30, "type": "disk", "tran": "nvme", "rota": False,
-            "model": "Демонстрационный диск", "serial": "DEMO-ONLY", "wwn": "", "maj:min": "0:0",
+            "model": "Demo disk", "serial": "DEMO-ONLY", "wwn": "", "maj:min": "0:0",
             "eligible": True, "reason": "", "children": []}
     disk["fingerprint"] = fingerprint(disk)
     return {"live": False, "firmware": "uefi", "cpu_count": 4, "disks": [disk], "hardware": hardware_module.demo()}

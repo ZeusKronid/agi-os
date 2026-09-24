@@ -93,23 +93,23 @@ def regional_checks(settings, locale_conf, system_root, graphical):
     checks = {}
     formats = [line for line in settings["locale_conf"] if line.startswith("LC_")]
     if formats:
-        checks["Форматы: " + ", ".join(formats)] = set(formats) <= set(locale_conf)
+        checks["Formats: " + ", ".join(formats)] = set(formats) <= set(locale_conf)
     available = {normalized_locale(l) for l in command(["locale", "-a"])[1].splitlines()}
-    checks["Локали сгенерированы: " + ", ".join(settings["locales"])] = all(
+    checks["Locales generated: " + ", ".join(settings["locales"])] = all(
         normalized_locale(l) in available for l in settings["locales"])
     vconsole = conf_values(system_root / "etc/vconsole.conf")
     kbd = system_root / "usr/share/kbd"
-    checks["Консоль: раскладка " + settings["keymap"]] = vconsole.get("KEYMAP") == settings["keymap"] and any(
+    checks["Console: keymap " + settings["keymap"]] = vconsole.get("KEYMAP") == settings["keymap"] and any(
         kbd.glob(f"keymaps/**/{settings['keymap']}.map.gz"))
-    checks["Консоль: шрифт " + settings["console_font"]] = vconsole.get("FONT") == settings["console_font"] and any(
+    checks["Console: font " + settings["console_font"]] = vconsole.get("FONT") == settings["console_font"] and any(
         kbd.glob(f"consolefonts/{settings['console_font']}.*"))
     if graphical and settings["fonts"]:
         code, families = command(["fc-list", ":", "family"])
-        checks["Шрифты интерфейса установлены"] = code == 0 and bool(families)
+        checks["Interface fonts installed"] = code == 0 and bool(families)
         if settings.get("cyrillic"):
-            checks["Шрифт с кириллицей для интерфейса"] = bool(command(["fc-list", ":lang=ru", "family"])[1])
+            checks["Interface font with Cyrillic"] = bool(command(["fc-list", ":lang=ru", "family"])[1])
     if settings["time_sync"]:
-        checks["Синхронизация времени (NTP)"] = command(["systemctl", "is-enabled", "systemd-timesyncd.service"])[0] == 0
+        checks["Time sync (NTP)"] = command(["systemctl", "is-enabled", "systemd-timesyncd.service"])[0] == 0
     return checks
 
 
@@ -125,17 +125,17 @@ def hibernation_checks(record, state, system_root):
     hibernation = record.get("hibernation") or {}
     checks = {}
     swaps = [line.split()[0] for line in read(system_root / "proc/swaps").splitlines()[1:] if line.split()]
-    checks["Гибернация: swap-файл включён"] = hibernation.get("file") in swaps
+    checks["Hibernation: swap file on"] = hibernation.get("file") in swaps
     cmdline = read(system_root / "proc/cmdline").split()
     offset = str(hibernation.get("resume_offset"))
-    checks["Гибернация: resume в параметрах ядра"] = (
+    checks["Hibernation: resume in the kernel parameters"] = (
         f"resume=UUID={hibernation.get('resume_uuid')}" in cmdline and f"resume_offset={offset}" in cmdline
         and read(system_root / "sys/power/resume_offset").strip() == offset
         and read(system_root / "sys/power/resume").strip() not in ("", "0:0"))
     code, answer = command(["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1",
                             "org.freedesktop.login1.Manager", "CanHibernate"])
-    checks["Гибернация: доступна системе (logind)"] = code == 0 and answer.strip() == 's "yes"'
-    checks["Гибернация: сеанс восстановлен (agi-os-verify --hibernate)"] = state.get("hibernate", {}).get("result") is True
+    checks["Hibernation: available to the system (logind)"] = code == 0 and answer.strip() == 's "yes"'
+    checks["Hibernation: session restored (agi-os-verify --hibernate)"] = state.get("hibernate", {}).get("result") is True
     return checks
 
 
@@ -157,17 +157,17 @@ def resumed(system_root, boot_id, marker, nonce, gap, started):
     goes on and the image is erased."""
     same_boot = (system_root / "proc/sys/kernel/random/boot_id").read_text().strip() == boot_id
     if not same_boot or read(marker) != nonce:
-        return False, "После гибернации сеанс не совпадает"
+        return False, "The session after hibernation does not match"
     log = kernel_messages_since(started)
     if log is None:
-        return False, "Гибернация не подтверждена: журнал ядра недоступен, откат образа не исключён"
+        return False, "Hibernation not confirmed: the kernel log is unavailable, so an image rollback can’t be ruled out"
     aborted = next((line for line in log.splitlines() if any(w in line for w in HIBERNATE_ABORTED)), None)
     if aborted:
-        return False, "Гибернация не состоялась, ядро вернуло сеанс без выключения: " + aborted.strip()[:200]
+        return False, "Hibernation did not happen; the kernel returned the session without powering off: " + aborted.strip()[:200]
     if gap < RESUME_GAP:
-        return False, (f"Гибернация не подтверждена: сеанс был остановлен лишь {gap:.0f} с — "
-                       "компьютер не выключался и не загружал образ")
-    return True, "Сеанс восстановлен после гибернации"
+        return False, (f"Hibernation not confirmed: the session stopped for only {gap:.0f} s — "
+                       "the computer did not power off or load the image")
+    return True, "The session was restored after hibernation"
 
 
 def preview_vm(record):
@@ -191,8 +191,8 @@ def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT
         state = {}
     boot_id = (system_root / "proc/sys/kernel/random/boot_id").read_text().strip()
     if preview_vm(record):
-        return False, ("Это превью в виртуальной машине: гибернация настроена для компьютера и "
-                       "проверяется после установки на него")
+        return False, ("This is the preview in a virtual machine: hibernation is set up for the computer and "
+                       "is checked after installing on it")
     nonce = secrets.token_hex(8)
     marker = system_root / "dev/shm" / f"agi-os-hibernate-{os.getuid()}"
     marker.write_text(nonce)
@@ -202,7 +202,7 @@ def hibernate(record, state_dir=None, system_root=Path("/"), wait=HIBERNATE_WAIT
     wall, slept = clocks()
     started = int(wall)
     code, output = command(["systemctl", "hibernate"])
-    result, detail = False, "Система отказалась переходить в гибернацию: " + output if code else "Гибернация не началась"
+    result, detail = False, "The system refused to hibernate: " + output if code else "Hibernation did not start"
     if not code:
         for _ in range(wait):
             time.sleep(1)
@@ -235,48 +235,48 @@ def evaluate(record, state_dir=None, confirm=False, system_root=Path("/")):
     if state.get("hibernate", {}).get("result") is None and state.get("hibernate", {}).get("boot_id") not in (None, boot_id):
         # agi-os-verify --hibernate never saw its session again: the computer booted afresh.
         state["hibernate"] = {"boot_id": boot_id, "result": False,
-                              "detail": "После гибернации система загрузилась заново: сеанс не восстановлен"}
+                              "detail": "After hibernation the system booted afresh: the session was not restored"}
     checks = {}
-    checks["Вход под созданным пользователем"] = getpass.getuser() == config["username"]
-    checks["Загрузка с установленного диска"] = command(["findmnt", "-n", "-o", "UUID", "/"])[1] == record["root_uuid"]
-    checks["Live-среда отключена"] = not (system_root / "run/archiso/bootmnt").is_mount()
-    checks["Файловая система"] = command(["findmnt", "-n", "-o", "FSTYPE", "/"])[1] == config["filesystem"]
-    checks["Имя компьютера"] = socket.gethostname() == config["hostname"]
-    checks["Часовой пояс"] = (system_root / "etc/localtime").resolve() == (system_root / "usr/share/zoneinfo" / config["timezone"]).resolve()
+    checks["Signed in as the created user"] = getpass.getuser() == config["username"]
+    checks["Booted from the installed disk"] = command(["findmnt", "-n", "-o", "UUID", "/"])[1] == record["root_uuid"]
+    checks["Not running from Live"] = not (system_root / "run/archiso/bootmnt").is_mount()
+    checks["Filesystem"] = command(["findmnt", "-n", "-o", "FSTYPE", "/"])[1] == config["filesystem"]
+    checks["Computer name"] = socket.gethostname() == config["hostname"]
+    checks["Time zone"] = (system_root / "etc/localtime").resolve() == (system_root / "usr/share/zoneinfo" / config["timezone"]).resolve()
     locale_conf = (system_root / "etc/locale.conf").read_text().splitlines()
-    checks["Язык системы"] = "LANG=" + config["locale"] in locale_conf
+    checks["System language"] = "LANG=" + config["locale"] in locale_conf
     settings = record.get("settings")
     if settings:
         checks.update(regional_checks(settings, locale_conf, system_root, bool(config["session"])))
     installed = set(command(["pacman", "-Qq"])[1].splitlines())
-    checks["Все выбранные пакеты"] = set(record["packages"]) <= installed
+    checks["All chosen packages"] = set(record["packages"]) <= installed
     drivers = record.get("drivers") or {}
     if drivers.get("packages"):
-        checks["Драйверы под железо компьютера"] = set(drivers["packages"]) <= installed
+        checks["Drivers for this computer’s hardware"] = set(drivers["packages"]) <= installed
     for service in dict.fromkeys(["NetworkManager.service", *drivers.get("services", []), *config["services"]]):
-        checks["Автозапуск: " + service] = command(["systemctl", "is-enabled", service])[0] == 0
+        checks["Autostart: " + service] = command(["systemctl", "is-enabled", service])[0] == 0
     if record.get("updates"):
-        checks["Проверка обновлений по расписанию"] = command(["systemctl", "is-enabled", record["updates"]["timer"]])[0] == 0
-    checks["Сеть: NetworkManager"] = command(["systemctl", "is-active", "NetworkManager.service"])[0] == 0
+        checks["Scheduled update checks"] = command(["systemctl", "is-enabled", record["updates"]["timer"]])[0] == 0
+    checks["Network: NetworkManager"] = command(["systemctl", "is-active", "NetworkManager.service"])[0] == 0
     try:
         socket.getaddrinfo("archlinux.org", 443)
-        checks["Сеть: DNS"] = True
+        checks["Network: DNS"] = True
     except OSError:
-        checks["Сеть: DNS"] = False
+        checks["Network: DNS"] = False
     secure_boot = record.get("secure_boot") or {}
     if secure_boot.get("signed"):
-        checks["Secure Boot: загрузчик и ядро подписаны"] = boot_chain_signed(secure_boot, system_root)
+        checks["Secure Boot: bootloader and kernel signed"] = boot_chain_signed(secure_boot, system_root)
         if secure_boot.get("enrolled"):
-            checks["Secure Boot включён в прошивке"] = secure_boot_enabled(system_root)
+            checks["Secure Boot on in the firmware"] = secure_boot_enabled(system_root)
     if config["session"]:
         actual = " ".join(os.environ.get(k, "") for k in ("XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "XDG_SESSION_DESKTOP"))
-        checks["Выбранная графическая сессия"] = config["session"].casefold() in actual.casefold()
+        checks["Chosen graphical session"] = config["session"].casefold() in actual.casefold()
     if record.get("hibernation"):
         checks.update(hibernation_checks(record, state, system_root))
-    correct_system = all(checks[k] for k in ("Вход под созданным пользователем", "Загрузка с установленного диска", "Live-среда отключена"))
+    correct_system = all(checks[k] for k in ("Signed in as the created user", "Booted from the installed disk", "Not running from Live"))
     persisted = marker_path.is_file() and marker_path.read_text() == record["id"]
     second_boot = bool(state.get("first_boot") and state["first_boot"] != boot_id and persisted)
-    checks["Файл сохранён после повторной загрузки"] = second_boot
+    checks["File kept after a reboot"] = second_boot
     if correct_system:
         if "first_boot" not in state:
             marker_path.write_text(record["id"])
@@ -298,30 +298,30 @@ def gui(record):
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk, GLib
     import threading
-    window = Gtk.Window(title="AGI OS — Проверка новой системы")
+    window = Gtk.Window(title="AGI OS — Check the new system")
     window.set_default_size(720, 640)
     window.set_border_width(24)
     window.connect("destroy", Gtk.main_quit)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
     window.add(box)
-    title = Gtk.Label(label="Этапы 7–8 · Проверка установленной системы", xalign=0)
+    title = Gtk.Label(label="Steps 7–8 · Check the installed system", xalign=0)
     box.pack_start(title, False, False, 0)
     output = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
     scroll = Gtk.ScrolledWindow()
     scroll.add(output)
     box.pack_start(scroll, True, True, 0)
-    checked = Gtk.CheckButton(label="Я проверил приложения, раскладки и все согласованные требования")
+    checked = Gtk.CheckButton(label="I checked the apps, keyboard layouts and all agreed requirements")
     box.pack_start(checked, False, False, 0)
-    button = Gtk.Button(label="Проверить и сохранить результат")
+    button = Gtk.Button(label="Check and save the result")
     box.pack_start(button, False, False, 0)
     sleep_button = None
     if record.get("hibernation"):
-        sleep_button = Gtk.Button(label="Проверить гибернацию (компьютер выключится и восстановит этот сеанс)")
+        sleep_button = Gtk.Button(label="Check hibernation (the computer powers off and restores this session)")
         box.pack_start(sleep_button, False, False, 0)
-    hint = Gtk.Label(label="Для проверки сохранности файлов нужна ещё одна перезагрузка.\n"
-                    "В окружениях без автозапуска откройте agi-os-verify --gui повторно."
-                    + ("\nГибернация была выбрана при установке, поэтому проверка завершится только после "
-                       "успешной пробной гибернации (кнопка выше или agi-os-verify --hibernate)."
+    hint = Gtk.Label(label="Checking that files are kept needs one more reboot.\n"
+                    "On desktops without autostart, open agi-os-verify --gui again."
+                    + ("\nHibernation was chosen at install, so the check finishes only after a "
+                       "successful test hibernation (the button above or agi-os-verify --hibernate)."
                        if record.get("hibernation") else ""), xalign=0)
     hint.set_line_wrap(True)
     box.pack_start(hint, False, False, 0)
@@ -331,11 +331,11 @@ def gui(record):
         if isinstance(result, str):
             output.get_buffer().set_text(result)
             return
-        text = "\n".join(("✓ " if passed else "○ Не подтверждено: ") + name for name, passed in result["checks"].items())
+        text = "\n".join(("✓ " if passed else "○ Not confirmed: ") + name for name, passed in result["checks"].items())
         if result.get("warnings"):
-            text += "\n\nЗамечания установки:\n" + "\n".join("• " + item for item in result["warnings"])
-        text += "\n\nПроверьте вручную:\n" + "\n".join("• " + item for item in result["requirements"])
-        text += "\n\n" + ("Установка проверена." if result["complete"] else "Проверка ещё не завершена.")
+            text += "\n\nInstallation notes:\n" + "\n".join("• " + item for item in result["warnings"])
+        text += "\n\nCheck by hand:\n" + "\n".join("• " + item for item in result["requirements"])
+        text += "\n\n" + ("Installation checked." if result["complete"] else "The check is not finished yet.")
         output.get_buffer().set_text(text)
         checked.set_active(result["user_checked_requirements"])
 
@@ -346,7 +346,7 @@ def gui(record):
             try:
                 result = evaluate(record, confirm=consent)
             except Exception:
-                result = "Не удалось закончить проверку. Установка не отмечена как проверенная."
+                result = "Could not finish the check. The installation is not marked as checked."
             GLib.idle_add(update, result)
         threading.Thread(target=work, daemon=True).start()
     button.connect("clicked", refresh)
@@ -354,7 +354,7 @@ def gui(record):
     def test_hibernation(_):
         sleep_button.set_sensitive(False)
         button.set_sensitive(False)
-        output.get_buffer().set_text("Перехожу в гибернацию. Включите компьютер снова, когда он выключится.")
+        output.get_buffer().set_text("Hibernating. Turn the computer on again once it powers off.")
         def work():
             try:
                 hibernate(record)
@@ -380,9 +380,9 @@ def main():
         record = json.loads(RECORD.read_text())
         if args.hibernate:
             if not record.get("hibernation"):
-                print("Гибернация не настраивалась при установке (swap: zram).", file=sys.stderr)
+                print("Hibernation was not set up at install (swap: zram).", file=sys.stderr)
                 return 2
-            print("Перехожу в гибернацию. Когда компьютер выключится, включите его снова.", flush=True)
+            print("Hibernating. When the computer powers off, turn it on again.", flush=True)
             passed, detail = hibernate(record)
             print(detail)
             return 0 if passed else 1
@@ -393,7 +393,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["complete"] else 1
     except Exception:
-        print("Проверка не выполнена: нет корректной записи установки или доступа к системе.", file=sys.stderr)
+        print("Check not run: no valid installation record or no access to the system.", file=sys.stderr)
         return 2
 
 

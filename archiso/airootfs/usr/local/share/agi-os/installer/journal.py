@@ -113,7 +113,7 @@ def sink(fields):
 
 
 def _clip(text, limit):
-    return text if len(text) <= limit else text[:limit] + f"… [обрезано {len(text) - limit} символов]"
+    return text if len(text) <= limit else text[:limit] + f"… [{len(text) - limit} characters cut]"
 
 
 class Logger:

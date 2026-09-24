@@ -71,7 +71,9 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertIsNone(state.vm)
         state.persist()
         self.assertNotIn('public-test-fixture', state.record.read_text())
-        self.assertNotIn('password', json.dumps(state.public()))
+        public = json.dumps(state.public())
+        self.assertNotIn('public-test-fixture', public)
+        self.assertNotRegex(public, r'"[^"]*password[^"]*":')  # no password field; summary prose may say “password”
 
     async def test_login_commands_need_their_own_confirmation(self):
         state = self.app['state']
@@ -84,7 +86,7 @@ class LocalApiTests(AioHTTPTestCase):
                 'passphrase': 'private-passphrase', 'memory': 4096, 'cpus': 4}
         response = await self.request('/api/build', body)
         self.assertEqual(response.status, 400)
-        self.assertIn('при входе', (await response.json())['error'])
+        self.assertIn('at login', (await response.json())['error'])
         self.assertIsNone(state.build_task)
         with patch.object(state, 'build', return_value=asyncio.sleep(0)) as build:
             response = await self.request('/api/build', {**body, 'login_reviewed': True})
@@ -105,7 +107,7 @@ class LocalApiTests(AioHTTPTestCase):
         state.preview = {'option': {'title': 'RAM', 'revert': 'x'}, 'image': {'format': 'qcow2', 'path': '/p'}, 'revert': {'kind': 'ram'}}
         state.disk_ready = True
         body = {'layout': 'erase', 'confirmation': config.disk, 'accepted': True, 'enroll_keys': True}
-        for signed, reason in ((False, 'не подписана'), (True, 'Setup Mode')):
+        for signed, reason in ((False, 'not signed'), (True, 'Setup Mode')):
             state.built = {'configuration': config.as_dict(), 'consent': state.current_consent(), 'encrypted': False,
                            'secure_boot': signed}
             response = await self.request('/api/final/finalize', body)
@@ -277,7 +279,7 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual(state.error, failure)
         self.assertEqual(state.controller.history[-1]['role'], 'user')
         self.assertIn('invalid section name', state.controller.history[-1]['content'])
-        self.assertIn('агента', state.status)
+        self.assertIn('Ask the agent to fix them', state.status)
 
     async def test_in_memory_preview_is_forgotten_after_live_restart(self):
         state = self.app['state']
@@ -298,8 +300,8 @@ class PreviewRecordApiTests(AioHTTPTestCase):
     fake_plan, fake_vm = LocalApiTests.fake_plan, LocalApiTests.fake_vm
 
     def partition_option(self):
-        return {'id': 'part:/dev/vda:2048', 'kind': 'partition', 'title': 'Новый раздел', 'detail': '',
-                'revert': 'Удалить одну запись раздела', 'destructive': False, 'confirm': None, 'fits': True,
+        return {'id': 'part:/dev/vda:2048', 'kind': 'partition', 'title': 'A new partition in free space on /dev/vda', 'detail': '',
+                'revert': 'delete one added partition entry; existing partitions stay', 'destructive': False, 'confirm': None, 'fits': True,
                 'available': 20 * 2**30}
 
     async def build_on_partition(self, fail=False):
@@ -329,7 +331,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         self.assertEqual(marks[-1]['status'], 'ready')
         self.assertTrue(marks[-1]['encrypted'])
         texts = [e['text'] for e in marks[-1]['journal']]
-        self.assertIn('Система установлена в превью', texts)
+        self.assertIn('System installed in the preview', texts)
         self.assertTrue(any('Installing' in t for t in texts))
         dump = json.dumps(marks)
         self.assertNotIn('public-test-fixture', dump)
@@ -344,7 +346,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
     def found(self, status='ready', **record_changes):
         from test_preview_record import sample_record
         record = sample_record(status=status, **record_changes)
-        record['target'].update(path='/dev/sdz', size=64 * 2**30, model='Демонстрационный диск', serial='DEMO-ONLY', wwn='')
+        record['target'].update(path='/dev/sdz', size=64 * 2**30, model='Demo disk', serial='DEMO-ONLY', wwn='')
         import preview_record
         return {'id': 'partition:/dev/vda2', 'kind': 'partition', 'disk': '/dev/vda', 'device': '/dev/vda2',
                 'size': 20 * 2**30, 'medium': 'Disk', 'problem': None, 'record': preview_record.clean(record)}
@@ -353,7 +355,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         state = self.app['state']
         state.found = [self.found('ready'), {**self.found('failed'), 'id': 'file:/dev/sdb1', 'device': '/dev/sdb1'},
                        {'id': 'partition:/dev/vda3', 'kind': 'partition', 'disk': '/dev/vda', 'device': '/dev/vda3',
-                        'size': 1, 'medium': 'Disk', 'problem': 'Записи превью нет', 'record': None}]
+                        'size': 1, 'medium': 'Disk', 'problem': 'No preview record', 'record': None}]
         found = {f['id']: f for f in state.public()['found']}
         self.assertTrue(found['partition:/dev/vda2']['can_continue'])
         self.assertFalse(found['partition:/dev/vda2']['can_retry'])
@@ -430,7 +432,7 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         async def privileged(script, request):
             calls.append(request['op'])
             if request['op'] == 'remove':
-                return {'reverted': True, 'text': 'Раздел превью удалён'}
+                return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
             return {'found': []}
         with patch.object(server, 'privileged', privileged):
             response = await self.request('/api/previews/retry', {'id': 'partition:/dev/vda2'})
@@ -455,19 +457,19 @@ class PreviewRecordApiTests(AioHTTPTestCase):
         state.found = [self.found('ready')]
         async def privileged(script, request):
             if request['op'] == 'remove':
-                return {'reverted': True, 'text': 'Раздел превью удалён'}
+                return {'reverted': True, 'text': 'Preview partition deleted; other partitions stay'}
             return {'found': []}
         with patch.object(server, 'privileged', privileged):
             response = await self.request('/api/previews/remove', {'id': 'partition:/dev/vda2'})
             self.assertEqual(response.status, 200)
             response = await self.request('/api/previews/remove', {'id': 'partition:/dev/vda9'})
             self.assertEqual(response.status, 400)
-        self.assertEqual(state.status, 'Раздел превью удалён')
+        self.assertEqual(state.status, 'Preview partition deleted; other partitions stay')
 
     async def test_site_restart_during_installation_is_not_a_success(self):
         state = self.app['state']
         state.controller.configuration = demo_configuration()
-        state.preview = {'option': {'title': 'Раздел', 'revert': 'x'}, 'image': {'format': 'raw', 'path': '/dev/vda2'},
+        state.preview = {'option': {'title': 'Partition', 'revert': 'x'}, 'image': {'format': 'raw', 'path': '/dev/vda2'},
                          'revert': {'kind': 'partition'}}
         state.persist()
         state.restore()

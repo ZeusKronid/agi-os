@@ -58,7 +58,7 @@ def checked_request(request):
     if not isinstance(request, dict) or set(request) != {'target', 'fingerprint', 'configuration', 'passphrase', 'image', 'layout', 'confirmation', 'enroll_keys'}:
         raise ValidationError('Unknown finishing request')
     if not isinstance(request['configuration'], dict) or not all(isinstance(request[k], str) for k in ('target', 'fingerprint', 'confirmation')):
-        raise ValidationError('Некорректный запрос завершения')
+        raise ValidationError('Invalid finishing request')
     config = Configuration.parse(request['configuration'])
     if config.disk != request['target'] or request['confirmation'] != request['target']:
         raise ValidationError('Type the exact path of the target disk to confirm')
@@ -72,11 +72,11 @@ def checked_request(request):
     if not isinstance(passphrase, str) or len(passphrase) > 1024 or any(c in passphrase for c in '\n\r\x00'):
         raise ValidationError('Invalid encryption password')
     if type(request['enroll_keys']) is not bool:
-        raise ValidationError('Некорректный выбор записи ключей Secure Boot')
+        raise ValidationError('Invalid choice for enrolling the Secure Boot keys')
     if request['enroll_keys'] and (config.bootloader != 'systemd-boot' or efi_flag(SETUP_MODE_VAR) is not True):
         # Checked before any disk change: the firmware must accept new keys right now.
-        raise ValidationError('Прошивка не в режиме Setup Mode: ключи Secure Boot записать нельзя. '
-                              'Сотрите ключи в настройках UEFI или снимите отметку записи ключей')
+        raise ValidationError('The firmware is not in Setup Mode: Secure Boot keys can’t be enrolled. '
+                              'Clear the keys in the UEFI settings or untick enrolling the keys')
     request['image'] = checked_image(request['image'], snapshot, disk)
     return config, disk
 
@@ -91,7 +91,7 @@ def checked_image(image, snapshot, target):
         allowed = {str(storage_worker.PREVIEW / 'ram/preview.qcow2'),
                    str(storage_worker.PREVIEW / 'media' / storage_worker.NAME / 'preview.qcow2')}
         if path not in allowed or os.path.realpath(path) != path or not Path(path).is_file():
-            raise ValidationError('Образ превью находится вне подготовленного хранилища')
+            raise ValidationError('The preview image is outside the prepared storage')
         return {'format': 'qcow2', 'path': path, 'on_target': False}
     if image['format'] == 'raw':
         disk, _ = storage_worker.find_partition(snapshot, path)
@@ -188,8 +188,8 @@ def prepare_table(runner, layout, disk):
         return
     if not disk.get('pttype'):
         if disk.get('fstype') or not storage_worker.looks_blank(target):
-            raise ValidationError('На диске нет таблицы разделов, но есть данные: установка рядом с ними невозможна. '
-                                  'Выберите «стереть диск», если эти данные не нужны.')
+            raise ValidationError('The disk has data but no partition table: installing alongside it is not possible. '
+                                  'Choose “Erase the disk” if you don’t need that data.')
         runner.run(['sgdisk', '--clear', target])
     runner.run(['sgdisk', f'--backup=/run/agi-final-{Path(target).name}.gpt', target])
 
@@ -335,7 +335,7 @@ def swapfile_size(record):
 def recreate_swapfile(runner, dst, root_uuid, record, size):
     """The hibernation swap file on the new root filesystem: new UUID, new offset."""
     fstype = runner.run(['findmnt', '-n', '-o', 'FSTYPE', str(dst)]).strip()
-    emit('final-progress', text=f'Создаю swap-файл для гибернации ({size // 2**30} ГиБ) на конечном диске')
+    emit('final-progress', text=f'Creating the hibernation swap file ({size // 2**30} GiB) on the target disk')
     offset = create_swapfile(runner, dst, fstype, size)
     record['hibernation'] = {**record['hibernation'], 'size': size, 'resume_uuid': root_uuid, 'resume_offset': offset}
     return resume_parameter(root_uuid, offset)
@@ -361,18 +361,18 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
         # so a failed top-up stays visible until the user installs the drivers.
         record['hardware'], record['drivers'] = hardware, plan
         if missing:
-            emit('final-progress', text='Доустанавливаю драйверы под железо этого компьютера: ' + ', '.join(missing))
+            emit('final-progress', text='Adding the drivers for this computer’s hardware: ' + ', '.join(missing))
             free = int(runner.run(['df', '--output=avail', '-B1', str(dst)]).split()[-1])
             if free < 2 * GIB:
-                raise ValidationError('на диске меньше 2 ГиБ свободно')
+                raise ValidationError('less than 2 GiB is free on the disk')
             # The target has no sync database (the preview dropped its cache); a plain
             # -Sy would be a partial upgrade, so the whole system is brought to one repository state.
             runner.run([*chroot, 'pacman', '-Syu', '--noconfirm', '--needed', '--', *missing], timeout=3600)
             runner.run([*chroot, 'pacman', '-Scc', '--noconfirm'])
             record['packages'] = list(dict.fromkeys([*record.get('packages', []), *missing]))
         else:
-            emit('final-progress', text='Драйверы для железа этого компьютера уже установлены в превью: '
-                 + (', '.join(plan['packages']) or 'дополнительных не требуется'))
+            emit('final-progress', text='The drivers for this computer’s hardware are already installed in the preview: '
+                 + (', '.join(plan['packages']) or 'no extra ones needed'))
         # The initramfs drop-in always follows the final plan (mkinitcpio -P runs next).
         dropin = dst / 'etc/mkinitcpio.conf.d/agi-os.conf'
         if initramfs := initramfs_config(plan, encrypted, bool(record.get('hibernation'))):
@@ -384,15 +384,15 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
             try:
                 runner.run([*chroot, 'systemctl', 'enable', service])
             except ValidationError:
-                warnings.append(f'Служба {service} не включена. После входа выполните: sudo systemctl enable --now {service}')
+                warnings.append(f'Service {service} is not enabled. After you log in, run: sudo systemctl enable --now {service}')
     except Cancelled:
         raise
     except Exception as exc:
         lines = [l for l in str(exc).splitlines() if l.strip()]
         reason = next((l for l in reversed(lines) if l.startswith('error:')), lines[0] if lines else type(exc).__name__)
-        warnings.append('Не удалось доустановить драйверы' + (' ' + ', '.join(missing) if missing else '') + ' — ' + reason[:300]
-                        + '. Система загрузится с базовыми драйверами ядра'
-                        + ('; после входа выполните: sudo pacman -Syu ' + ' '.join(missing) if missing else ''))
+        warnings.append('Could not add the drivers' + (' ' + ', '.join(missing) if missing else '') + ' — ' + reason[:300]
+                        + '. The system boots with the kernel’s basic drivers'
+                        + ('; after you log in, run: sudo pacman -Syu ' + ' '.join(missing) if missing else ''))
     for warning in warnings:
         emit('final-warning', text=warning)
     record['warnings'] = record.get('warnings', []) + warnings
@@ -402,7 +402,7 @@ def fit_drivers(runner, chroot, dst, config, record, encrypted):
 def check_signatures(runner, chroot, record):
     """Root `sbctl verify` of the final disk, kept in the record: after a copy the ESP may be
     unreadable to the user, and agi-os-verify then relies on this result."""
-    emit('final-progress', text='Проверяю подписи загрузчика и ядра (Secure Boot)')
+    emit('final-progress', text='Checking the bootloader and kernel signatures (Secure Boot)')
     unsigned = sbctl_unsigned(runner.run([*chroot, 'sbctl', 'verify']))
     record['secure_boot']['verified'] = not unsigned
     return unsigned
@@ -412,11 +412,11 @@ def enroll_keys(runner, chroot, record):
     """Write this system's own Secure Boot keys into the firmware, keeping Microsoft's
     certificates: option ROMs of graphics cards and other systems still need them."""
     if not (record.get('secure_boot') or {}).get('signed'):
-        raise ValidationError('Система в превью не подписана для Secure Boot; ключи не записаны')
+        raise ValidationError('The system in the preview is not signed for Secure Boot; the keys were not enrolled')
     unsigned = check_signatures(runner, chroot, record)
     if unsigned:
-        raise ValidationError('Не подписаны для Secure Boot: ' + ', '.join(unsigned) + '. Ключи не записаны')
-    emit('final-progress', text='Записываю ключи Secure Boot этой системы в прошивку (вместе с ключами Microsoft)')
+        raise ValidationError('Not signed for Secure Boot: ' + ', '.join(unsigned) + '. The keys were not enrolled')
+    emit('final-progress', text='Enrolling this system’s Secure Boot keys in the firmware (together with Microsoft’s keys)')
     runner.run([*chroot, 'sbctl', 'enroll-keys', '--microsoft'])
     record['secure_boot']['enrolled'] = True
 
@@ -430,9 +430,9 @@ def enroll_or_warn(runner, chroot, record):
         raise
     except Exception as exc:
         lines = [l for l in str(exc).splitlines() if l.strip()]
-        warning = ('Ключи Secure Boot не записаны — ' + (lines[-1] if lines else type(exc).__name__)[:300]
-                   + '. Система подписана и загрузится; чтобы включить Secure Boot, после входа выполните: '
-                   'sudo sbctl enroll-keys --microsoft, затем включите Secure Boot в настройках UEFI')
+        warning = ('Secure Boot keys were not enrolled — ' + (lines[-1] if lines else type(exc).__name__)[:300]
+                   + '. The system is signed and boots; to turn on Secure Boot, log in and run: '
+                   'sudo sbctl enroll-keys --microsoft, then turn on Secure Boot in the UEFI settings')
         record['warnings'] = record.get('warnings', []) + [warning]
         emit('final-warning', text=warning)
 
@@ -518,7 +518,7 @@ def finalize(request, runner):
                 record['secure_boot']['verified'] = False
                 unsigned = [type(exc).__name__]
             if unsigned:
-                warning = 'Подписи Secure Boot не подтверждены: ' + ', '.join(unsigned)[:300] + '. Выполните sudo sbctl verify'
+                warning = 'Secure Boot signatures are not confirmed: ' + ', '.join(unsigned)[:300] + '. Run sudo sbctl verify'
                 record['warnings'] = record.get('warnings', []) + [warning]
                 emit('final-warning', text=warning)
         # A new acceptance ID: the preview's first-boot result must not count for real hardware.
@@ -556,12 +556,12 @@ def main():
         with open('/run/agi-os-finalize.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             request = adopt(json.loads(sys.stdin.readline(1000000)))
-            LOG.info('finalize.start', 'Завершение установки', layout=request.get('layout'), target=request.get('target'))
+            LOG.info('finalize.start', 'Finishing the installation', layout=request.get('layout'), target=request.get('target'))
             finalize(request, Runner(LOG))
-            LOG.info('finalize.done', 'Завершение установки выполнено')
+            LOG.info('finalize.done', 'Installation finished')
     except Exception as exc:
         known = isinstance(exc, ValidationError)
-        LOG.error('finalize.failed', str(exc) if known else 'Внутренняя ошибка завершения', exc=None if known else exc)
+        LOG.error('finalize.failed', str(exc) if known else 'Internal finishing error', exc=None if known else exc)
         emit('final-error', text=str(exc) if known else 'Finishing stopped on an internal error: ' + type(exc).__name__)
         return 1
     return 0
