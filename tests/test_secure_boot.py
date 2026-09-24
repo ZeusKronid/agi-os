@@ -141,6 +141,9 @@ class WorkerSigningTests(unittest.TestCase):
     def test_sbctl_unsigned_parsing(self):
         self.assertEqual(worker.sbctl_unsigned(UNSIGNED), ["/boot/EFI/Linux/x.efi"])
         self.assertEqual(worker.sbctl_unsigned(SIGNED), [])
+        shared = "✗ /efi/EFI/Microsoft/Boot/bootmgfw.efi is not signed\n✓ /efi/EFI/systemd/systemd-bootx64.efi is signed\n"
+        self.assertEqual(worker.sbctl_unsigned(shared), [])  # Microsoft's own loader next to Windows (CMP-151)
+        self.assertEqual(worker.sbctl_unsigned(shared + UNSIGNED), ["/boot/EFI/Linux/x.efi"])
 
     def test_sbctl_is_added_only_when_chosen(self):
         config = Configuration.parse(specification())

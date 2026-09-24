@@ -63,7 +63,11 @@ until the user explicitly confirms a specific, described change.
    disk's existing ESP is shared, never formatted — systemd-boot goes to it
    (`/efi`, with at least 2 MiB free) and lists Windows Boot Manager itself,
    while the system's own `/boot` becomes an XBOOTLDR partition; GRUB keeps
-   its own ESP and gets a chainload entry for Windows. A hibernated Windows
+   its own ESP and gets a chainload entry for Windows. `bootctl install`
+   also replaces the ESP's fallback `EFI/BOOT/BOOTX64.EFI` (often a copy of
+   Windows Boot Manager): a firmware without boot entries then starts
+   systemd-boot, which still lists Windows. `sbctl verify` ignores
+   Microsoft's own loaders there. A hibernated Windows
    (Fast Startup included, detected by `hiberfil.sys`) stops the installation
    before anything is written; it is also never shrunk or used for a preview
    file. BitLocker volumes are not shrunk; next to one, the page warns about
