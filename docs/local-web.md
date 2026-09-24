@@ -264,8 +264,9 @@ the top-level btrfs volume), automatic `.pacnew` merging, AUR packages.
   F2FS is refused for hibernation. `agi-os-verify` checks the swap file,
   `/sys/power/resume*` and logind `CanHibernate`; `agi-os-verify --hibernate`
   (or the button in the GUI) hibernates once and passes only if the same session
-  comes back from the image: the kernel must not report a rollback and the session
-  must have been stopped for longer than a real power-off and resume take. With
+  comes back from the image: the kernel must not report a rollback and the clocks
+  must show the session stopped for at least 3 s (taking the snapshot alone pauses
+  them for ~0.2 s; a whole power-off and resume on the QEMU stand takes ~10 s). With
   hibernation chosen, acceptance is complete only after that test. In a virtual
   machine the system hibernates with `HibernateMode=shutdown`
   (`/etc/systemd/sleep.conf.d/agi-os-hibernate.conf`): QEMU handles ACPI S4 as a
