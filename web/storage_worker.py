@@ -46,6 +46,7 @@ PREVIEW = Path('/run/agi-os-preview')
 SECTOR = 512
 MIB = 2**20
 GIB = 2**30
+MIN_PREVIEW_DISK = 12 * GIB  # The installer inventory rejects smaller VM disks.
 ALIGN = MIB // SECTOR
 NAME = 'AGIOS-PREVIEW'
 FILE_FS = ('ext4', 'exfat', 'ntfs', 'btrfs', 'xfs', 'f2fs', 'vfat')
@@ -502,6 +503,7 @@ def in_memory(request):
 
 def probe(request):
     needed, target, vm_memory, compression = sizing(request)
+    raw_needed = max(needed, MIN_PREVIEW_DISK)
     snapshot = restrict_test_targets(inventory())
     disks = {d['path']: d for d in snapshot['disks']}
     if target not in disks:
@@ -552,7 +554,7 @@ def probe(request):
                                       + (' — this is the target disk: the preview partitions become the system without copying' if disk['path'] == target else ''),
                             'revert': 'delete one added partition entry; existing partitions stay',
                             'destructive': False, 'confirm': None, 'disk': disk['path'], 'start': start, 'end': end,
-                            'available': size, 'fits': needed <= size, 'order': 1 if disk['path'] == target else 2})
+                            'available': size, 'fits': raw_needed <= size, 'order': 1 if disk['path'] == target else 2})
         if disk['path'] == target and disk.get('pttype') == 'gpt':
             for part in disk['partitions']:
                 if part.get('fstype') in ('ntfs', 'BitLocker') and not part['mounted'] and (reason := windows_blocker(part)):
@@ -562,10 +564,10 @@ def probe(request):
                                                    'device': part['path'], 'fstype': part['fstype'], 'order': 3}, reason))
                     continue
                 room = shrink_room(part)
-                if room is None or room < needed:
+                if room is None or room < raw_needed:
                     continue
                 options.append({'id': 'shrink:' + part['path'], 'kind': 'shrink', 'title': f'Shrink partition {part["path"]}',
-                                'detail': f'{part["fstype"]} “{part.get("label") or ""}” {part["size"] / GIB:.1f} GiB → frees {needed / GIB:.1f} GiB. '
+                                'detail': f'{part["fstype"]} “{part.get("label") or ""}” {part["size"] / GIB:.1f} GiB → frees {raw_needed / GIB:.1f} GiB. '
                                           'Data stays; a backup is recommended',
                                 'revert': 'delete the preview partition, restore the boundary and grow the filesystem back',
                                 'destructive': True, 'confirm': part['path'], 'disk': disk['path'], 'device': part['path'],
@@ -639,6 +641,7 @@ def image_file(directory, size):
 
 def prepare(request):
     needed, target, vm_memory, compression = sizing(request)
+    raw_needed = max(needed, MIN_PREVIEW_DISK)
     option = resolve_option(request['option'], target, restrict_test_targets(inventory()))
     # Sparse capacity of an image-backed preview; never below what the system needs.
     virtual = max(min(max(needed * 2, 16 * GIB), 64 * GIB), needed)
@@ -688,6 +691,8 @@ def prepare(request):
             raise ValidationError('Free space on the medium changed; refresh the options')
         end = min(regions[start], start + max(needed * 2, 16 * GIB) // SECTOR - 1) if disk != target else regions[start]
         end = (end + 1) // ALIGN * ALIGN - 1
+        if (end - start + 1) * SECTOR < raw_needed:
+            raise ValidationError('Free space is too small for the installer VM; refresh the options')
         device = new_partition(disk, start, end)
         return {'image': {'format': 'raw', 'path': device},
                 'revert': {'kind': 'partition', 'disk': disk, 'device': device, 'backup': backup}}
@@ -699,9 +704,9 @@ def prepare(request):
         # Probe only described the filesystem at the place step. Data may have
         # been added since then, so reject before e2fsck -y or any resize write.
         room = shrink_room(part)
-        if room is None or room < needed:
+        if room is None or room < raw_needed:
             raise ValidationError('The partition no longer has enough safely shrinkable space; refresh the options')
-        new_size = (part['size'] - needed) // MIB * MIB
+        new_size = (part['size'] - raw_needed) // MIB * MIB
         if new_size < GIB:
             raise ValidationError('The partition is too small to free the space needed')
         number = partition_number(disk, device)
@@ -719,7 +724,7 @@ def prepare(request):
         sh(['partprobe', disk])
         sh(['udevadm', 'settle', '--timeout=30'])
         regions = free_regions(inventory_disk(disk))
-        region = next(((s, e) for s, e in regions if s > new_end and (e - s + 1) * SECTOR >= needed), None)
+        region = next(((s, e) for s, e in regions if s > new_end and (e - s + 1) * SECTOR >= raw_needed), None)
         if region is None:
             raise ValidationError('Shrinking did not leave the expected free space')
         created = new_partition(disk, region[0], region[1])
