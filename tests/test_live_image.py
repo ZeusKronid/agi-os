@@ -182,6 +182,15 @@ class HeliosDesktopTests(unittest.TestCase):
         self.assertIn("agi-desktop place", (AIROOTFS / "usr/local/bin/agi-installer").read_text())
         self.assertTrue({"wmctrl", "xfce4-notifyd"} <= packages())
 
+    def test_every_monitor_falls_back_to_the_horizon(self):
+        # xfdesktop keys wallpapers by connector name and shows its compiled-in default
+        # (xfce-x.svg in xfdesktop 4.20) on any monitor without a setting: the build replaces it.
+        hook = (AIROOTFS / "etc/pacman.d/hooks/agios-default-wallpaper.hook").read_text()
+        self.assertTrue(hook.startswith("# remove from airootfs!"))
+        self.assertIn("Target = usr/share/backgrounds/xfce/xfce-x.svg", hook)
+        source = re.search(r"^Exec = /usr/bin/cp -f (\S+) /usr/share/backgrounds/xfce/xfce-x.svg$", hook, re.M).group(1)
+        self.assertTrue((AIROOTFS / source.lstrip("/")).is_file())
+
     def test_every_channel_is_valid_xml(self):
         for path in self.XFCONF.glob("*.xml"):
             self.assertEqual(ElementTree.parse(path).getroot().get("name"), path.stem, path)

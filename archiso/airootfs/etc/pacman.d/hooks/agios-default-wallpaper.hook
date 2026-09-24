@@ -1,0 +1,16 @@
+# remove from airootfs!
+# xfdesktop shows its compiled-in default image on every monitor without a wallpaper setting
+# of its own: a connector name agi-desktop did not see at login, a monitor plugged in later.
+# Make that default the Helios horizon. xfdesktop sniffs the image type from the content,
+# so the PNG works under the .svg name.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/share/backgrounds/xfce/xfce-x.svg
+
+[Action]
+Description = Making the Helios horizon the default XFCE wallpaper...
+When = PostTransaction
+Depends = coreutils
+Exec = /usr/bin/cp -f /usr/share/backgrounds/agios/horizon.png /usr/share/backgrounds/xfce/xfce-x.svg
