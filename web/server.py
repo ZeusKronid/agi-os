@@ -482,6 +482,8 @@ async def chat(request):
     text = data.get('text', '')
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValidationError('Write a message of up to 16000 characters')
+    if not state.provider.model:
+        raise ValidationError('Connect a model first')
     async with state.lock:
         if state.controller.installing:
             raise web.HTTPConflict(text='Wait for the installation to finish')

@@ -166,7 +166,7 @@ function render(state) {
         $('lines').scrollTop = $('lines').scrollHeight;
     }
     $('talk').classList.toggle('chatting', state.messages.length > 0 || busy);
-    $('welcome').hidden = state.messages.length > 0 || busy;
+    $('welcome').hidden = !state.model || state.messages.length > 0 || busy;
     $('thinking').hidden = !busy;
     if (busy) $('thinkingText').textContent = state.status;
     renderTurn(state);
@@ -184,6 +184,9 @@ function render(state) {
     $('placeText').textContent = state.plan ? 'All set — pick where the preview lives' : 'All set — find room for the preview';
     $('connectButton').hidden = !!state.model;
     $('chatForm').hidden = !state.model;
+    // Connecting a model is the first step: the dialog stays open until one is connected.
+    $('closeSettings').hidden = !state.model;
+    if (!state.model && !$('settings').open) { pickProvider(providerKind); $('settings').showModal(); }
     $('send').disabled = busy;
     // A question after the agreement keeps the configuration, so its suggested answers stay useful.
     $('suggestions').hidden = busy || (!!config && !state.configuration_kept);
@@ -744,7 +747,8 @@ $('listModels').onclick = async () => {
     finally { button.disabled = false; }
 };
 $('settingsButton').onclick = $('connectButton').onclick = () => { pickProvider(providerKind); $('settings').showModal(); };
-$('closeSettings').onclick = () => $('settings').close();
+$('closeSettings').onclick = () => { if (current && current.model) $('settings').close(); };
+$('settings').addEventListener('cancel', event => { if (!(current && current.model)) event.preventDefault(); });
 $('providerForm').onsubmit = async event => {
     event.preventDefault();
     $('providerSubmit').disabled = true;
