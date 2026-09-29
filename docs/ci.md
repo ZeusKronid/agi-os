@@ -73,7 +73,8 @@ every day, so old commits stay rebuildable.
 `scripts/ci/smoke-boot.py ISO --firmware uefi|bios` boots the ISO headless with
 the test fw_cfg marker and the private QA serial port, exactly as the test stand
 does, and passes when the Live's QA agent answers, `agi-guacd`, `agi-web` and the
-display manager are active, `GET /api/state` returns JSON and (with
+display manager are active, the desktop user `agi` can run `sudo -k -n id -u`
+and obtain UID 0 without a password, `GET /api/state` returns JSON and (with
 `--expect-revision`) the image carries the expected source revision. It uses KVM
 when `/dev/kvm` is usable and falls back to TCG with a longer timeout. On failure
 it saves a screenshot (`screen.ppm`), the QEMU log and `result.json` in `--logs`;

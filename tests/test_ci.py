@@ -101,6 +101,7 @@ class SmokeCheckTests(unittest.TestCase):
         answers['http /api/version'] = {'version': 'v0.1.0', 'release': True}
         answers['cat /usr/local/share/agi-os/source-revision'] = {'code': 0, 'stdout': 'abc123\n'}
         answers['systemctl is-system-running'] = {'code': 0, 'stdout': 'running\n'}
+        answers['runuser -u agi -- sudo -k -n id -u'] = {'code': 0, 'stdout': '0\n'}
         return answers
 
     def test_healthy_live_passes(self):
@@ -108,6 +109,14 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(details['source_revision'], 'abc123')
         self.assertEqual(details['version'], 'v0.1.0')
+        self.assertTrue(details['desktop_passwordless_sudo'])
+
+    def test_desktop_without_passwordless_sudo_fails(self):
+        answers = self.healthy()
+        answers['runuser -u agi -- sudo -k -n id -u'] = {'code': 1, 'stdout': '', 'stderr': 'sudo: a password is required\n'}
+        failures, details = self.run_check(answers)
+        self.assertEqual(failures, ['agi cannot run sudo without a password'])
+        self.assertFalse(details['desktop_passwordless_sudo'])
 
     def test_unexpected_version_fails(self):
         failures, _ = self.run_check(self.healthy(), '', 'v0.2.0')

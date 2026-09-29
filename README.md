@@ -66,6 +66,12 @@ Actions runs unit tests on every PR and builds the ISO with QEMU smoke boots
 
 ## Use AGIOS
 
+The Live desktop user `agi` has passwordless sudo. To install an application for
+the current Live session, open a terminal and run `sudo pacman -S <package>`.
+Packages and other changes to the Live filesystem disappear after reboot;
+changes written to other drives persist. The installed system uses the user
+password you choose below for sudo.
+
 1. Boot the Live ISO. The website opens automatically.
 2. Connect a model through ChatGPT sign-in or an API provider.
 3. Describe your desktop, applications, and settings. The agent selects

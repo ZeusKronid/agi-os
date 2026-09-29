@@ -1,5 +1,5 @@
-"""Live privileges: only the website's system user reaches root, and only through
-the exact commands the website runs; no Live account can log in with a password."""
+"""Live privileges: passwordless desktop sudo, restricted website commands,
+and locked login passwords for all Live accounts."""
 import asyncio
 from pathlib import Path
 import shutil
@@ -49,13 +49,14 @@ class Process:
 
 
 class SudoersTests(unittest.TestCase):
-    def test_only_the_site_user_has_rules_and_never_all_commands(self):
+    def test_desktop_has_passwordless_sudo_and_site_has_only_exact_commands(self):
         rules = sudoers()
-        self.assertEqual(set(rules), {'agi-web'})
+        self.assertEqual(set(rules), {'agi', 'agi-web'})
+        self.assertEqual(rules['agi'], {'ALL'})
+        self.assertIn('agi ALL=(ALL:ALL) NOPASSWD: ALL', (ETC / 'sudoers.d/10-agi-live').read_text().splitlines())
         for command in rules['agi-web']:
             self.assertTrue(command.startswith('/usr/bin/'), command)
             self.assertNotIn('ALL', command.split())
-        self.assertNotIn('NOPASSWD: ALL', (ETC / 'sudoers.d/10-agi-live').read_text())
 
     @unittest.skipUnless(shutil.which('visudo'), 'visudo is not installed')
     def test_visudo_accepts_the_drop_in(self):
@@ -133,7 +134,7 @@ class AccountTests(unittest.TestCase):
         for fields in self.table('shadow'):
             self.assertTrue(fields[1].startswith(('!', '*')), fields[0])
 
-    def test_site_user_is_a_system_account_and_desktop_user_is_not_admin(self):
+    def test_site_user_is_a_system_account_and_only_desktop_autologins(self):
         users = {f[0]: f for f in self.table('passwd')}
         self.assertEqual(users['agi-web'][6], '/usr/bin/nologin')
         self.assertLess(int(users['agi-web'][2]), 1000)

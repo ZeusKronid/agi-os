@@ -6,6 +6,7 @@ starts its test-only instrumentation (agi-qa.service, after agi-web.service). Th
 check passes when, within the timeout:
   * the QA agent inside the Live answers,
   * agi-web.service, agi-guacd.service and the display manager are active,
+  * the desktop user agi can run sudo without a password,
   * the website answers GET /api/state with JSON and GET /api/version with the
     expected version (optional),
   * optionally, the image reports the expected source revision.
@@ -149,6 +150,11 @@ def check(qa, expect_revision, deadline, expect_version=''):
         log(f'{unit}: {state}')
         if state != 'active':
             failures.append(f'{unit} is {state}')
+    sudo = qa.run('runuser', '-u', 'agi', '--', 'sudo', '-k', '-n', 'id', '-u')
+    desktop_sudo = sudo['code'] == 0 and sudo['stdout'].strip() == '0'
+    log(f'desktop passwordless sudo: {"available" if desktop_sudo else "failed"}')
+    if not desktop_sudo:
+        failures.append('agi cannot run sudo without a password')
     while True:
         try:
             state = qa.call('http', path='/api/state', timeout=60)
@@ -183,7 +189,7 @@ def check(qa, expect_revision, deadline, expect_version=''):
         answer = qa.run('journalctl', '--boot', '--unit', unit, '--no-pager', '--lines', '40')
         journals[unit] = (answer['stdout'] + answer['stderr']).strip()
     return failures, {'system': system, 'failed_units': failed.splitlines(), 'source_revision': revision, 'version': version,
-                      'failed_unit_journals': journals}
+                      'failed_unit_journals': journals, 'desktop_passwordless_sudo': desktop_sudo}
 
 
 def main():

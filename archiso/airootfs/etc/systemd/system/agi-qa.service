@@ -6,7 +6,7 @@ ConditionPathExists=/dev/virtio-ports/org.agi-os.qa
 ConditionKernelCommandLine=!agios.guest
 [Service]
 # Test stands only (fw_cfg marker): root, so the host-driven checks can inspect the
-# site's state and prepare package caches while the Live users stay unprivileged.
+# site's state, prepare package caches and verify the desktop user's sudo access.
 User=root
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/agi/.Xauthority

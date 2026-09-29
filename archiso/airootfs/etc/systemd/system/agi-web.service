@@ -6,7 +6,7 @@ Requires=agi-guacd.service
 ConditionKernelCommandLine=!agios.guest
 [Service]
 Type=simple
-# A system user of its own: the Live desktop user agi has no disk access and no root.
+# A separate system user keeps the website's sudo rules limited to its helpers.
 User=agi-web
 Group=agi-web
 SupplementaryGroups=kvm render video disk optical systemd-journal

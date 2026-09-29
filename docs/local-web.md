@@ -160,11 +160,18 @@ connect a provider.
   approved (Agent SDK overview), and Google's Gemini CLI terms forbid using its
   OAuth sign-in from other software. Only ChatGPT sign-in is built in.
 
-Privileges in Live (`etc/sudoers.d/10-agi-live`): only `agi-web` may use sudo,
-and only for the exact command lines the site runs — the two root helpers,
+Privileges in Live (`etc/sudoers.d/10-agi-live`): the desktop user `agi` has
+passwordless sudo for all commands, so `sudo pacman -S <package>` installs an
+application for the current Live session. Changes to the Live filesystem are
+discarded on reboot; writes to other drives persist. Programs running as `agi`
+can also use sudo and modify those drives. The installed system still requires
+the user password chosen during installation for sudo.
+
+The website's system user `agi-web` may use sudo only for the exact command
+lines the site runs — the two root helpers,
 `pacman -Sy --noconfirm` (package catalog), `shutdown -h|-r +1` and, on test
-stands, reading the fw_cfg mirror value. The desktop user `agi` (browser,
-terminal) has no sudo, no `wheel` membership and no disk group; the ChatGPT
+stands, reading the fw_cfg mirror value. The desktop user `agi` has no `wheel`
+membership or disk group; its sudo access is granted directly. The ChatGPT
 sign-in adapter runs under `agi-web` inside bubblewrap. All passwords (`root`, `agi`, `agi-web`) are locked; LightDM
 autologin of `agi` is the only login, there is no root autologin on a console.
 Because the site has no desktop session, the ChatGPT sign-in page is opened by
@@ -175,8 +182,8 @@ on `127.0.0.1:8787` is local-only, not per-user, so any process of `agi` can
 drive the site — including the consented disk operations — and read
 `login_url`; `agi-web` holds the `disk` group, which QEMU needs for a partition
 preview and which is close to root. With every password locked there is no
-rescue login on a text console of Live; debugging is done on test stands
-(`agi-qa.service`).
+password login on a text console of Live; the desktop terminal can start a root
+shell with `sudo -i`, and test stands also use `agi-qa.service`.
 
 Session state lives in `/var/lib/agi-os`, which is in RAM in the Live
 environment. After a Live restart an in-memory preview is gone (nothing was on
