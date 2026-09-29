@@ -251,6 +251,36 @@ class LocalApiTests(AioHTTPTestCase):
         self.assertEqual((await self.request('/api/provider/models', {'kind': 'chatgpt'})).status, 400)
         self.assertEqual((await self.request('/api/provider/models', {'kind': 'ollama', 'endpoint': 'http://8.8.8.8'})).status, 400)
 
+    async def test_model_listing_failure_clears_the_temporary_key(self):
+        providers = []
+        def fail(provider):
+            providers.append(provider)
+            raise server.ProviderError('Key not accepted (HTTP 401)')
+        with patch.object(server.APIProvider, 'models', fail):
+            response = await self.request('/api/provider/models', {'kind': 'openai', 'key': 'public-test-key'})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(providers[0].key, '')
+        self.assertNotIn('public-test-key', await response.text())
+
+    async def test_signed_in_chatgpt_lists_models_and_switches_without_login(self):
+        import provider as live
+        backend = object.__new__(live.ChatGPTProvider)
+        backend.model = 'first-model'
+        connected = live.LiveProvider(backend, models=['first-model', 'second-model'])
+        state = self.app['state']
+        state.provider = state.controller.provider = connected
+        with patch.object(live.ChatGPTProvider, 'login', side_effect=AssertionError('Signed in twice')), \
+                patch.object(backend, 'close'):
+            response = await self.request('/api/provider/models', {'kind': 'chatgpt'})
+            self.assertEqual((await response.json())['models'], ['first-model', 'second-model'])
+            response = await self.request('/api/provider', {'kind': 'chatgpt', 'model': 'second-model'})
+            data = await response.json()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(data['model'], 'second-model')
+            self.assertEqual(data['provider_models'], ['first-model', 'second-model'])
+            self.assertIs(state.provider, connected)
+        state.provider = state.controller.provider = DemoProvider()
+
     async def test_status_names_the_connected_provider(self):
         state = self.app['state']
         api = server.APIProvider('ollama', 'http://127.0.0.1:11434')
