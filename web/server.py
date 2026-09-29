@@ -299,6 +299,7 @@ class State:
                      'revert': self.preview['option']['revert'] if self.preview else None}
         return {'messages': self.messages, 'status': self.status, 'phase': self.phase,
                 'error': self.error, 'model': self.provider.model, 'provider': getattr(self.provider, 'label', ''),
+                'provider_models': getattr(self.provider, 'available_models', []),
                 'login_url': self.login_url,
                 'firmware': snapshot['firmware'], 'found': self.found_public(),
                 'scanning': bool(self.scan_task and not self.scan_task.done()), 'scan_error': self.scan_error,
@@ -578,7 +579,15 @@ async def provider_models(request):
     its id. The key is used for this one request and not kept."""
     data = await request.json()
     kind = data.get('kind')
-    if kind not in PROVIDERS or kind == 'chatgpt':
+    if kind == 'chatgpt':
+        state = request.app['state']
+        backend = getattr(state.provider, 'backend', None)
+        from chatgpt import ChatGPTProvider
+        from bridge import BridgeProvider
+        if not isinstance(backend, (ChatGPTProvider, BridgeProvider)):
+            raise ValidationError('Sign in to ChatGPT first')
+        return web.json_response({'models': state.provider.available_models})
+    if kind not in PROVIDERS:
         raise ValidationError('Pick an API provider')
     provider = APIProvider(kind, data.get('endpoint') or PROVIDERS[kind][1], data.get('key', ''))
     try:

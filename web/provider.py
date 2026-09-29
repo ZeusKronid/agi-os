@@ -20,14 +20,18 @@ user's password and the optional disk-encryption passphrase. Services must inclu
 
 
 class LiveProvider:
-    def __init__(self, backend=None):
+    def __init__(self, backend=None, models=None):
         self.backend = backend
         self.model = ''
+        self.available_models = list(models or [])
         if backend is None and PORT.exists():
             self.backend = BridgeProvider()
-            self.model = self.backend.models()[0]
+            self.available_models = self.backend.models()
+            self.model = self.available_models[0]
         elif backend:
             self.model = backend.model
+            if not self.available_models:
+                self.available_models = [self.model] if self.model else []
 
     # The controller hands over the page's cancel token. ChatGPT and the bridge stop their
     # request; an API request cannot be interrupted, so its late answer is discarded.
@@ -62,6 +66,10 @@ def connect_chatgpt(model=None, show_login=lambda url: None, current=None):
     so the sign-in page is opened by the browser tab of the site (show_login).
     On the test stand the bridge stands in for ChatGPT; its port opens only once,
     so a provider that already holds it is reused."""
+    if current is not None and isinstance(getattr(current, 'backend', None), ChatGPTProvider):
+        if model:
+            current.model = model
+        return current
     if PORT.exists():
         if current is not None and isinstance(current.backend, BridgeProvider):
             if model:
@@ -75,7 +83,7 @@ def connect_chatgpt(model=None, show_login=lambda url: None, current=None):
     try:
         models = backend.login(show_login)
         backend.model = model or models[0]
-        return LiveProvider(backend)
+        return LiveProvider(backend, models=models)
     except Exception:
         backend.close()
         raise

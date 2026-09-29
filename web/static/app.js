@@ -1,5 +1,7 @@
 // AGIOS Live workspace: one sunrise scene. Talk → find room for the preview → the sun rises while it builds →
 // the preview VM stands on the horizon under the sun → install or put it back → the sun rises again while it installs → good morning.
+import {ModelPicker} from './model-picker.mjs';
+
 const $ = id => document.getElementById(id);
 const gib = bytes => (bytes / 2**30).toFixed(1) + ' GiB';
 // Like the site, the workspace always plays its motion: the system reduced-motion setting is not honored.
@@ -722,41 +724,41 @@ const PROVIDER_NOTES = {chatgpt: 'Sign-in opens in a new tab of this browser. Fi
     ollama: 'Ollama on this computer or another one in your network, e.g. http://192.168.1.20:11434 (start it there with OLLAMA_HOST=0.0.0.0). '
         + 'Plain HTTP works only with a local-network IP address. Models run on that machine: Live keeps its whole system in memory and does not run them itself.',
     compatible: 'Any OpenAI-compatible API with structured JSON replies. Plain HTTP works only with a local-network IP address.'};
+const modelPicker = new ModelPicker($, api);
 function pickProvider(kind) {
+    const changed = providerKind !== kind;
     providerKind = kind;
+    if (changed) { $('key').value = ''; $('endpoint').value = ''; }
     document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.setAttribute('aria-checked', String(seg.dataset.kind === kind)));
     $('keyField').hidden = ['chatgpt', 'ollama'].includes(kind);
     $('endpointField').hidden = kind === 'chatgpt';
     $('providerNote').textContent = PROVIDER_NOTES[kind] || 'The key stays in memory on this computer and never enters the chat. API usage may be billed separately.';
-    $('providerSubmit').textContent = kind === 'chatgpt' ? 'Sign in to ChatGPT' : 'Connect';
-    $('providerModel').placeholder = kind === 'chatgpt' ? 'Leave empty to pick one after signing in' : 'Pick a model from the list or type its ID';
-    $('listModelsRow').hidden = kind === 'chatgpt';
-    $('providerModels').replaceChildren();
+    const signedIn = kind === 'chatgpt' && current && ['ChatGPT — account sign-in', 'Test bridge'].includes(current.provider);
+    $('providerSubmit').textContent = kind === 'chatgpt' && !signedIn ? 'Sign in to ChatGPT' : 'Connect';
+    modelPicker.reset(kind, signedIn, signedIn ? current.provider_models : [], signedIn ? current.model : '');
     $('providerError').hidden = true;
 }
 document.querySelectorAll('#providerKinds .seg').forEach(seg => seg.onclick = () => pickProvider(seg.dataset.kind));
-$('listModels').onclick = async () => {
-    const button = $('listModels');
-    button.disabled = true; $('providerError').hidden = false; $('providerError').className = 'hint'; $('providerError').textContent = 'Asking the provider…';
-    try {
-        const {models} = await api('provider/models', {kind: providerKind, endpoint: $('endpoint').value, key: $('key').value});
-        $('providerModels').replaceChildren(...models.map(name => Object.assign(document.createElement('option'), {value: name})));
-        $('providerError').textContent = models.length ? models.length + ' models: pick one in the Model field.' : 'The provider listed no models.';
-        if (models.length && !$('providerModel').value) $('providerModel').focus();
-    } catch (error) { $('providerError').className = 'line error'; $('providerError').textContent = error.message; }
-    finally { button.disabled = false; }
-};
 $('settingsButton').onclick = $('connectButton').onclick = () => { pickProvider(providerKind); $('settings').showModal(); };
 $('closeSettings').onclick = () => { if (current && current.model) $('settings').close(); };
 $('settings').addEventListener('cancel', event => { if (!(current && current.model)) event.preventDefault(); });
 $('providerForm').onsubmit = async event => {
     event.preventDefault();
+    const choosingAfterLogin = providerKind === 'chatgpt' && !modelPicker.connected;
+    if (!choosingAfterLogin && !$('providerModel').value.trim()) {
+        $('providerError').hidden = false; $('providerError').className = 'line error';
+        $('providerError').textContent = 'Choose a model from the list or enter its ID.';
+        return;
+    }
+    modelPicker.invalidate();
+    document.querySelectorAll('#providerKinds .seg').forEach(seg => { seg.disabled = true; });
+    for (const id of ['key', 'endpoint', 'providerModel', 'providerModels', 'manualModel', 'listModels']) $(id).disabled = true;
     $('providerSubmit').disabled = true;
     $('providerError').hidden = false; $('providerError').className = 'hint';
-    $('providerError').textContent = providerKind === 'chatgpt' ? 'Connecting. If a sign-in tab opened, finish signing in there.' : 'Connecting…';
+    $('providerError').textContent = choosingAfterLogin ? 'Connecting. If a sign-in tab opened, finish signing in there.' : 'Connecting…';
     // The site runs as a system user without the desktop, so this tab opens the ChatGPT sign-in page itself.
     // It is opened right in the click so the browser does not block it as a pop-up.
-    const chatgpt = providerKind === 'chatgpt';
+    const chatgpt = choosingAfterLogin;
     let tab = chatgpt ? window.open('about:blank', '_blank') : null, opened = false;
     const watch = chatgpt ? setInterval(async () => {
         let url; try { url = (await api('state')).login_url; } catch { return; }
@@ -767,10 +769,20 @@ $('providerForm').onsubmit = async event => {
         $('providerError').replaceChildren('Finish signing in on the ChatGPT page. If no tab opened: ', link);
     }, 700) : null;
     try {
-        render(await api('provider', {kind: providerKind, model: $('providerModel').value, endpoint: $('endpoint').value, key: $('key').value}));
-        $('key').value = ''; $('providerError').hidden = true; $('settings').close();
+        const result = await api('provider', {kind: providerKind, model: $('providerModel').value, endpoint: $('endpoint').value, key: $('key').value});
+        render(result);
+        $('key').value = ''; $('providerError').hidden = true;
+        if (choosingAfterLogin) {
+            modelPicker.reset('chatgpt', true, result.provider_models, result.model);
+            $('providerSubmit').textContent = 'Use selected model';
+        } else $('settings').close();
     } catch (error) { $('providerError').className = 'line error'; $('providerError').textContent = error.message; }
-    finally { clearInterval(watch); if (tab && !opened && !tab.closed) tab.close(); $('providerSubmit').disabled = false; }
+    finally {
+        clearInterval(watch); if (tab && !opened && !tab.closed) tab.close(); $('providerSubmit').disabled = false;
+        document.querySelectorAll('#providerKinds .seg').forEach(seg => { seg.disabled = false; });
+        for (const id of ['key', 'endpoint', 'providerModel', 'manualModel', 'listModels']) $(id).disabled = false;
+        $('providerModels').disabled = $('providerModels').options.length <= 1;
+    }
 };
 
 /* ── the preview's screen through Guacamole ───────────── */
