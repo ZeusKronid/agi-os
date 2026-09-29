@@ -39,7 +39,9 @@ jobs:
       - name: Website tests
         run: runuser -u tester -- python -B -m unittest discover -s web/tests -v
       - name: JavaScript syntax
-        run: for file in web/static/*.js; do node --check "$file"; done
+        run: for file in web/static/*.js web/static/*.mjs; do node --check "$file"; done
+      - name: Model picker tests
+        run: runuser -u tester -- node --test web/tests/*.test.mjs
       - name: Shell and Python syntax
         run: |
           for file in scripts/*.sh scripts/ci/*.sh; do bash -n "$file"; done
