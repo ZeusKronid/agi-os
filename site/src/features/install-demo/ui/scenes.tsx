@@ -226,9 +226,9 @@ export function InstallScene() {
           </svg>
           <CheckIcon data-install-check="" className="absolute inset-0 m-auto size-7 text-ink" />
         </div>
-        <h3 data-install-title="" className="font-serif text-[29px] tracking-[-0.015em] max-sm:text-2xl">
+        <p data-install-title="" className="font-serif text-[29px] tracking-[-0.015em] max-sm:text-2xl">
           Installing your system
-        </h3>
+        </p>
         <ul className="grid w-full gap-[7px]">
           {INSTALL_ROWS.map((row) => (
             <li

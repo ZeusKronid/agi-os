@@ -88,7 +88,7 @@ export function Sunburst({ variant, className, ...props }: SunburstProps) {
         x2={ray.x2}
         y2={ray.y2}
         strokeOpacity={ray.opacity}
-        className="[stroke-dasharray:1_1] [stroke-dashoffset:calc((1_-_var(--sun-extend,0))_*_var(--sun-rest))] transition-[stroke-dashoffset] duration-700 ease-out-strong motion-reduce:transition-none"
+        className="sun-ray-reach"
         style={
           {
             '--sun-rest': (1 - 1 / reach).toFixed(3),

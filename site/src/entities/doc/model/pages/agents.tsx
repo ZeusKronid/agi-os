@@ -8,6 +8,7 @@ export const providers: DocPage = {
   title: 'Which agents',
   em: 'connect.',
   lede: 'Sign in with ChatGPT, use an API key, run a local model with Ollama, or point at any OpenAI-compatible endpoint.',
+  metaTitle: 'Connect ChatGPT, Claude, Gemini or Ollama — AGI OS Docs',
   sections: [
     {
       id: 'ways-in',

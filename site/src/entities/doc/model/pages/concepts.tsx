@@ -8,6 +8,7 @@ export const liveEnvironment: DocPage = {
   title: 'The live',
   em: 'environment.',
   lede: 'One ISO, built with mkarchiso from the official repositories, that carries the site, the agent bridge and the preview machine.',
+  metaTitle: 'AGI OS Live Environment — an Arch ISO with an Agent Inside',
   sections: [
     {
       id: 'one-image',
@@ -45,6 +46,7 @@ export const reversiblePreview: DocPage = {
   title: 'A preview you can',
   em: 'undo.',
   lede: 'The preview is the real installed system, kept somewhere you can take back with one action.',
+  metaTitle: 'Reversible Preview: Try Your Linux Before Installing — AGI OS',
   sections: [
     {
       id: 'why',
@@ -80,6 +82,7 @@ export const agentAndPrivacy: DocPage = {
   title: 'The agent and',
   em: 'your secrets.',
   lede: 'The agent chooses packages and proposes configuration. It never sees your passwords or keys.',
+  metaTitle: 'AI Agent Privacy: Where Your Keys Go — AGI OS Docs',
   sections: [
     {
       id: 'sees',

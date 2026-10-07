@@ -1,23 +1,15 @@
 import { createFileRoute } from '@tanstack/react-router'
 
-import { docIndexPage } from '@/entities/doc'
+import { docHead, docIndexPage } from '@/entities/doc'
 import { DocsPage } from '@/pages/docs'
-import { siteConfig } from '@/shared/config'
 
 export const Route = createFileRoute('/docs/')({
   // Как в `docs.$slug`: реестр грузится динамически, чтобы тексты документации не попали в entry-чанк.
   loader: async () => {
-    const { docIndexPage } = await import('@/entities/doc')
-    return { short: docIndexPage.short, lede: docIndexPage.lede }
+    const { docHeadData, docIndexPage } = await import('@/entities/doc')
+    return docHeadData(docIndexPage, '/docs')
   },
-  head: ({ loaderData }) => ({
-    meta: loaderData
-      ? [
-          { title: `${loaderData.short} — ${siteConfig.name} Docs` },
-          { name: 'description', content: loaderData.lede },
-        ]
-      : [],
-  }),
+  head: ({ loaderData }) => (loaderData ? docHead(loaderData) : {}),
   component: DocsIndexRoute,
 })
 

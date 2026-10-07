@@ -9,6 +9,9 @@ export const faq: DocPage = {
   title: 'Questions,',
   em: 'answered.',
   lede: 'Short answers to what people ask before they boot the ISO.',
+  metaTitle: 'AGI OS FAQ — Agentic Arch Linux Questions Answered',
+  metaDescription:
+    'Is AGI OS free, will it run on my computer, what happens to my data and where do API keys go: short answers before you boot the ISO.',
   sections: [
     {
       id: 'free',
@@ -58,6 +61,7 @@ export const contribute: DocPage = {
   title: 'Build it',
   em: 'with us.',
   lede: 'The installer engine, the Live site and these docs live in one public repository.',
+  metaTitle: 'Contribute to AGI OS — Open Source on GitHub',
   sections: [
     {
       id: 'repository',

@@ -138,7 +138,7 @@ function SunZenith() {
 const ledger = [
   { label: siteConfig.license },
   { label: 'Built in public' },
-  { label: 'Test reports ↗', href: siteConfig.links.evidence },
+  { label: 'Test status ↗', href: siteConfig.links.evidence },
 ] as const
 
 export function GetInvolved() {

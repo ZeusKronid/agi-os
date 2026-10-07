@@ -8,6 +8,7 @@ export const previewPlacement: DocPage = {
   title: 'Where the preview',
   em: 'lives.',
   lede: 'Five places, from safest to permanent. The installer proposes one after measuring the exact size.',
+  metaTitle: 'Where the Live Preview Is Stored — AGI OS Docs',
   sections: [
     {
       id: 'options',
@@ -47,6 +48,9 @@ export const disksAndBoot: DocPage = {
   title: 'Disks, boot and',
   em: 'encryption.',
   lede: 'What the installed system is made of, and what is not supported yet.',
+  metaTitle: 'Disks, Boot and Encryption — AGI OS Docs',
+  metaDescription:
+    'Filesystems, bootloaders and encryption AGI OS installs: ext4, Btrfs, XFS, F2FS, GRUB or systemd-boot, LUKS2 and zram. Plus what is not supported yet.',
   sections: [
     {
       id: 'supported',

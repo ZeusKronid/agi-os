@@ -11,9 +11,13 @@ const repo = 'https://github.com/ZeusKronid/agi-os'
 
 export const siteConfig = {
   name: 'AGI OS',
-  title: 'AGI OS — Modern agentic Linux',
+  /** Канонический origin: из него строятся canonical, og:url, sitemap и JSON-LD. */
+  url: 'https://agios.complexity.solutions',
+  title: 'AGI OS — Agentic Linux: Describe It, Try It Live, Install',
   description:
-    'Describe the Linux system you want, try the real thing in a live preview, then install it. An Arch Linux live environment with an agent inside.',
+    'AGI OS is an Arch Linux live ISO with an AI agent inside. Describe the system you want in plain words, try it in a live preview, then install it.',
+  /** Картинка превью для соцсетей и мессенджеров, 1200×630. */
+  ogImage: { path: '/og.png', width: 1200, height: 630, alt: 'AGI OS — Modern agentic Linux' },
   themeColor: '#0b0908',
   license: 'Apache-2.0',
   links: {
@@ -22,7 +26,8 @@ export const siteConfig = {
     install: '/install',
     // Страница релиза с ISO, контрольной суммой и заметками.
     download: `${repo}/releases/latest`,
-    evidence: `${repo}/tree/HEAD/docs/test-results`,
+    // Статус приёмочных прогонов; сами отчёты в репозиторий не коммитятся.
+    evidence: `${repo}/blob/HEAD/docs/installation-testing.md`,
     // TODO: заменить на реальную страницу пожертвований, когда она появится.
     donate: repo,
   },

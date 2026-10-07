@@ -1,2 +1,2 @@
 export { agents, type Agent } from './model/agents'
-export { AgentIcon } from './ui/agent-icon'
+export { AgentIcon, AgentIconRef, AgentIconSprite } from './ui/agent-icon'

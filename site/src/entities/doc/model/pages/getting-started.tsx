@@ -12,6 +12,7 @@ export const gettingStarted: DocPage = {
   title: 'Getting',
   em: 'started.',
   lede: 'From a downloaded ISO to a system that is yours in six steps. Nothing on your disk changes until you confirm the install yourself.',
+  metaTitle: 'Get Started with AGI OS: Boot, Describe, Preview, Install',
   sections: [
     {
       id: 'what-is',

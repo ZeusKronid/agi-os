@@ -173,12 +173,30 @@ GSAP. Не задавайте их на узле, который трансфо�
 
 ## Ассеты и шрифты
 
-- Geist, Geist Mono и Newsreader подключены с Google Fonts в `app/routes/__root.tsx`.
-- `public/fonts/DalekPinpointBold.ttf` — логотипный шрифт (K-Type), используется только в wordmark футера.
+- Geist, Geist Mono и Newsreader (SIL OFL 1.1) лежат в `app/styles/fonts/` (WOFF2, подмножества latin,
+  latin-ext и symbols2) и подключаются через `app/styles/fonts.css`. Google Fonts не используются: их CSS
+  блокировал первую отрисовку. Vite хеширует файлы, поэтому они кешируются навсегда; шрифты первого экрана
+  (Newsreader и Geist latin) предзагружаются в `app/routes/__root.tsx`.
+- `app/styles/fonts/DalekPinpointBold.ttf` — логотипный шрифт (K-Type), используется только в wordmark футера.
   Перед публичным запуском проверьте условия лицензии: http://www.k-type.com/licences
 - Иконки агентов и GitHub — контуры Simple Icons (CC0) в `entities/agent/model/marks.ts` и
   `shared/ui/icon`. Товарные знаки принадлежат владельцам и обозначают только совместимость.
 - В `shared/config/site.ts` ссылки `download` и `donate` пока ведут на репозиторий (помечены TODO).
+
+## SEO
+
+- Канонический origin — `siteConfig.url` в `shared/config/site.ts`. Из него строятся canonical, `og:url`,
+  `sitemap.xml` и JSON-LD.
+- Мету страницы задаёт `pageHead()` из `shared/lib/seo` в `head()` листового маршрута: title, description,
+  canonical, Open Graph, Twitter и JSON-LD. В корневом маршруте — только общая мета (og:image, иконки) и
+  запасные title/description; для 404 корень ставит `noindex`.
+- Доки: `metaTitle` (и при коротком `lede` — `metaDescription`) в описании страницы, JSON-LD `TechArticle` и
+  `BreadcrumbList` собирает `entities/doc/lib/doc-head.ts`. Обзор живёт на `/docs`, `/docs/getting-started`
+  отвечает 301 на него.
+- `sitemap.xml` — серверный маршрут `app/routes/sitemap[.]xml.ts`, список страниц берётся из реестра доков.
+  `robots.txt`, `llms.txt`, `og.png` (1200×630), иконки и `site.webmanifest` лежат в `public/`.
+- JSON-LD главной (`SoftwareApplication`, `FAQPage`) берёт данные из `entities/release` и `widgets/faq`:
+  разметка не расходится с видимым текстом.
 
 ## Деплой
 

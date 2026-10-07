@@ -1,0 +1,28 @@
+# AGI OS
+
+> AGI OS is an Arch Linux live ISO with an AI agent inside. You describe the system you want in plain words, try the real system in a live preview, and install it to your computer when you like it. Free and open source under the Apache 2.0 license.
+
+- Software comes from the official Arch Linux repositories (core and extra).
+- Works with ChatGPT sign-in, OpenAI, Anthropic Claude, Google Gemini, Ollama for local models and any OpenAI-compatible endpoint. API keys never enter the chat and are never copied to the installed system.
+- Nothing on the disk changes until the user confirms the install. Tested in virtual machines on 64-bit PCs; real hardware is experimental. Dual boot is not supported yet.
+
+## Start
+
+- [Install](https://agios.complexity.solutions/install): download the Live ISO, check its SHA-256, write it to a USB stick or boot it in a VM
+- [Getting started](https://agios.complexity.solutions/docs): from a downloaded ISO to an installed system in six steps
+
+## Docs
+
+- [Live environment](https://agios.complexity.solutions/docs/live-environment): what the ISO contains
+- [Reversible preview](https://agios.complexity.solutions/docs/reversible-preview): the preview is the real installed system, and it can be taken back
+- [Agent and privacy](https://agios.complexity.solutions/docs/agent-and-privacy): what the agent can and cannot see
+- [Providers](https://agios.complexity.solutions/docs/providers): which models and agents connect
+- [Preview placement](https://agios.complexity.solutions/docs/preview-placement): where the preview is stored
+- [Disks and boot](https://agios.complexity.solutions/docs/disks-and-boot): filesystems, bootloaders, encryption, current limits
+- [FAQ](https://agios.complexity.solutions/docs/faq)
+- [Contribute](https://agios.complexity.solutions/docs/contribute)
+
+## Source
+
+- [GitHub repository](https://github.com/ZeusKronid/agi-os)
+- [Releases](https://github.com/ZeusKronid/agi-os/releases)

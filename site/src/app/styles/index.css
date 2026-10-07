@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'lenis/dist/lenis.css';
+@import './fonts.css';
 
 /*
  * Системная настройка reduced motion на сайте намеренно не учитывается: лендинг всегда анимирован.
@@ -12,7 +13,7 @@
 /* Логотипный шрифт: используется ТОЛЬКО в wordmark AGIOS (футер). Больше нигде. */
 @font-face {
   font-family: 'Dalek Pinpoint';
-  src: url('/fonts/DalekPinpointBold.ttf') format('truetype');
+  src: url('./fonts/DalekPinpointBold.ttf') format('truetype');
   font-weight: 700;
   font-display: swap;
 }
@@ -75,9 +76,13 @@
   /* Дорисовка штриха с `pathLength=1` и `stroke-dasharray: 1` (кольцо «Ready to boot»). */
   --animate-draw: draw 1s var(--ease-in-out-strong) both;
 
+  /*
+   * 0.01, а не 0: на глаз то же проявление, но Chrome не учитывает в LCP текст с нулевой
+   * прозрачностью, и H1 героя засчитывался только после конца анимации (+2 с к LCP на мобильных).
+   */
   @keyframes rise {
     from {
-      opacity: 0;
+      opacity: 0.01;
       transform: translateY(1.25rem);
     }
   }
@@ -226,6 +231,17 @@
     radial-gradient(1.1px 1.1px at 300px 470px, rgb(255 255 255 / 0.22) 50%, transparent 52%),
     radial-gradient(1px 1px at 470px 520px, rgb(255 170 130 / 0.3) 50%, transparent 52%),
     radial-gradient(1px 1px at 30px 500px, rgb(255 255 255 / 0.12) 50%, transparent 52%);
+}
+
+/*
+ * Луч восхода с запасом длины (`Sunburst` с `reach`): в покое укорочен до `--sun-rest`,
+ * `--sun-extend: 1` на предке вытягивает его целиком. Одна утилита вместо длинной строки классов
+ * на каждом из ~100 лучей: разметка главной заметно легче.
+ */
+@utility sun-ray-reach {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: calc((1 - var(--sun-extend, 0)) * var(--sun-rest));
+  transition: stroke-dashoffset 700ms var(--ease-out-strong);
 }
 
 /* Живой восход: рост луча и сразу за ним сияние. Не токен в `@theme`: параметры — инлайн-переменные

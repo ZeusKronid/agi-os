@@ -21,15 +21,15 @@ const groups: readonly { title: string; links: readonly FooterLink[] }[] = [
     links: [
       { label: 'Download ISO', hint: 'Live image and checksum', href: siteConfig.links.install },
       { label: 'How it works', hint: 'Listen, preview, build, install', href: `/#${sectionIds.demo}` },
-      { label: 'Getting started', hint: 'First boot, in a VM first', href: `${siteConfig.links.docs}/getting-started` },
+      { label: 'Getting started', hint: 'First boot, in a VM first', href: siteConfig.links.docs },
     ],
   },
   {
     title: 'Learn',
     links: [
-      { label: 'Docs', hint: 'How the live environment works', href: siteConfig.links.docs },
+      { label: 'Docs', hint: 'How the live environment works', href: `${siteConfig.links.docs}/live-environment` },
       { label: 'FAQ', hint: 'Disks, keys, agents, hardware', href: `/#${sectionIds.faq}` },
-      { label: 'Test reports', hint: 'Every run we recorded', href: siteConfig.links.evidence, external: true },
+      { label: 'Test status', hint: 'What passed in VM runs', href: siteConfig.links.evidence, external: true },
     ],
   },
   {
@@ -74,7 +74,7 @@ export function SiteFooter() {
         >
           {groups.map((group) => (
             <div key={group.title}>
-              <h2 className="mb-[18px] font-mono text-[11px] tracking-[0.3em] text-ink-dim uppercase">{group.title}</h2>
+              <p className="mb-[18px] font-mono text-[11px] tracking-[0.3em] text-ink-dim uppercase">{group.title}</p>
               <ul className="grid gap-1">
                 {group.links.map((link) => (
                   <li key={link.label}>

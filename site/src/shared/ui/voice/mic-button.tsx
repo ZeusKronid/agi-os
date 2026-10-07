@@ -11,6 +11,7 @@ export function MicButton({ className, ...props }: Omit<ComponentProps<'button'>
     <button
       type="button"
       tabIndex={-1}
+      aria-label="Voice input"
       data-mic=""
       data-on="false"
       className={cn(

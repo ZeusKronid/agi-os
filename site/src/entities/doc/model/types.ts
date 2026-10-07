@@ -26,5 +26,9 @@ export interface DocPage {
   title: string
   em: string
   lede: string
+  /** Заголовок для поиска (`<title>`, og:title), до ~60 символов. */
+  metaTitle: string
+  /** Описание для сниппета, если `lede` для него короток. */
+  metaDescription?: string
   sections: readonly DocSection[]
 }

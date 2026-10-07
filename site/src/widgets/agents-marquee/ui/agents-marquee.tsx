@@ -1,4 +1,4 @@
-import { AgentIcon, agents } from '@/entities/agent'
+import { AgentIconRef, AgentIconSprite, agents } from '@/entities/agent'
 
 // Набор повторяется столько раз, чтобы половина ленты была заведомо шире любого монитора:
 // сдвиг на -50% тогда бесшовен на любой ширине, без измерений в JavaScript.
@@ -16,7 +16,7 @@ function Half() {
             key={`${repeat}-${agent.id}`}
             className="grid justify-items-center gap-3 whitespace-nowrap opacity-60 transition-opacity duration-200 hover:opacity-100"
           >
-            <AgentIcon mark={agent.mark} className="size-9 max-sm:size-[30px]" />
+            <AgentIconRef mark={agent.mark} className="size-9 max-sm:size-[30px]" />
             <span className="text-[13px] text-ink-muted">{agent.label}</span>
           </li>
         )),
@@ -34,6 +34,7 @@ export function AgentsMarquee() {
   return (
     <section aria-label="Agents you can connect" className="pt-16 pb-28 max-sm:pt-7 max-sm:pb-16">
       <p className="sr-only">Works with {marqueeAgents.map((agent) => agent.label).join(', ')}.</p>
+      <AgentIconSprite marks={[...new Set(marqueeAgents.map((agent) => agent.mark))]} />
       <div aria-hidden="true" className="mask-fade-x overflow-hidden">
         <div className="flex w-max animate-marquee will-change-transform hover:[animation-play-state:paused]">
           <Half />

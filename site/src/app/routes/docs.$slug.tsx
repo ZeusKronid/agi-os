@@ -1,27 +1,21 @@
-import { createFileRoute, notFound } from '@tanstack/react-router'
+import { createFileRoute, notFound, redirect } from '@tanstack/react-router'
 
-import { findDocPage } from '@/entities/doc'
+import { docHead, findDocPage } from '@/entities/doc'
 import { DocsPage } from '@/pages/docs'
-import { siteConfig } from '@/shared/config'
 
 export const Route = createFileRoute('/docs/$slug')({
   // Страницы — статический реестр, поэтому loader только проверяет slug; контент (React-узлы) не сериализуется.
   // Реестр грузится динамически: loader и head не уходят в отдельный чанк, и статический импорт
   // затащил бы тексты всей документации в entry-чанк каждой страницы сайта.
   loader: async ({ params }) => {
-    const { findDocPage } = await import('@/entities/doc')
+    const { docHeadData, docIndexPage, findDocPage } = await import('@/entities/doc')
+    // Обзор живёт на `/docs`; его второй адрес — постоянный редирект, чтобы не было дубля в поиске.
+    if (params.slug === docIndexPage.slug) throw redirect({ to: '/docs', statusCode: 301 })
     const page = findDocPage(params.slug)
     if (!page) throw notFound()
-    return { slug: page.slug, short: page.short, lede: page.lede }
+    return { slug: page.slug, ...docHeadData(page, `/docs/${page.slug}`) }
   },
-  head: ({ loaderData }) => ({
-    meta: loaderData
-      ? [
-          { title: `${loaderData.short} — ${siteConfig.name} Docs` },
-          { name: 'description', content: loaderData.lede },
-        ]
-      : [],
-  }),
+  head: ({ loaderData }) => (loaderData ? docHead(loaderData) : {}),
   component: DocsSlugRoute,
 })
 
