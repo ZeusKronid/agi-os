@@ -1,13 +1,16 @@
 import { HeadContent, Scripts } from '@tanstack/react-router'
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect } from 'react'
 
 import { ScrollProgress } from '@/features/scroll-progress'
 import { sectionIds } from '@/shared/config'
+import { mountOutboundTracking } from '@/shared/lib/analytics'
 import { mountSmoothScroll } from '@/shared/lib/motion'
 import { SiteFooter } from '@/widgets/site-footer'
 import { SiteHeader } from '@/widgets/site-header'
 
 export function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
+  useEffect(() => mountOutboundTracking(), [])
+
   return (
     <html lang="en">
       <head>

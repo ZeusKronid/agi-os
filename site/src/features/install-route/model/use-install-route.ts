@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
+import { track } from '@/shared/lib/analytics'
+
 import { detectOs } from '../lib/detect-os'
 import type { OsId, StepId, TargetId } from './route'
 
@@ -52,11 +54,28 @@ export function useInstallRoute() {
     })
   }, [])
 
-  const setOs = useCallback((os: OsId) => update((current) => ({ ...current, os })), [update])
-  const setTarget = useCallback((target: TargetId) => update((current) => ({ ...current, target })), [update])
-  const setDone = useCallback(
-    (step: StepId, done: boolean) => update((current) => ({ ...current, done: { ...current.done, [step]: done } })),
+  // События — только на действия посетителя: автоопределение системы после гидрации их не шлёт.
+  const setOs = useCallback(
+    (os: OsId) => {
+      track('install_os', { os, detected: detected ?? 'unknown' })
+      update((current) => ({ ...current, os }))
+    },
+    [update, detected],
+  )
+  const setTarget = useCallback(
+    (target: TargetId) => {
+      track('install_target', { target })
+      update((current) => ({ ...current, target }))
+    },
     [update],
+  )
+  const setDone = useCallback(
+    (step: StepId, done: boolean) => {
+      // `onDone` шагов срабатывает повторно (клик, каждая правка совпавшего хэша) — считаем только первый раз.
+      if (done && !state.done[step]) track('install_step', { step, os: state.os, target: state.target })
+      update((current) => ({ ...current, done: { ...current.done, [step]: done } }))
+    },
+    [update, state],
   )
   const reset = useCallback(() => update((current) => ({ ...current, done: {} })), [update])
 

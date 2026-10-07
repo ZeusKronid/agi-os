@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 
 import { siteConfig } from '@/shared/config'
+import { track } from '@/shared/lib/analytics'
 import { buttonStyles } from '@/shared/ui/button'
 import { Container } from '@/shared/ui/container'
 import { ArrowDownIcon, GitHubIcon } from '@/shared/ui/icon'
@@ -72,7 +73,11 @@ export function SiteHeader() {
           >
             <GitHubIcon className="size-[22px]" />
           </a>
-          <Link to="/install" className={buttonStyles({ size: 'sm', className: 'max-sm:hidden' })}>
+          <Link
+            to="/install"
+            onClick={() => track('cta_click', { cta: 'get', place: 'header' })}
+            className={buttonStyles({ size: 'sm', className: 'max-sm:hidden' })}
+          >
             Get AGI OS <ArrowDownIcon />
           </Link>
           <button

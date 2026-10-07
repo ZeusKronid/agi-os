@@ -31,6 +31,11 @@ export const siteConfig = {
     // TODO: заменить на реальную страницу пожертвований, когда она появится.
     donate: repo,
   },
+  /** Umami на своём сервере: без cookie, IP не хранится. ID сайта публичный — он всё равно виден в HTML. */
+  analytics: {
+    scriptUrl: 'https://agios-stats.2.29.47.11.sslip.io/insights.js',
+    websiteId: '19629fec-efb3-4efc-9ced-b2054be9ea84',
+  },
   nav: [
     { label: 'Features', href: `/#${sectionIds.features}` },
     { label: 'Get Involved', href: `/#${sectionIds.involved}` },

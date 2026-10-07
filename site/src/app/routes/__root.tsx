@@ -1,6 +1,7 @@
 import { createRootRoute, Outlet } from '@tanstack/react-router'
 
 import { siteConfig } from '@/shared/config'
+import { analyticsScript } from '@/shared/lib/analytics'
 import { absoluteUrl } from '@/shared/lib/seo'
 
 import { RootDocument } from '../layouts/root-document'
@@ -44,6 +45,7 @@ export const Route = createRootRoute({
         { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' },
         { rel: 'manifest', href: '/site.webmanifest' },
       ],
+      scripts: [analyticsScript()],
     }
   },
   component: RootComponent,

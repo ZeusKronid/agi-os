@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 
 import { sectionIds, siteConfig } from '@/shared/config'
+import { track } from '@/shared/lib/analytics'
 import { ButtonLink } from '@/shared/ui/button'
 import { Container } from '@/shared/ui/container'
 import { ArrowRightIcon, ChevronDownIcon } from '@/shared/ui/icon'
@@ -33,7 +34,10 @@ function FaqColumn({ items, defaultOpen }: FaqColumnProps) {
                 type="button"
                 aria-expanded={isOpen}
                 aria-controls={panelId}
-                onClick={() => setOpen(isOpen ? null : index)}
+                onClick={() => {
+                  if (!isOpen) track('faq_open', { question: item.question })
+                  setOpen(isOpen ? null : index)
+                }}
                 className="flex w-full items-center justify-between gap-4 py-[22px] text-left font-serif text-[22px] tracking-[-0.012em] transition-colors duration-200 hover:text-accent-hover max-sm:text-[19px]"
               >
                 {item.question}

@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 
+import { track } from '@/shared/lib/analytics'
 import { cn } from '@/shared/lib/cn'
 
 import { compareChecksum } from '../model/checksum'
@@ -25,8 +26,11 @@ export function ChecksumCheck({ expected, placeholder, onMatch }: ChecksumCheckP
         id={id}
         value={value}
         onChange={(event) => {
+          const next = compareChecksum(event.target.value, expected)
           setValue(event.target.value)
-          if (compareChecksum(event.target.value, expected) === 'match') onMatch()
+          if (next === 'match') onMatch()
+          // Битые или чужие образы: сигнал о проблемах с загрузкой. Одно событие на переход в «не совпало».
+          if (next === 'mismatch' && result !== 'mismatch') track('checksum_mismatch')
         }}
         autoComplete="off"
         spellCheck={false}

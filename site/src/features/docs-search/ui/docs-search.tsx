@@ -2,6 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useId, useRef, useState, type ComponentProps, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 import { docIndexPage } from '@/entities/doc'
+import { track } from '@/shared/lib/analytics'
 import { cn } from '@/shared/lib/cn'
 
 import { searchDocs, type SearchHit } from '../model/search-index'
@@ -69,6 +70,14 @@ export function DocsSearchPalette({ open, onOpen, onClose }: DocsSearchPalettePr
   const [hot, setHot] = useState(0)
   const hits = searchDocs(query)
 
+  // Запросы без результатов — чего не хватает в доках. Шлём, когда человек перестал печатать.
+  useEffect(() => {
+    const value = query.trim()
+    if (!open || value.length < 3 || hits.length > 0) return
+    const timer = window.setTimeout(() => track('docs_search_empty', { query: value.slice(0, 60) }), 1500)
+    return () => window.clearTimeout(timer)
+  }, [open, query, hits.length])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -90,6 +99,7 @@ export function DocsSearchPalette({ open, onOpen, onClose }: DocsSearchPalettePr
   }, [open])
 
   const go = (hit: SearchHit) => {
+    track('docs_search', { query: query.trim().slice(0, 60), result: `${hit.page.slug}#${hit.section.id}` })
     onClose()
     const hash = hit.section.id
     if (hit.page.slug === docIndexPage.slug) void navigate({ to: '/docs', hash })

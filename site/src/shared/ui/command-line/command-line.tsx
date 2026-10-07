@@ -7,6 +7,8 @@ const COPIED_MS = 1600
 interface CommandLineProps {
   text: string
   className?: string
+  /** Нажатие «Copy» — для аналитики. */
+  onCopy?: () => void
 }
 
 /**
@@ -14,7 +16,7 @@ interface CommandLineProps {
  * состояние «Copied» зелёным `--color-ok` (как статусы в демо). Если clipboard недоступен,
  * выделяем текст, чтобы его можно было скопировать вручную.
  */
-export function CommandLine({ text, className }: CommandLineProps) {
+export function CommandLine({ text, className, onCopy }: CommandLineProps) {
   const [copied, setCopied] = useState(false)
   const codeRef = useRef<HTMLElement>(null)
 
@@ -25,6 +27,7 @@ export function CommandLine({ text, className }: CommandLineProps) {
   }, [copied])
 
   const copy = async () => {
+    onCopy?.()
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)

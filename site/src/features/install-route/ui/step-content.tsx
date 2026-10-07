@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 
 import { isoCommandName, isoDisplayName, release } from '@/entities/release'
 import { siteConfig } from '@/shared/config'
+import { track } from '@/shared/lib/analytics'
 import { ButtonLink } from '@/shared/ui/button'
 import { CommandLine } from '@/shared/ui/command-line'
 import { ArrowDownIcon } from '@/shared/ui/icon'
@@ -41,6 +42,8 @@ interface StepContentProps {
 }
 
 export function StepContent({ step, os, target, onDone }: StepContentProps) {
+  const onCopy = () => track('command_copy', { step, os, target })
+
   switch (step) {
     case 'download':
       return (
@@ -49,7 +52,15 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
             <span className="font-mono text-ink">{isoDisplayName(release)}</span> · x86_64 · {release.size}
           </p>
           <div>
-            <ButtonLink href={release.isoUrl} size="sm" onClick={onDone}>
+            <ButtonLink
+              href={release.isoUrl}
+              size="sm"
+              onClick={() => {
+                // Главная конверсия сайта. Точное число скачиваний — `download_count` ассета в GitHub API.
+                track('iso_download', { os, target, version: release.version ?? 'unreleased' })
+                onDone()
+              }}
+            >
               Download ISO <ArrowDownIcon />
             </ButtonLink>
           </div>
@@ -65,7 +76,7 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
     case 'verify':
       return (
         <>
-          <CommandLine text={verifyCommand(os, file)} />
+          <CommandLine text={verifyCommand(os, file)} onCopy={onCopy} />
           {release.sha256 ? (
             <ChecksumCheck expected={release.sha256} placeholder={`${release.sha256.slice(0, 8)}…  ${file}`} onMatch={onDone} />
           ) : (
@@ -81,7 +92,7 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
       if (os === 'win') return null
       return (
         <>
-          <CommandLine text={findCommand(os)} />
+          <CommandLine text={findCommand(os)} onCopy={onCopy} />
           <p>
             Plug the stick in and note its name — {os === 'mac' ? <Code>disk4</Code> : <Code>sdb</Code>}, for example.
             Size and model help you tell it apart.
@@ -105,7 +116,7 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
       return (
         <>
           {writeCommands(os, file).map((command) => (
-            <CommandLine key={command} text={command} />
+            <CommandLine key={command} text={command} onCopy={onCopy} />
           ))}
           <Warn>
             Replace <Code>{os === 'mac' ? 'diskN' : 'sdX'}</Code> with your stick. Everything on that device is erased.
@@ -117,7 +128,7 @@ export function StepContent({ step, os, target, onDone }: StepContentProps) {
       return (
         <>
           {vmCommands(file).map((command) => (
-            <CommandLine key={command} text={command} />
+            <CommandLine key={command} text={command} onCopy={onCopy} />
           ))}
           <p>
             UEFI, 10 GB of memory, 6 vCPUs and a 20 GB disk — the setup AGI OS is tested with. The live preview starts a
