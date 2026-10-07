@@ -195,6 +195,8 @@ GSAP. Не задавайте их на узле, который трансфо�
   отвечает 301 на него.
 - `sitemap.xml` — серверный маршрут `app/routes/sitemap[.]xml.ts`, список страниц берётся из реестра доков.
   `robots.txt`, `llms.txt`, `og.png` (1200×630), иконки и `site.webmanifest` лежат в `public/`.
+- IndexNow: ключ — `public/<ключ>.txt`. После деплоя выполнить `npm run indexnow`: скрипт берёт адреса из
+  живого `sitemap.xml` и отправляет их в Bing, Яндекс и другие поисковики с IndexNow.
 - JSON-LD главной (`SoftwareApplication`, `FAQPage`) берёт данные из `entities/release` и `widgets/faq`:
   разметка не расходится с видимым текстом.
 

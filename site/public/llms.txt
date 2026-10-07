@@ -20,6 +20,7 @@
 - [Preview placement](https://agios.complexity.solutions/docs/preview-placement): where the preview is stored
 - [Disks and boot](https://agios.complexity.solutions/docs/disks-and-boot): filesystems, bootloaders, encryption, current limits
 - [FAQ](https://agios.complexity.solutions/docs/faq)
+- [AGI OS vs archinstall](https://agios.complexity.solutions/docs/vs-archinstall): how it compares to the official Arch guided installer
 - [Contribute](https://agios.complexity.solutions/docs/contribute)
 
 ## Source

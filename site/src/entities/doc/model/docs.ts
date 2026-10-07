@@ -1,4 +1,5 @@
 import { providers } from './pages/agents'
+import { vsArchinstall } from './pages/compare'
 import { agentAndPrivacy, liveEnvironment, reversiblePreview } from './pages/concepts'
 import { gettingStarted } from './pages/getting-started'
 import { contribute, faq } from './pages/more'
@@ -23,6 +24,7 @@ export const docPages: readonly DocPage[] = [
   previewPlacement,
   disksAndBoot,
   faq,
+  vsArchinstall,
   contribute,
 ]
 
