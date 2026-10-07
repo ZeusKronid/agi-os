@@ -39,7 +39,8 @@ export function routeSteps(os: OsId, target: TargetId): StepId[] {
 }
 
 export function verifyCommand(os: OsId, file: string): string {
-  if (os === 'win') return `Get-FileHash .\\Downloads\\${file} -Algorithm SHA256`
+  // Путь от $HOME — не зависит от текущей папки; `.Hash` — без таблицы, которая режет хэш в узком окне.
+  if (os === 'win') return `(Get-FileHash "$HOME\\Downloads\\${file}" -Algorithm SHA256).Hash`
   if (os === 'mac') return `shasum -a 256 ~/Downloads/${file}`
   return `sha256sum ~/Downloads/${file}`
 }
