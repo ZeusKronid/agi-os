@@ -10,13 +10,13 @@ export interface Release {
   size: string
 }
 
-const tag = 'v2026.09.2'
-const version = '2026.09.24'
+const tag = 'v2026.10.0'
+const version = '2026.10.08'
 
 // Новый релиз: обновить tag, version и sha256 (из `agi-os-<дата>-x86_64.iso.sha256` релиза).
 export const release: Release = {
   version,
-  sha256: 'c8b9c09e95341d75e625a387032ddfbeac17eaf0e06862dbf7d0f5a898138b79',
+  sha256: 'f4e619c17168ac4ddac4b3936dd14a15a31a0f69fc82495a62c64a93617acd4f',
   isoUrl: `${siteConfig.links.repo}/releases/download/${tag}/agi-os-${version}-x86_64.iso`,
   size: 'about 2 GB',
 }
