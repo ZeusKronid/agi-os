@@ -1,148 +1,137 @@
-# AGIOS
+<p align="center">
+  <img src="docs/assets/readme/banner.png" alt="AGIOS" width="800">
+</p>
 
-Website and docs: **[agios.complexity.solutions](https://agios.complexity.solutions)**
+<p align="center">
+  <b>An Arch Linux installer you talk to.</b><br>
+  Describe the system you want, try it in your browser, then install it — nothing touches the disk until you say so.
+</p>
 
-AGIOS boots from a **Live ISO** and opens `http://localhost:8787` in Firefox
-inside the Live environment. You describe the system you want to an agent,
-review the configuration, and the installer builds it **as a preview**. A
-virtual machine inside Live shows the resulting system through **Apache
-Guacamole** on the website. Where you place the preview determines whether a
-disk is changed before final installation: the RAM option leaves disks alone,
-while file and partition options use the storage you choose. You can discard
-the preview and reverse supported storage changes; erasing a disk is
-irreversible.
+<p align="center">
+  <a href="https://github.com/ZeusKronid/agi-os/releases"><img alt="Release" src="https://img.shields.io/github/v/release/ZeusKronid/agi-os?color=ff6a3d&labelColor=1f1a16"></a>
+  <a href="https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml"><img alt="Live ISO" src="https://img.shields.io/github/actions/workflow/status/ZeusKronid/agi-os/iso.yml?branch=main&label=Live%20ISO&labelColor=1f1a16"></a>
+  <a href="https://github.com/ZeusKronid/agi-os/actions/workflows/tests.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/ZeusKronid/agi-os/tests.yml?branch=main&label=tests&labelColor=1f1a16"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-8f887e?labelColor=1f1a16"></a>
+</p>
 
-```text
-Computer (or an external test VM during development)
-└─ AGIOS Live
-   ├─ Firefox → localhost:8787 → agent and controller
-   ├─ Preview: QEMU + Guacamole → installed system
-   │    stored in memory (zram), in a file on any drive,
-   │    or in a temporary partition — your choice, with rollback where supported
-   └─ Finalization → computer disk (BIOS/UEFI, LUKS, zram swap)
-```
+<p align="center">
+  <a href="https://agios.complexity.solutions"><b>Website</b></a> ·
+  <a href="#download">Download</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#build-from-source">Build</a> ·
+  <a href="#documentation">Docs</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/readme/hello.png" alt="The AGIOS Live workspace" width="900">
+</p>
+
+## Why AGIOS
+
+- **Talk, don't configure.** An agent picks the desktop, packages and settings from the official Arch repositories; the installer validates every proposal against the real package catalog and your hardware.
+- **Try before you install.** The system is built in a VM inside the Live session and shown right in the browser. Use it, ask for changes, rebuild.
+- **Undo by default.** The preview lives in RAM, in a file on a USB stick or in a temporary partition — each with its own rollback. Disks change only after an explicit, typed confirmation.
+- **Bring your own model.** ChatGPT sign-in, OpenAI, Anthropic, Gemini, Ollama on your network, or any OpenAI-compatible API. Passwords never reach the model.
+
+## How it works
+
+Boot the Live ISO — Firefox opens the workspace at `localhost:8787`.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/talk.png" alt="Talk"></td>
+    <td width="50%"><img src="docs/assets/readme/place.png" alt="Place"></td>
+  </tr>
+  <tr>
+    <td><b>1 · Talk.</b> Describe how you use the computer. The agent asks what it needs and proposes a configuration.</td>
+    <td><b>2 · Place.</b> AGIOS measures the exact system size and lists where the preview can live, each with its undo.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/readme/preview.png" alt="Preview"></td>
+    <td><img src="docs/assets/readme/done.png" alt="Install"></td>
+  </tr>
+  <tr>
+    <td><b>3 · Preview.</b> The installed system boots in a VM and streams into the page through Apache Guacamole.</td>
+    <td><b>4 · Install.</b> Keep it or put everything back. Installing promotes or copies the checked system to your disk.</td>
+  </tr>
+</table>
+
+### Where the preview lives
+
+| Option | Touches your disks | Undo |
+|---|---|---|
+| **RAM** (compressed zram image) | No | Stop the VM |
+| **File** on any drive — USB stick, second disk, SD card | Writes one file | Delete the file |
+| **New partition** in unallocated space | Adds one partition entry | Remove the entry |
+| **Shrink** an NTFS/ext4 partition (dry run first) | Moves a partition boundary | Restore the boundary, grow the filesystem |
+| **Erase** the target disk | Yes | ⚠️ Irreversible |
+
+<details>
+<summary><b>Supported install targets</b></summary>
+
+- Filesystems: ext4, Btrfs, XFS, F2FS
+- Partition tables: GPT, or MBR (msdos) with GRUB on BIOS
+- Bootloaders: GRUB (BIOS/UEFI) or systemd-boot (UEFI), optionally signed for Secure Boot with your own keys
+- LUKS2 root encryption, zram swap, optional hibernation via a swap file (not on F2FS)
+- Alongside other systems: a preview partition on the target disk becomes the system without copying; any other preview is copied and verified by checksum. On MBR this needs two free primary entries.
+
+After installing, remove the stick and reboot — the first-boot check (`agi-os-verify`) opens in the new system.
+</details>
 
 ## Download
 
-The latest tested build from `main` is available in the
-[Live ISO workflow](https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml?query=branch%3Amain):
-open a successful run and download the **agi-os-iso** artifact. Extract the ZIP
-to get the ISO, its `.sha256` file, and `build-info.json`. GitHub requires you
-to sign in to download Actions artifacts, and these builds expire after seven
-days. Check the image after extraction:
+Signed releases are on the **[Releases page](https://github.com/ZeusKronid/agi-os/releases)**. Verify before writing the stick:
 
 ```sh
-sha256sum --check agi-os-*.iso.sha256
+python3 scripts/release/verify-iso.py agi-os-*.iso   # from a checkout of this repo
 ```
 
-Versioned, signed images are published on the
-[Releases page](https://github.com/ZeusKronid/agi-os/releases) from `v*` tags.
-The AGIOS release key fingerprint is
-`BA1D BAF6 09C7 6719 47DD A5E4 D1DF F581 C1F8 77D3`; the
-[public key](docs/agios-release-key.asc) is also in this repository. See
-[download and verification](docs/download.md) before using a release image.
+Release key fingerprint: `BA1D BAF6 09C7 6719 47DD A5E4 D1DF F581 C1F8 77D3`.
+Plain `gpg` steps are in [download and verification](docs/download.md).
 
-## Build
+Untested builds from `main` are attached to [Live ISO workflow runs](https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml?query=branch%3Amain) as the `agi-os-iso` artifact (GitHub sign-in required, kept for 7 days).
+
+> [!TIP]
+> In the Live session the desktop user `agi` has passwordless sudo: `sudo pacman -S <package>` works for the session and is gone after reboot.
+
+## Build from source
 
 ```sh
-sudo ./scripts/build-iso.sh          # or --prepare-only, then run mkarchiso as root
+sudo ./scripts/build-iso.sh        # → out/agi-os-<date>-x86_64.iso (~2 GB)
 ```
 
-A single ISO (`out/agi-os-<date>-x86_64.iso`, about 2 GB) is built by
-`mkarchiso` from the official `core` and `extra` repositories with package
-signature verification. The image includes the website, the Guacamole 1.6.0
-client from its official source release, and `guacd` from the pinned
-`guacamole/guacd:1.6.0` image (squashfs, started with `RootImage=`). The
-preview VM boots from the same media without a graphical desktop, so it does
-not need a second image. The build does not use the host's package cache or
-packages optimized for a particular CPU.
+One ISO built by `mkarchiso` from the official `core` and `extra` repositories with signature checks. It bundles the web workspace, the Guacamole 1.6.0 client and `guacd`; the preview VM boots headless from the same media. For reproducible builds, `scripts/ci/build-iso.sh` uses a pinned Arch container and an Arch Linux Archive snapshot — see [CI and builds](docs/ci.md).
 
-For reproducible CI builds, `scripts/ci/build-iso.sh` runs `mkarchiso` in a
-pinned, privileged Arch container (for CI or a disposable build VM, not a
-workstation). Packages come from one day of the Arch Linux Archive, specified
-in `scripts/ci/arch-snapshot`, and `SOURCE_DATE_EPOCH` is set to the commit
-time. CI places a `.sha256` file and `build-info.json` next to the ISO. GitHub
-Actions runs unit tests on every PR and builds the ISO with QEMU smoke boots
-(UEFI and BIOS) on `main`, on `v*` tags, and on PRs that change the image. See
-[CI and builds](docs/ci.md).
-
-## Use AGIOS
-
-The Live desktop user `agi` has passwordless sudo. To install an application for
-the current Live session, open a terminal and run `sudo pacman -S <package>`.
-Packages and other changes to the Live filesystem disappear after reboot;
-changes written to other drives persist. The installed system uses the user
-password you choose below for sudo.
-
-1. Boot the Live ISO. The website opens automatically.
-2. Connect a model through ChatGPT sign-in or an API provider.
-3. Describe your desktop, applications, and settings. The agent selects
-   packages from Core/Extra and proposes a configuration, which the
-   application validates.
-4. Choose **Find room for the preview**. The application calculates the system
-   size from package data and offers places to store the preview:
-   - in RAM as a compressed zram image, without touching disks;
-   - as a file on any drive with a filesystem (USB stick, another disk, or SD
-     card), where rollback removes the file;
-   - in a new partition in unallocated space, where rollback removes one
-     partition entry;
-   - by shrinking an NTFS/ext4 partition on the target disk, after a dry run
-     and separate confirmation, with rollback restoring the boundary and
-     growing the filesystem again;
-   - by erasing a disk now, only when you explicitly choose that irreversible
-     action.
-
-   Enter the user password and, optionally, a LUKS2 encryption password here.
-   Neither is sent to the agent.
-5. Wait while the internal VM installs packages, clears its cache between
-   batches, and boots the resulting system. Check the system in your browser.
-6. If it is not right, choose **Put it back**. Otherwise shut down the preview
-   system from inside it and choose **Install**. Select **Keep what’s on the
-   disk** or **Erase the disk**, then confirm the target disk.
-   - For a preview in a partition on the target disk, its nested partitions
-     become disk partitions without copying their data.
-   - For a preview in RAM or on another drive, files are copied into new
-     partitions and checked against their checksums.
-
-   The installer then rebuilds initramfs for the real hardware and registers
-   the bootloader.
-7. Remove the installation media and reboot. The installed system opens the
-   first-boot check (`agi-os-verify`).
-
-Storage options include ext4, Btrfs, XFS, and F2FS; GPT or MBR (msdos, BIOS
-with GRUB); GRUB (BIOS/UEFI) or systemd-boot (UEFI); LUKS2 for the root
-filesystem; and zram swap. Optional hibernation uses a swap file the size of
-RAM inside the root filesystem, resumes through initramfs, and is checked by
-`agi-os-verify --hibernate`. Hibernation is not available on F2FS.
-On an MBR disk, installation alongside other systems uses a copy from a
-preview in RAM or on another drive and needs two free primary partition
-entries. The installer does not create logical partitions.
-
-## Testing and development
+<details>
+<summary><b>Development</b></summary>
 
 ```sh
-python -B -m unittest discover -s tests -v
-.local/venv/bin/python -B -m unittest discover -s web/tests -v
+python -B -m unittest discover -s tests -v                       # installer engine
+.local/venv/bin/python -B -m unittest discover -s web/tests -v   # web workspace
 node --check web/static/app.js
-./scripts/run-live-web-vm.sh [--firmware bios] [--memory 16384]   # external test VM
-./scripts/run-live-web-vm.sh --mode disk                          # boot an installed disk
+
+./scripts/run-live-web-vm.sh [--firmware bios] [--memory 16384]  # Live ISO in a test VM
+./scripts/run-live-web-vm.sh --mode disk                         # boot the installed disk
 ```
 
-The shared installer engine is in
-`archiso/airootfs/usr/local/share/agi-os/installer/`; the website, preview
-storage, and finalization code are in `web/`. Test reports and screenshots are
-kept out of Git and shared separately.
+| Path | What |
+|---|---|
+| `archiso/airootfs/usr/local/share/agi-os/installer/` | Shared installer engine |
+| `web/` | Workspace server, preview storage, finalization |
+| `web/static/` | Workspace UI |
+| `site/` | Project website |
 
-[Live, preview, and finalization](docs/local-web.md) ·
-[Architecture](docs/installer-architecture.md) ·
-[Testing an installed system](docs/installation-testing.md) ·
-[Development model bridge](docs/development-bridge.md) ·
-[CI and builds](docs/ci.md) ·
-[Download and verification](docs/download.md)
+</details>
 
-## Licenses
+## Documentation
 
-The project is licensed under Apache-2.0 (`LICENSE`). The Archiso-based
-profile retains GPL-3.0-or-later (`archiso/LICENSE`). Guacamole and the other
-packages in the image retain their own licenses; the Guacamole LICENSE and
-NOTICE files are included in the Live ISO.
+- [Live, preview and finalization](docs/local-web.md)
+- [Installer architecture](docs/installer-architecture.md)
+- [Testing an installed system](docs/installation-testing.md)
+- [Development model bridge](docs/development-bridge.md)
+- [CI and builds](docs/ci.md)
+- [Download and verification](docs/download.md)
+
+## License
+
+Apache-2.0 ([LICENSE](LICENSE)). The Archiso-based profile keeps GPL-3.0-or-later ([archiso/LICENSE](archiso/LICENSE)). Guacamole and other packages in the image keep their own licenses; Guacamole's LICENSE and NOTICE ship in the Live ISO.
