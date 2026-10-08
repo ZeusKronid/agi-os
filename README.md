@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <sub><i>AGIOS reads as “AGI OS” — and as ἅγιος (hágios), Greek for “holy”.</i></sub>
+  <sub><i>AGIOS — from ἅγιος (hágios), Greek for “holy”.</i></sub>
 </p>
 
 <p align="center">
