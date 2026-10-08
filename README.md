@@ -8,6 +8,10 @@
 </p>
 
 <p align="center">
+  <sub><i>AGIOS reads as “AGI OS” — and as ἅγιος (hágios), Greek for “holy”.</i></sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/ZeusKronid/agi-os/releases"><img alt="Release" src="https://img.shields.io/github/v/release/ZeusKronid/agi-os?color=ff6a3d&labelColor=1f1a16"></a>
   <a href="https://github.com/ZeusKronid/agi-os/actions/workflows/iso.yml"><img alt="Live ISO" src="https://img.shields.io/github/actions/workflow/status/ZeusKronid/agi-os/iso.yml?branch=main&label=Live%20ISO&labelColor=1f1a16"></a>
   <a href="https://github.com/ZeusKronid/agi-os/actions/workflows/tests.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/ZeusKronid/agi-os/tests.yml?branch=main&label=tests&labelColor=1f1a16"></a>
