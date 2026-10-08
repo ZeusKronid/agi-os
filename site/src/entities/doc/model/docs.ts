@@ -1,7 +1,8 @@
 import { providers } from './pages/agents'
 import { vsArchinstall } from './pages/compare'
 import { agentAndPrivacy, liveEnvironment, reversiblePreview } from './pages/concepts'
-import { gettingStarted } from './pages/getting-started'
+import { download } from './pages/download'
+import { gettingStarted, stepByStep } from './pages/getting-started'
 import { contribute, faq } from './pages/more'
 import { disksAndBoot, previewPlacement } from './pages/storage'
 import type { DocChapter, DocChapterId, DocPage } from './types'
@@ -17,6 +18,8 @@ export const docChapters: readonly DocChapter[] = [
 /** Порядок = порядок чтения и карточек «Previous / Next». */
 export const docPages: readonly DocPage[] = [
   gettingStarted,
+  download,
+  stepByStep,
   liveEnvironment,
   reversiblePreview,
   agentAndPrivacy,

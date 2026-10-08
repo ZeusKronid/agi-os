@@ -136,7 +136,7 @@ export function InstallRoute() {
             <div className="col-span-2 flex flex-wrap gap-3 sm:col-span-1">
               <Link
                 to="/docs/$slug"
-                params={{ slug: 'getting-started' }}
+                params={{ slug: 'step-by-step' }}
                 hash="connect"
                 className={buttonStyles({ variant: 'outline', size: 'sm' })}
               >
