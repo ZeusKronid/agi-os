@@ -13,7 +13,7 @@ export const siteConfig = {
   name: 'AGI OS',
   /** Канонический origin: из него строятся canonical, og:url, sitemap и JSON-LD. */
   url: 'https://agios.complexity.solutions',
-  title: 'AGI OS — Agentic Linux: Describe It, Try It Live, Install',
+  title: 'AGI OS — Agentic Arch Linux: Describe It, Try It Live, Install',
   description:
     'AGI OS is an Arch Linux live ISO with an AI agent inside. Describe the system you want in plain words, try it in a live preview, then install it.',
   /** Картинка превью для соцсетей и мессенджеров, 1200×630. */

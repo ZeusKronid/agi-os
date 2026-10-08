@@ -42,7 +42,7 @@ export function Hero() {
             <span className="inline-block motion-safe:animate-rise motion-safe:[animation-delay:180ms]">Linux.</span>
           </h1>
           <p className="mt-[clamp(14px,2.2vh,24px)] font-mono text-[length:clamp(11px,0.95vw,13.5px)] tracking-[0.36em] text-ink-muted uppercase motion-safe:animate-rise motion-safe:[animation-delay:520ms] max-sm:leading-[1.7] max-sm:tracking-[0.2em]">
-            Infrastructure for a more capable tomorrow.
+            Describe it, try it live, install.
           </p>
           <div className="mt-[clamp(22px,3.4vh,34px)] flex flex-wrap justify-center gap-5 motion-safe:animate-rise motion-safe:[animation-delay:620ms] max-sm:gap-3">
             <Link
