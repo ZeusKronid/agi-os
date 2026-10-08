@@ -47,7 +47,22 @@ const groups: readonly { title: string; links: readonly FooterLink[] }[] = [
   },
 ]
 
-const WORDMARK = ['A', 'G', 'I', 'O', 'S'] as const
+// Wordmark AGIOS — знак из шапки (`shared/ui/logo`), линии которого обведены в контуры (толщина 34, квадратные
+// концы, острые стыки): у букв есть заливка Canvas и тонкий контур, как у силуэтов. Внутренние контуры A и O — дыры
+// (evenodd), сквозь них видно солнце.
+const WORDMARK = [
+  { letter: 'A', d: 'M62.5 292 L307.5 292 L185 47 Z M117.5 258 L185 123 L252.5 258 Z' },
+  {
+    letter: 'G',
+    d: 'M299.7 179.3 L487 313 L487 173 L398 173 L398 207 L453 207 L453 247 L360.3 180.7 L493.5 95.1 L475.1 66.5 Z',
+  },
+  { letter: 'I', d: 'M548 73 L548 292 L582 292 L582 73 Z' },
+  { letter: 'O', d: 'M760 61 L641 180 L760 299 L879 180 Z M760 109 L831 180 L760 251 L689 180 Z' },
+  {
+    letter: 'S',
+    d: 'M905.1 155.3 L1035.8 215.6 L922.2 272.4 L937.4 302.8 L1114.2 214.4 L984.9 154.7 L1102.7 97.9 L1087.9 67.3 Z',
+  },
+] as const
 
 // Закат: страница открывается восходом в hero и закрывается здесь. Сверху — ссылки по задачам, под ними
 // сцена заката: живой восход на горизонте за огромным wordmark AGIOS, буквы — тёмные силуэты с контуром.
@@ -130,20 +145,24 @@ export function SiteFooter() {
           Back to sunrise
         </a>
 
-        {/* Декоративный wordmark: единственное место логотипного шрифта. Буквы — силуэты: солнце садится за них. */}
-        <p
+        {/* Декоративный wordmark: буквы — силуэты, солнце садится за них. Верх A (y 47) — горизонт, 0.66 кегля над
+            низом сцены (240 единиц viewBox = 0.66 кегля); сверху запас 22 единицы под подъём на hover (0.05 кегля
+            ≈ 18 единиц), снизу viewBox обрезает буквы, как раньше нижний край обрезал шрифт. */}
+        <svg
           aria-hidden="true"
-          className="absolute inset-x-0 bottom-0 z-20 flex justify-center overflow-hidden select-none"
+          viewBox="60 25 1057 260"
+          className="absolute bottom-0 left-1/2 z-20 h-[calc(var(--fs)*0.715)] -translate-x-1/2 select-none"
         >
-          {WORDMARK.map((letter) => (
-            <span
+          {WORDMARK.map(({ letter, d }) => (
+            <path
               key={letter}
-              className="-mb-[0.1em] block font-logo text-(length:--fs) leading-[0.78] font-bold tracking-[-0.02em] text-canvas transition-[translate,-webkit-text-stroke-color] duration-[450ms] ease-out-strong [-webkit-text-stroke:1px_rgb(255_255_255/0.18)] hover:-translate-y-[0.05em] hover:[-webkit-text-stroke-color:var(--color-accent)]"
-            >
-              {letter}
-            </span>
+              d={d}
+              fillRule="evenodd"
+              vectorEffect="non-scaling-stroke"
+              className="fill-canvas stroke-white/18 stroke-1 transition-[translate,stroke] duration-[450ms] ease-out-strong hover:stroke-accent hover:[translate:0_-18px]"
+            />
           ))}
-        </p>
+        </svg>
       </div>
     </footer>
   )

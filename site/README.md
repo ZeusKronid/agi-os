@@ -177,8 +177,8 @@ GSAP. Не задавайте их на узле, который трансфо�
   latin-ext и symbols2) и подключаются через `app/styles/fonts.css`. Google Fonts не используются: их CSS
   блокировал первую отрисовку. Vite хеширует файлы, поэтому они кешируются навсегда; шрифты первого экрана
   (Newsreader и Geist latin) предзагружаются в `app/routes/__root.tsx`.
-- `app/styles/fonts/DalekPinpointBold.ttf` — логотипный шрифт (K-Type), используется только в wordmark футера.
-  Перед публичным запуском проверьте условия лицензии: http://www.k-type.com/licences
+- Логотипного шрифта нет: wordmark в футере — SVG-знак из `shared/ui/logo`, обведённый в контуры. Новые шрифты
+  добавлять только с лицензией на веб-использование (OFL и подобные).
 - Иконки агентов и GitHub — контуры Simple Icons (CC0) в `entities/agent/model/marks.ts` и
   `shared/ui/icon`. Товарные знаки принадлежат владельцам и обозначают только совместимость.
 - В `shared/config/site.ts` ссылки `download` и `donate` пока ведут на репозиторий (помечены TODO).
